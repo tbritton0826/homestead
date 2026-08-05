@@ -24434,40 +24434,71 @@ function LibrarySettingsCard({ icon, title, enabled, onToggle, children }) {
 
 
 const DEFAULT_HOMESTEAD_STATION_CONFIG = {
+  configured: false,
   enabled: false,
-  deviceName: "Dell Control Station",
-  stationType: "shared-household",
-  room: "Main Household",
+  deviceName: "",
+  stationType: "standard-desktop",
+  room: "",
   defaultProfileId: "",
-  maintenancePin: "7312",
+  maintenancePin: "",
   controlBarOpacity: 72,
   workspaces: [
     { id: "homestead", name: "Homestead", icon: "⌂", url: "", enabled: true },
-    { id: "unraid", name: "Unraid", icon: "▣", url: "https://tower", enabled: true },
-    { id: "cameras", name: "Cameras", icon: "◉", url: "", enabled: true },
+    { id: "unraid", name: "Unraid", icon: "▣", url: "", enabled: false },
+    { id: "cameras", name: "Cameras", icon: "◉", url: "", enabled: false },
   ],
   tools: {
     refresh: true,
     fullscreen: true,
-    print: true,
-    cast: true,
-    scan: true,
+    print: false,
+    cast: false,
+    scan: false,
     keyboard: true,
     maintenance: true,
   },
 };
 
+function createFreshHomesteadStationConfig() {
+  return {
+    ...DEFAULT_HOMESTEAD_STATION_CONFIG,
+    workspaces: DEFAULT_HOMESTEAD_STATION_CONFIG.workspaces.map((workspace) => ({ ...workspace })),
+    tools: { ...DEFAULT_HOMESTEAD_STATION_CONFIG.tools },
+  };
+}
+
 function normalizeHomesteadStationConfig(value = {}) {
   const storedWorkspaces = Array.isArray(value?.workspaces) ? value.workspaces : [];
   const defaultWorkspaces = DEFAULT_HOMESTEAD_STATION_CONFIG.workspaces;
+
+  const hasLegacyConfiguration = Boolean(
+    value?.deviceName ||
+    value?.room ||
+    value?.maintenancePin ||
+    value?.enabled ||
+    storedWorkspaces.some((workspace) =>
+      workspace?.url ||
+      workspace?.enabled === true && workspace?.id !== "homestead"
+    )
+  );
+
   return {
-    ...DEFAULT_HOMESTEAD_STATION_CONFIG,
+    ...createFreshHomesteadStationConfig(),
     ...value,
+    configured: value?.configured ?? hasLegacyConfiguration,
     workspaces: defaultWorkspaces.map((fallback) => ({
       ...fallback,
       ...(storedWorkspaces.find((item) => item?.id === fallback.id) || {}),
     })),
-    controlBarOpacity: Math.max(0, Math.min(100, Number(value?.controlBarOpacity ?? DEFAULT_HOMESTEAD_STATION_CONFIG.controlBarOpacity))),
+    controlBarOpacity: Math.max(
+      0,
+      Math.min(
+        100,
+        Number(
+          value?.controlBarOpacity ??
+          DEFAULT_HOMESTEAD_STATION_CONFIG.controlBarOpacity
+        )
+      )
+    ),
     tools: {
       ...DEFAULT_HOMESTEAD_STATION_CONFIG.tools,
       ...(value?.tools || {}),
@@ -24477,29 +24508,378 @@ function normalizeHomesteadStationConfig(value = {}) {
 
 function loadHomesteadStationConfig() {
   try {
-    return normalizeHomesteadStationConfig(JSON.parse(localStorage.getItem("homestead-station-config") || "{}"));
+    return normalizeHomesteadStationConfig(
+      JSON.parse(localStorage.getItem("homestead-station-config") || "{}")
+    );
   } catch {
-    return normalizeHomesteadStationConfig();
+    return createFreshHomesteadStationConfig();
   }
 }
 
+function StationSetupWizard({ stationConfig, setStationConfig }) {
+  const [step, setStep] = useState(1);
+
+  const update = (patch) => {
+    setStationConfig((current) =>
+      normalizeHomesteadStationConfig({ ...current, ...patch })
+    );
+  };
+
+  const updateWorkspace = (id, patch) => {
+    update({
+      workspaces: stationConfig.workspaces.map((workspace) =>
+        workspace.id === id ? { ...workspace, ...patch } : workspace
+      ),
+    });
+  };
+
+  const finishSetup = () => {
+    update({
+      configured: true,
+      enabled: stationConfig.stationType !== "standard-desktop",
+      deviceName: stationConfig.deviceName.trim() || "Homestead Station",
+      room: stationConfig.room.trim() || "Household",
+    });
+  };
+
+  return (
+    <section className="panel station-manager-settings station-setup-wizard">
+      <div className="panel-header station-manager-heading">
+        <div>
+          <span className="settings-kicker">Device Setup</span>
+          <h3>Set Up This Device</h3>
+          <p>
+            Configure this browser as a desktop, touchscreen station,
+            wall display, or shared household kiosk.
+          </p>
+        </div>
+        <span className="station-wizard-progress">Step {step} of 4</span>
+      </div>
+
+      <div className="station-settings-section">
+        {step === 1 && (
+          <>
+            <div className="station-settings-section-heading">
+              <div>
+                <strong>Device identity</strong>
+                <span>Name this device and choose how it will be used.</span>
+              </div>
+            </div>
+
+            <div className="station-settings-grid">
+              <label className="settings-field">
+                <span>Device name</span>
+                <input
+                  value={stationConfig.deviceName}
+                  placeholder="Kitchen Display"
+                  onChange={(event) => update({ deviceName: event.target.value })}
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>Room or location</span>
+                <input
+                  value={stationConfig.room}
+                  placeholder="Kitchen"
+                  onChange={(event) => update({ room: event.target.value })}
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>Station type</span>
+                <select
+                  value={stationConfig.stationType}
+                  onChange={(event) => update({ stationType: event.target.value })}
+                >
+                  <option value="standard-desktop">Standard Desktop</option>
+                  <option value="shared-household">Shared Household Kiosk</option>
+                  <option value="wall-display">Wall Display</option>
+                  <option value="touchscreen-control">Touchscreen Control Station</option>
+                  <option value="server-control">Server Control Station</option>
+                  <option value="workshop">Workshop Station</option>
+                  <option value="child-room">Child Room Station</option>
+                  <option value="teen-room">Teen Room Station</option>
+                  <option value="private-adult">Private Adult Station</option>
+                </select>
+              </label>
+            </div>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <div className="station-settings-section-heading">
+              <div>
+                <strong>Workspaces</strong>
+                <span>Select the destinations available from this station.</span>
+              </div>
+            </div>
+
+            <div className="station-workspace-editor-list">
+              {stationConfig.workspaces.map((workspace) => (
+                <div className="station-workspace-editor" key={workspace.id}>
+                  <label className="station-workspace-enabled">
+                    <input
+                      type="checkbox"
+                      checked={workspace.enabled !== false}
+                      disabled={workspace.id === "homestead"}
+                      onChange={(event) =>
+                        updateWorkspace(workspace.id, {
+                          enabled: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <input
+                    className="station-workspace-icon-input"
+                    value={workspace.icon}
+                    aria-label={`${workspace.name} icon`}
+                    onChange={(event) =>
+                      updateWorkspace(workspace.id, {
+                        icon: event.target.value.slice(0, 3),
+                      })
+                    }
+                  />
+
+                  <input
+                    value={workspace.name}
+                    aria-label="Workspace name"
+                    onChange={(event) =>
+                      updateWorkspace(workspace.id, {
+                        name: event.target.value,
+                      })
+                    }
+                  />
+
+                  <input
+                    value={workspace.url}
+                    disabled={workspace.id === "homestead"}
+                    aria-label={`${workspace.name} URL`}
+                    placeholder={
+                      workspace.id === "homestead"
+                        ? "Current Homestead app"
+                        : "https://..."
+                    }
+                    onChange={(event) =>
+                      updateWorkspace(workspace.id, {
+                        url: event.target.value,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <div className="station-settings-section-heading">
+              <div>
+                <strong>Display and security</strong>
+                <span>Choose kiosk behavior and maintenance access.</span>
+              </div>
+            </div>
+
+            <div className="station-settings-grid">
+              <label className="settings-field station-opacity-setting">
+                <span>Control bar transparency</span>
+                <div className="station-range-control">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={100 - stationConfig.controlBarOpacity}
+                    onChange={(event) =>
+                      update({
+                        controlBarOpacity: 100 - Number(event.target.value),
+                      })
+                    }
+                  />
+                  <strong>{100 - stationConfig.controlBarOpacity}%</strong>
+                </div>
+                <small>
+                  0% is solid. Higher values reveal more of the page underneath.
+                </small>
+              </label>
+
+              <label className="settings-field">
+                <span>Maintenance PIN</span>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={stationConfig.maintenancePin}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    update({
+                      maintenancePin: event.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, 12),
+                    })
+                  }
+                />
+                <small>
+                  Used to exit a restricted kiosk. Leave blank for unrestricted access.
+                </small>
+              </label>
+            </div>
+
+            <div className="station-settings-section">
+              <div className="station-settings-section-heading">
+                <div>
+                  <strong>Tools menu</strong>
+                  <span>Select utilities available on this device.</span>
+                </div>
+              </div>
+
+              <div className="station-tools-grid">
+                {[
+                  ["refresh", "↻", "Refresh"],
+                  ["fullscreen", "⛶", "Fullscreen"],
+                  ["print", "▤", "Print"],
+                  ["cast", "▻", "Cast"],
+                  ["scan", "▧", "Scan"],
+                  ["keyboard", "⌨", "Keyboard"],
+                  ["maintenance", "⚙", "Maintenance"],
+                ].map(([id, icon, label]) => (
+                  <label className="station-tool-toggle" key={id}>
+                    <input
+                      type="checkbox"
+                      checked={stationConfig.tools[id] !== false}
+                      onChange={(event) =>
+                        update({
+                          tools: {
+                            ...stationConfig.tools,
+                            [id]: event.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    <span>{icon}</span>
+                    <strong>{label}</strong>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {step === 4 && (
+          <>
+            <div className="station-settings-section-heading">
+              <div>
+                <strong>Review</strong>
+                <span>Confirm this station before saving it to this browser.</span>
+              </div>
+            </div>
+
+            <div className="settings-card selected">
+              <div className="settings-card-body">
+                <p><strong>Device:</strong> {stationConfig.deviceName || "Homestead Station"}</p>
+                <p><strong>Location:</strong> {stationConfig.room || "Household"}</p>
+                <p><strong>Type:</strong> {stationConfig.stationType}</p>
+                <p>
+                  <strong>Workspaces:</strong>{" "}
+                  {stationConfig.workspaces
+                    .filter((workspace) => workspace.enabled !== false)
+                    .map((workspace) => workspace.name)
+                    .join(", ")}
+                </p>
+                <p>
+                  <strong>Maintenance PIN:</strong>{" "}
+                  {stationConfig.maintenancePin ? "Configured" : "Not configured"}
+                </p>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="station-settings-actions">
+        {step > 1 && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setStep((current) => current - 1)}
+          >
+            Back
+          </button>
+        )}
+
+        {step < 4 ? (
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => setStep((current) => current + 1)}
+          >
+            Continue
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="primary-button"
+            onClick={finishSetup}
+          >
+            Save This Station
+          </button>
+        )}
+
+        <span>Configuration is stored only in this browser.</span>
+      </div>
+    </section>
+  );
+}
+
 function StationManagerSettings({ stationConfig, setStationConfig }) {
-  const update = (patch) => setStationConfig((current) => normalizeHomesteadStationConfig({ ...current, ...patch }));
-  const updateWorkspace = (id, patch) => update({
-    workspaces: stationConfig.workspaces.map((workspace) => workspace.id === id ? { ...workspace, ...patch } : workspace),
-  });
-  const updateTool = (id, enabled) => update({ tools: { ...stationConfig.tools, [id]: enabled } });
+  const update = (patch) =>
+    setStationConfig((current) =>
+      normalizeHomesteadStationConfig({ ...current, ...patch })
+    );
+
+  const updateWorkspace = (id, patch) =>
+    update({
+      workspaces: stationConfig.workspaces.map((workspace) =>
+        workspace.id === id ? { ...workspace, ...patch } : workspace
+      ),
+    });
+
+  const updateTool = (id, enabled) =>
+    update({
+      tools: {
+        ...stationConfig.tools,
+        [id]: enabled,
+      },
+    });
+
+  if (!stationConfig.configured) {
+    return (
+      <StationSetupWizard
+        stationConfig={stationConfig}
+        setStationConfig={setStationConfig}
+      />
+    );
+  }
 
   return (
     <section className="panel station-manager-settings">
       <div className="panel-header station-manager-heading">
         <div>
-          <span className="settings-kicker">Future Devices Expansion</span>
+          <span className="settings-kicker">Device Configuration</span>
           <h3>Station Manager</h3>
-          <p>Configure this browser as the first Homestead appliance-style station. The Dell kiosk remains the Version 1 prototype.</p>
+          <p>
+            Manage this browser’s Homestead station, workspaces,
+            kiosk controls, and available tools.
+          </p>
         </div>
+
         <label className="station-enable-toggle">
-          <input type="checkbox" checked={stationConfig.enabled} onChange={(event) => update({ enabled: event.target.checked })} />
+          <input
+            type="checkbox"
+            checked={stationConfig.enabled}
+            onChange={(event) => update({ enabled: event.target.checked })}
+          />
           <span>{stationConfig.enabled ? "Kiosk enabled" : "Desktop mode"}</span>
         </label>
       </div>
@@ -24507,12 +24887,22 @@ function StationManagerSettings({ stationConfig, setStationConfig }) {
       <div className="station-settings-grid">
         <label className="settings-field">
           <span>Device name</span>
-          <input value={stationConfig.deviceName} onChange={(event) => update({ deviceName: event.target.value })} />
+          <input
+            value={stationConfig.deviceName}
+            onChange={(event) => update({ deviceName: event.target.value })}
+          />
         </label>
+
         <label className="settings-field">
           <span>Station type</span>
-          <select value={stationConfig.stationType} onChange={(event) => update({ stationType: event.target.value })}>
+          <select
+            value={stationConfig.stationType}
+            onChange={(event) => update({ stationType: event.target.value })}
+          >
+            <option value="standard-desktop">Standard Desktop</option>
             <option value="shared-household">Shared Household Kiosk</option>
+            <option value="wall-display">Wall Display</option>
+            <option value="touchscreen-control">Touchscreen Control Station</option>
             <option value="server-control">Server Control Station</option>
             <option value="workshop">Workshop Station</option>
             <option value="child-room">Child Room Station</option>
@@ -24520,14 +24910,32 @@ function StationManagerSettings({ stationConfig, setStationConfig }) {
             <option value="private-adult">Private Adult Station</option>
           </select>
         </label>
+
         <label className="settings-field">
-          <span>Room</span>
-          <input value={stationConfig.room} onChange={(event) => update({ room: event.target.value })} />
+          <span>Room or location</span>
+          <input
+            value={stationConfig.room}
+            onChange={(event) => update({ room: event.target.value })}
+          />
         </label>
+
         <label className="settings-field">
           <span>Maintenance PIN</span>
-          <input type="password" inputMode="numeric" value={stationConfig.maintenancePin} onChange={(event) => update({ maintenancePin: event.target.value.replace(/\D/g, "").slice(0, 12) })} />
+          <input
+            type="password"
+            inputMode="numeric"
+            value={stationConfig.maintenancePin}
+            placeholder="Optional"
+            onChange={(event) =>
+              update({
+                maintenancePin: event.target.value
+                  .replace(/\D/g, "")
+                  .slice(0, 12),
+              })
+            }
+          />
         </label>
+
         <label className="settings-field station-opacity-setting">
           <span>Control bar transparency</span>
           <div className="station-range-control">
@@ -24537,58 +24945,146 @@ function StationManagerSettings({ stationConfig, setStationConfig }) {
               max="100"
               step="1"
               value={100 - stationConfig.controlBarOpacity}
-              onChange={(event) => update({ controlBarOpacity: 100 - Number(event.target.value) })}
+              onChange={(event) =>
+                update({
+                  controlBarOpacity: 100 - Number(event.target.value),
+                })
+              }
             />
             <strong>{100 - stationConfig.controlBarOpacity}%</strong>
           </div>
-          <small>0% is solid. 100% lets the page background show through completely.</small>
+          <small>
+            0% is solid. 100% lets the page background show through completely.
+          </small>
         </label>
       </div>
 
       <div className="station-settings-section">
         <div className="station-settings-section-heading">
-          <div><strong>Workspaces</strong><span>These become the large permanent buttons on the kiosk bar.</span></div>
+          <div>
+            <strong>Workspaces</strong>
+            <span>These become the permanent buttons on the kiosk bar.</span>
+          </div>
         </div>
+
         <div className="station-workspace-editor-list">
           {stationConfig.workspaces.map((workspace) => (
             <div className="station-workspace-editor" key={workspace.id}>
-              <label className="station-workspace-enabled"><input type="checkbox" checked={workspace.enabled !== false} onChange={(event) => updateWorkspace(workspace.id, { enabled: event.target.checked })} /></label>
-              <input className="station-workspace-icon-input" value={workspace.icon} aria-label={`${workspace.name} icon`} onChange={(event) => updateWorkspace(workspace.id, { icon: event.target.value.slice(0, 3) })} />
-              <input value={workspace.name} aria-label="Workspace name" onChange={(event) => updateWorkspace(workspace.id, { name: event.target.value })} />
-              <input value={workspace.url} aria-label={`${workspace.name} URL`} placeholder={workspace.id === "homestead" ? "Current Homestead app" : "https://..."} onChange={(event) => updateWorkspace(workspace.id, { url: event.target.value })} />
+              <label className="station-workspace-enabled">
+                <input
+                  type="checkbox"
+                  checked={workspace.enabled !== false}
+                  disabled={workspace.id === "homestead"}
+                  onChange={(event) =>
+                    updateWorkspace(workspace.id, {
+                      enabled: event.target.checked,
+                    })
+                  }
+                />
+              </label>
+
+              <input
+                className="station-workspace-icon-input"
+                value={workspace.icon}
+                aria-label={`${workspace.name} icon`}
+                onChange={(event) =>
+                  updateWorkspace(workspace.id, {
+                    icon: event.target.value.slice(0, 3),
+                  })
+                }
+              />
+
+              <input
+                value={workspace.name}
+                aria-label="Workspace name"
+                onChange={(event) =>
+                  updateWorkspace(workspace.id, {
+                    name: event.target.value,
+                  })
+                }
+              />
+
+              <input
+                value={workspace.url}
+                disabled={workspace.id === "homestead"}
+                aria-label={`${workspace.name} URL`}
+                placeholder={
+                  workspace.id === "homestead"
+                    ? "Current Homestead app"
+                    : "https://..."
+                }
+                onChange={(event) =>
+                  updateWorkspace(workspace.id, {
+                    url: event.target.value,
+                  })
+                }
+              />
             </div>
           ))}
         </div>
       </div>
 
       <div className="station-settings-section">
-        <div className="station-settings-section-heading"><div><strong>Tools menu</strong><span>Choose which utilities appear on this station.</span></div></div>
+        <div className="station-settings-section-heading">
+          <div>
+            <strong>Tools menu</strong>
+            <span>Choose which utilities appear on this station.</span>
+          </div>
+        </div>
+
         <div className="station-tools-grid">
           {[
-            ["refresh", "↻", "Refresh"], ["fullscreen", "⛶", "Fullscreen"], ["print", "▤", "Print"],
-            ["cast", "▻", "Cast"], ["scan", "▧", "Scan"], ["keyboard", "⌨", "Keyboard"], ["maintenance", "⚙", "Maintenance"],
+            ["refresh", "↻", "Refresh"],
+            ["fullscreen", "⛶", "Fullscreen"],
+            ["print", "▤", "Print"],
+            ["cast", "▻", "Cast"],
+            ["scan", "▧", "Scan"],
+            ["keyboard", "⌨", "Keyboard"],
+            ["maintenance", "⚙", "Maintenance"],
           ].map(([id, icon, label]) => (
             <label className="station-tool-toggle" key={id}>
-              <input type="checkbox" checked={stationConfig.tools[id] !== false} onChange={(event) => updateTool(id, event.target.checked)} />
-              <span>{icon}</span><strong>{label}</strong>
+              <input
+                type="checkbox"
+                checked={stationConfig.tools[id] !== false}
+                onChange={(event) => updateTool(id, event.target.checked)}
+              />
+              <span>{icon}</span>
+              <strong>{label}</strong>
             </label>
           ))}
         </div>
       </div>
 
       <div className="station-settings-actions">
-        <button type="button" className="primary-button" onClick={() => {
-          const url = new URL(window.location.href);
-          url.searchParams.set("mode", "kiosk");
-          window.location.href = url.toString();
-        }}>Launch Kiosk Mode</button>
-        <button type="button" className="secondary-button" onClick={() => setStationConfig(normalizeHomesteadStationConfig())}>Reset Station</button>
+        <button
+          type="button"
+          className="primary-button"
+          onClick={() => {
+            const url = new URL(window.location.href);
+            url.searchParams.set("mode", "kiosk");
+            window.location.href = url.toString();
+          }}
+        >
+          Launch Kiosk Mode
+        </button>
+
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => {
+            if (!window.confirm("Reset this browser’s station configuration?")) return;
+            localStorage.removeItem("homestead-station-config");
+            setStationConfig(createFreshHomesteadStationConfig());
+          }}
+        >
+          Reset and Run Setup Again
+        </button>
+
         <span>Changes save automatically in this browser.</span>
       </div>
     </section>
   );
 }
-
 function KioskTopBar({ stationConfig, activeLibrary, setActiveLibrary, onAdd, onScan, onOpenNavigation, onOpenActivity, activityCount = 0 }) {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [status, setStatus] = useState("");
