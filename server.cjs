@@ -31,7 +31,7 @@ const {
 } = require("./src/components/livetv/livetv.cjs");
 
 const app = express();
-const PORT = 3001;
+const PORT = 7312;
 const dataDir = path.join(__dirname, "data");
 const installedPluginsDir = path.join(dataDir, "installed-plugins");
 const pluginDataDir = path.join(dataDir, "plugin-data");

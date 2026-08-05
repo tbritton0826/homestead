@@ -17,6 +17,6 @@ COPY . .
 
 RUN npm run build
 
-EXPOSE 3001
+EXPOSE 7312
 
 CMD ["node", "server.cjs"]

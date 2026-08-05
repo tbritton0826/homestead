@@ -5,7 +5,7 @@ services:
     container_name: homestead
 
     ports:
-      - "3001:3001"
+      - "7312:7312"
 
     volumes:
       - ./media:/app/media
