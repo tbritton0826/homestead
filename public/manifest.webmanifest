@@ -1,0 +1,44 @@
+{
+  "name": "Homestead",
+  "short_name": "Homestead",
+  "description": "Homestead private media, profiles, cloud, and home dashboard.",
+  "id": "/?source=pwa",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#070a12",
+  "theme_color": "#4361ff",
+  "categories": ["entertainment", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/homestead-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "Open the Homestead dashboard.",
+      "url": "/?view=dashboard",
+      "icons": [{ "src": "/homestead-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Profiles",
+      "short_name": "Profiles",
+      "description": "Open profile libraries.",
+      "url": "/?view=profiles",
+      "icons": [{ "src": "/homestead-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    }
+  ]
+}

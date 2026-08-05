@@ -1,0 +1,31 @@
+node_modules
+dist
+.git
+.env
+
+npm-debug.log
+
+Dockerfile.old
+docker-compose.old.yml
+
+.vscode
+.idea
+
+coverage
+
+# Runtime state and user media must never enter a public image context.
+data
+media
+config
+uploads
+backups
+
+# Private modules and legacy copies excluded from the public build.
+src/data/campusBuildings.js
+src/data/campusDistricts.js
+src/data/tierConfig.js
+
+# Local audit/source bundles.
+*.tar
+*.tar.gz
+homestead-tree*.txt

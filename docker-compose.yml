@@ -1,0 +1,15 @@
+services:
+  homestead:
+    build: .
+
+    container_name: homestead
+
+    ports:
+      - "3001:3001"
+
+    volumes:
+      - ./media:/app/media
+      - ./data:/app/data
+      - ./config:/app/config
+
+    restart: unless-stopped
