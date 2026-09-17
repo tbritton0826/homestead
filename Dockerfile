@@ -6,8 +6,7 @@ LABEL org.opencontainers.image.source="https://github.com/tbritton0826/homestead
 LABEL org.opencontainers.image.title="Homestead"
 LABEL org.opencontainers.image.version="${HOMESTEAD_VERSION}"
 
-ENV NODE_ENV=production \
-    PORT=7312 \
+ENV PORT=7312 \
     MEDIA_ROOT=/media \
     HOMESTEAD_DATA_DIR=/app/data
 
@@ -36,6 +35,8 @@ RUN npm ci
 COPY . .
 RUN npm run build
 RUN npm prune --omit=dev
+
+ENV NODE_ENV=production
 
 EXPOSE 7312
 
