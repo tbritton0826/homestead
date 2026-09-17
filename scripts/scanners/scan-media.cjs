@@ -316,10 +316,18 @@ function ensureDir(dir) {
 }
 
 function splitRelativeParts(libraryId, fullPath) {
-  const libraryDir = getLibraryDirs(libraryId)[0];
+  const resolvedFullPath = path.resolve(fullPath);
+  const libraryDirs = getLibraryDirs(libraryId).map((dir) => path.resolve(dir));
+
+  const libraryDir = libraryDirs.find((dir) =>
+    resolvedFullPath === dir ||
+    resolvedFullPath.startsWith(dir + path.sep)
+  ) || libraryDirs[0];
+
+  if (!libraryDir) return [];
 
   return path
-    .relative(libraryDir, fullPath)
+    .relative(libraryDir, resolvedFullPath)
     .replaceAll("\\", "/")
     .split("/")
     .filter(Boolean);
@@ -572,19 +580,51 @@ function readJsonIfExists(filePath) {
   }
 }
 
+function extractLibraryIdentityYear(value = "") {
+  const text = String(value || "");
+  return text.match(/[([]\s*((?:19|20)\d{2})\s*[)\]]/)?.[1]
+    || text.match(/(?:^|[\s._-])((?:19|20)\d{2})(?:$|[\s._-])/)?.[1]
+    || "";
+}
+
+function stripLibraryIdentityYear(value = "") {
+  return String(value || "")
+    .replace(/[([]\s*(?:19|20)\d{2}\s*[)\]]/g, " ")
+    .replace(/(?:^|[\s._-])(?:19|20)\d{2}(?=$|[\s._-])/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizeLibraryItemKey(libraryId, value) {
+  // movie-folder-identity-v2
+  // A movie folder is the title identity boundary. Preserve title numbers and
+  // release years (for example Wonder Woman 1984 (2020)); filename quality
+  // tokens are handled inside the folder as alternate files, not identities.
+  if (libraryId === "movies") {
+    return String(value || "")
+      .normalize("NFC")
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || String(value || "unknown").toLowerCase();
+  }
+  const identityYear = extractLibraryIdentityYear(value);
   const raw = String(value || "")
     .replace(/\.[^.]+$/, "")
-    .replace(/\(\s*\d{4}\s*\)/g, "")
-    .replace(/\[\s*\d{4}\s*\]/g, "")
+    .replace(/[([]\s*(?:19|20)\d{2}\s*[)\]]/g, "")
+    .replace(/(?:^|[\s._-])(?:19|20)\d{2}(?=$|[\s._-])/g, " ")
     .replace(/\b(1080p|720p|2160p|4k|uhd|hdr|dv|bluray|web[- .]?dl|webrip|brrip|x264|x265|h264|h265)\b/gi, "")
     .trim();
 
-  return raw
+  const normalized = raw
     .toLowerCase()
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "") || String(value || "unknown").toLowerCase();
+
+  // A remake is a distinct TV library entity, not another folder for the
+  // original series (for example Charmed 1998 and Charmed 2018).
+  return libraryId === "tv" && identityYear ? `${normalized}-${identityYear}` : normalized;
 }
 
 function uniqueByPath(files = []) {
@@ -764,6 +804,14 @@ const status = metadataFile.status || metadata.relationshipStatus || null;
 
   const allFiles = (await walkFiles(entityDir)).filter((file) => {
     const lower = file.name.toLowerCase();
+    const isNestedAlbumArtwork = libraryId === "music" &&
+      path.dirname(String(file.sourcePath || "")) !== path.resolve(entityDir) &&
+      /^(?:cover|folder|front|album|albumart)\.(?:jpe?g|png|webp)$/i.test(lower);
+
+    // Artist-level cover files are represented by entity.poster above, while
+    // album-folder covers must stay in the file index so every album and song
+    // can reuse its own local art.
+    if (isNestedAlbumArtwork) return true;
 
     return ![
       "metadata.json",
@@ -1055,6 +1103,27 @@ const scannedEntity =
 const mergeKey = normalizeLibraryItemKey(libraryId, entry.name);
 scannedEntity.id = entities[mergeKey]?.id || mergeKey;
 scannedEntity.folderName = entry.name;
+if (libraryId === "tv") {
+  scannedEntity.libraryKey = `tv:${mergeKey}`;
+  scannedEntity.folderYear = extractLibraryIdentityYear(entry.name);
+  scannedEntity.displayTitle = stripLibraryIdentityYear(entry.name) || entry.name;
+  scannedEntity.metadata = {
+    ...(scannedEntity.metadata || {}),
+    folderYear: scannedEntity.folderYear,
+    libraryKey: scannedEntity.libraryKey,
+  };
+}
+if (libraryId === "movies") {
+  scannedEntity.libraryKey = `movies:${mergeKey}`;
+  scannedEntity.folderYear = extractLibraryIdentityYear(entry.name);
+  scannedEntity.displayTitle = stripLibraryIdentityYear(entry.name) || entry.name;
+  scannedEntity.metadata = {
+    ...(scannedEntity.metadata || {}),
+    folderYear: scannedEntity.folderYear,
+    libraryKey: scannedEntity.libraryKey,
+    sourceFolderName: entry.name,
+  };
+}
 scannedEntity.folderNames = Array.from(
   new Set([...(entities[mergeKey]?.folderNames || []), entry.name])
 );
@@ -1067,8 +1136,99 @@ entities[mergeKey] = mergeScannedEntities(entities[mergeKey], scannedEntity);
 }
 
 
+function cleanYouTubeArchiveTitle(value = "") {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    .replace(/\.(mkv|mp4|m4v|mov|avi|webm)$/i, "")
+    .replace(/^\s*\[(?:[^\]]+)\]\s*/, "")
+    .replace(/^\s*S\d{1,3}E\d{1,4}\s*[-–:·]?\s*/i, "")
+    .replace(/^\s*(?:episode|ep)\s*\d+\s*[-–:·]?\s*/i, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function existingYouTubeSidecar(video = {}) {
+  const sourcePath = String(video.sourcePath || video.path || video.publicPath || video.file || "").replace(/^file:\/\//i, "");
+  if (!sourcePath || !fs.existsSync(sourcePath)) return "";
+  const directory = path.dirname(sourcePath);
+  const stem = path.basename(sourcePath, path.extname(sourcePath));
+  const videoId = String(video.youtubeId || video.videoId || video.metadata?.youtubeId || "").trim();
+  const names = [
+    `${stem}.jpg`, `${stem}.jpeg`, `${stem}.png`, `${stem}.webp`,
+    videoId && `${videoId}.jpg`, videoId && `${videoId}.webp`,
+    "thumbnail.jpg", "thumbnail.webp", "episode-thumbnail.jpg", "episode-thumbnail.webp",
+  ].filter(Boolean);
+  return names.map((name) => path.join(directory, name)).find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+function normalizeYouTubeVideo(video = {}, creator = {}) {
+  const metadata = video.metadata && typeof video.metadata === "object" ? video.metadata : {};
+  const rawTitle = metadata.title || video.title || video.name || video.filename || video.file || "Untitled video";
+  const cleanTitle = cleanYouTubeArchiveTitle(rawTitle) || cleanYouTubeArchiveTitle(video.filename || video.file) || "Untitled video";
+  const thumbnail = [
+    video.thumb,
+    video.thumbnail,
+    video.thumbnailUrl,
+    video.thumbnailPath,
+    video.sidecarThumbnail,
+    metadata.thumb,
+    metadata.thumbnail,
+    metadata.thumbnailUrl,
+    metadata.vid_thumb_url,
+    existingYouTubeSidecar(video),
+  ].find((value) => String(value || "").trim()) || "";
+  const releaseDate = [
+    video.releaseDate,
+    video.publishedAt,
+    video.uploadDate,
+    video.date,
+    metadata.releaseDate,
+    metadata.publishedAt,
+    metadata.published,
+    metadata.uploadDate,
+  ].find((value) => String(value || "").trim()) || "";
+  return {
+    ...video,
+    title: cleanTitle,
+    displayTitle: cleanTitle,
+    creatorId: video.creatorId || creator.id || "",
+    creatorName: video.creatorName || creator.name || creator.title || "",
+    thumb: thumbnail,
+    thumbnail,
+    releaseDate,
+    publishedAt: video.publishedAt || metadata.publishedAt || metadata.published || releaseDate,
+    metadata,
+  };
+}
+
+function findYouTubeCreatorArtwork(creator = {}, videos = [], kind = "poster") {
+  const direct = kind === "banner"
+    ? [creator.banner, creator.backdrop, creator.metadata?.banner, creator.metadata?.channel_banner_url]
+    : [creator.poster, creator.thumbnail, creator.thumb, creator.metadata?.poster, creator.metadata?.thumbnail, creator.metadata?.channel_thumb_url];
+  const saved = direct.find((value) => String(value || "").trim());
+  if (saved) return saved;
+  const firstPath = String(videos[0]?.sourcePath || videos[0]?.path || videos[0]?.file || "").replace(/^file:\/\//i, "");
+  if (!firstPath) return null;
+  let directory = path.dirname(firstPath);
+  const candidates = kind === "banner"
+    ? ["banner.jpg", "banner.jpeg", "banner.png", "banner.webp", "channel-banner.jpg", "channel-banner.webp"]
+    : ["poster.jpg", "poster.jpeg", "poster.png", "poster.webp", "channel.jpg", "channel.webp", "avatar.jpg", "avatar.webp"];
+  for (let depth = 0; depth < 6; depth += 1) {
+    const found = candidates.map((name) => path.join(directory, name)).find((candidate) => fs.existsSync(candidate));
+    if (found) return found;
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return null;
+}
+
 function normalizeYouTubeCreatorFromIndex(creatorId, creator = {}) {
-  const videos = Array.isArray(creator.videos) ? creator.videos : [];
+  const rawVideos = Array.isArray(creator.videos) ? creator.videos : [];
+  const videos = rawVideos.map((video) => normalizeYouTubeVideo(video, { ...creator, id: creator.id || creatorId }));
   const videoCount = Number(creator.videoCount) || videos.length || 0;
 
   return {
@@ -1078,8 +1238,8 @@ function normalizeYouTubeCreatorFromIndex(creatorId, creator = {}) {
     name: creator.name || creator.title || creatorId,
     title: creator.title || creator.name || creatorId,
     description: creator.description || creator.metadata?.description || "",
-    poster: creator.poster || creator.thumbnail || null,
-    banner: creator.banner || creator.backdrop || null,
+    poster: findYouTubeCreatorArtwork(creator, videos, "poster"),
+    banner: findYouTubeCreatorArtwork(creator, videos, "banner"),
     channelId: creator.channelId || creator.channel_id || creator.metadata?.channelId || creator.metadata?.channel_id || "",
     youtubeUrl: creator.youtubeUrl || creator.channel_url || creator.metadata?.youtubeUrl || creator.metadata?.channel_url || "",
     metadata: creator.metadata || {},
@@ -1353,25 +1513,35 @@ async function scanSelectedLibraries() {
   return { index, targetLibraries };
 }
 
-(async () => {
-  const { index, targetLibraries } = await scanSelectedLibraries();
+module.exports = {
+  extractLibraryIdentityYear,
+  stripLibraryIdentityYear,
+  normalizeLibraryItemKey,
+  cleanYouTubeArchiveTitle,
+  normalizeYouTubeVideo,
+};
 
-  fs.mkdirSync(dataRoot, { recursive: true });
+if (require.main === module) {
+  (async () => {
+    const { index, targetLibraries } = await scanSelectedLibraries();
 
-  fs.writeFileSync(
-    mediaIndexPath,
-    JSON.stringify(index, null, 2)
-  );
+    fs.mkdirSync(dataRoot, { recursive: true });
 
-  console.log("Media index generated:");
-  console.log(mediaIndexPath);
-
-  for (const libraryId of targetLibraries) {
-    const count = Object.keys(index.libraries?.[libraryId] || {}).length;
-    const summary = index.scanHistory?.[libraryId];
-    console.log(
-      `${libraryId}: ${count} item(s)` +
-      (summary ? `, ${summary.newItemCount} new, ${summary.removedItemCount} removed` : "")
+    fs.writeFileSync(
+      mediaIndexPath,
+      JSON.stringify(index, null, 2)
     );
-  }
-})();
+
+    console.log("Media index generated:");
+    console.log(mediaIndexPath);
+
+    for (const libraryId of targetLibraries) {
+      const count = Object.keys(index.libraries?.[libraryId] || {}).length;
+      const summary = index.scanHistory?.[libraryId];
+      console.log(
+        `${libraryId}: ${count} item(s)` +
+        (summary ? `, ${summary.newItemCount} new, ${summary.removedItemCount} removed` : "")
+      );
+    }
+  })();
+}

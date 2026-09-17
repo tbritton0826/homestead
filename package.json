@@ -1,7 +1,7 @@
 {
   "name": "homestead",
   "private": true,
-  "version": "0.1.0-beta",
+  "version": "0.6.8.64",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,12 @@
     "import:performer": "node scripts/importers/performer-importer/import-performer.js",
     "rebuild:indexes": "node scripts/maintenance/rebuild-indexes.js",
     "migrate:library": "node scripts/maintenance/migrate-library.js",
-    "metadata:movies": "node scripts/metadata/fetch-movie-metadata.cjs"
+    "metadata:movies": "node scripts/metadata/fetch-movie-metadata.cjs",
+    "test:adult": "node scripts/test-adult-recommendations.cjs && node scripts/test-theporndb-rest-pass.cjs && node scripts/test-adult-metadata-service.cjs && node scripts/test-async-timeout.cjs && node scripts/test-activity-jobs.cjs && node scripts/test-adult-source-packs.cjs && node scripts/test-person-discovery-pass.cjs && node scripts/test-adult-metadata-coverage.cjs && node scripts/test-unified-profile-overlay-pass.cjs",
+    "test:requests": "node scripts/test-request-search-again-pass.cjs",
+    "test:free-preview": "node scripts/test-free-preview-release.cjs && node scripts/test-subscription-entitlements-pass.cjs",
+    "test:docker-release": "node scripts/test-docker-community-release.cjs",
+    "test:full-pass": "node scripts/test-full-public-pass.cjs && node scripts/test-0.6.8.40-pass.cjs && node scripts/test-0.6.8.41-pass.cjs && node scripts/test-0.6.8.42-pass.cjs && node scripts/test-0.6.8.43-pass.cjs && node scripts/test-0.6.8.44-pass.cjs && node scripts/test-0.6.8.45-pass.cjs && node scripts/test-0.6.8.46-pass.cjs && node scripts/test-0.6.8.47-pass.cjs && node scripts/test-0.6.8.48-pass.cjs && node scripts/test-0.6.8.49-pass.cjs && node scripts/test-0.6.8.50-pass.cjs && node scripts/test-0.6.8.51-pass.cjs && node scripts/test-0.6.8.52-pass.cjs && node scripts/test-0.6.8.53-pass.cjs && node scripts/test-0.6.8.54-pass.cjs && node scripts/test-0.6.8.55-pass.cjs && node scripts/test-0.6.8.56-pass.cjs && node scripts/test-0.6.8.57-pass.cjs && node scripts/test-0.6.8.58-pass.cjs && node scripts/test-0.6.8.59-pass.cjs && node scripts/test-0.6.8.60-pass.cjs && node scripts/test-0.6.8.61-pass.cjs && node scripts/test-0.6.8.62-pass.cjs && node scripts/test-0.6.8.63-pass.cjs && node scripts/test-0.6.8.64-pass.cjs && node scripts/test-family-profile-tree-pass.cjs && node scripts/test-performer-thenude-pass.cjs && node scripts/test-recommendation-body-enrichment-pass.cjs && node scripts/test-quick-instruction-edit-poster-pass.cjs && node scripts/test-deferred-adult-source-pass.cjs && node scripts/test-schedule-personal-list-pass.cjs && node scripts/test-calendar-event-edit-pass.cjs && node scripts/test-calendar-sources-pass.cjs && node scripts/test-plugin-host-ui-pass.cjs && node scripts/test-plugin-runtime-compatibility-pass.cjs && node scripts/test-subscription-entitlements-pass.cjs"
   },
   "dependencies": {
     "@fullcalendar/daygrid": "^6.1.20",

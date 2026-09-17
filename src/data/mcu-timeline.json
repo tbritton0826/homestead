@@ -1,0 +1,623 @@
+[
+  {
+    "id": "pre-2000s",
+    "title": "Pre-2000s Era",
+    "range": "1943 - 1995",
+    "entries": [
+      {
+        "title": "Eyes of Wakanda",
+        "detail": "Season 1",
+        "date": "Antiquity - 1943",
+        "type": "tv"
+      },
+      {
+        "title": "Captain America: The First Avenger",
+        "date": "1943-1945",
+        "type": "movie"
+      },
+      {
+        "title": "Agent Carter",
+        "detail": "Season 1",
+        "date": "1946",
+        "type": "tv"
+      },
+      {
+        "title": "Agent Carter",
+        "detail": "Season 2",
+        "date": "1947",
+        "type": "tv"
+      },
+      {
+        "title": "Marvel One-Shot: Agent Carter",
+        "date": "1946",
+        "type": "special"
+      },
+      {
+        "title": "Captain Marvel",
+        "date": "1995",
+        "type": "movie"
+      }
+    ]
+  },
+  {
+    "id": "phase-1",
+    "title": "Phase 1: The Infinity Saga Begins",
+    "range": "2008 - 2012",
+    "entries": [
+      {
+        "title": "Iron Man",
+        "date": "2008",
+        "type": "movie"
+      },
+      {
+        "title": "Iron Man 2",
+        "date": "2010",
+        "type": "movie"
+      },
+      {
+        "title": "The Incredible Hulk",
+        "date": "2008",
+        "type": "movie"
+      },
+      {
+        "title": "The Consultant",
+        "detail": "One-Shot",
+        "type": "special"
+      },
+      {
+        "title": "A Funny Thing Happened On The Way To Thor's Hammer",
+        "detail": "One-Shot",
+        "type": "special"
+      },
+      {
+        "title": "Thor",
+        "date": "2011",
+        "type": "movie"
+      },
+      {
+        "title": "The Avengers",
+        "date": "2012",
+        "type": "movie"
+      },
+      {
+        "title": "Item 47",
+        "detail": "One-Shot",
+        "type": "special"
+      }
+    ]
+  },
+  {
+    "id": "phase-2",
+    "title": "Phase 2: Expanding Horizons",
+    "range": "2013 - 2015",
+    "entries": [
+      {
+        "title": "Iron Man 3",
+        "date": "2013",
+        "type": "movie"
+      },
+      {
+        "title": "All Hail the King",
+        "detail": "One-Shot",
+        "type": "special"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 1 Episodes 1-7",
+        "date": "2013",
+        "type": "tv"
+      },
+      {
+        "title": "Thor: The Dark World",
+        "date": "2013",
+        "type": "movie"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 1 Episodes 8-16",
+        "date": "2013-2014",
+        "type": "tv"
+      },
+      {
+        "title": "Captain America: The Winter Soldier",
+        "date": "2014",
+        "type": "movie"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 1 Episodes 17-22",
+        "date": "2014",
+        "type": "tv"
+      },
+      {
+        "title": "Guardians of the Galaxy",
+        "date": "2014",
+        "type": "movie"
+      },
+      {
+        "title": "Guardians of the Galaxy Vol. 2",
+        "date": "2017",
+        "type": "movie"
+      },
+      {
+        "title": "I Am Groot",
+        "detail": "Shorts",
+        "date": "2022-2023",
+        "type": "tv"
+      },
+      {
+        "title": "Daredevil",
+        "detail": "Season 1",
+        "date": "2015",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 2 Episodes 1-10",
+        "date": "2014-2015",
+        "type": "tv"
+      },
+      {
+        "title": "Jessica Jones",
+        "detail": "Season 1",
+        "date": "2015",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 2 Episodes 11-19",
+        "date": "2015",
+        "type": "tv"
+      },
+      {
+        "title": "Avengers: Age of Ultron",
+        "date": "2015",
+        "type": "movie"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 2 Episodes 20-22",
+        "date": "2015",
+        "type": "tv"
+      },
+      {
+        "title": "Ant-Man",
+        "date": "2015",
+        "type": "movie"
+      }
+    ]
+  },
+  {
+    "id": "phase-3",
+    "title": "Phase 3: Civil War to Endgame",
+    "range": "2016 - 2019",
+    "entries": [
+      {
+        "title": "Daredevil",
+        "detail": "Season 2",
+        "date": "2016",
+        "type": "tv"
+      },
+      {
+        "title": "Luke Cage",
+        "detail": "Season 1",
+        "date": "2016",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 3",
+        "date": "2015-2016",
+        "type": "tv"
+      },
+      {
+        "title": "Iron Fist",
+        "detail": "Season 1",
+        "date": "2017",
+        "type": "tv"
+      },
+      {
+        "title": "The Defenders",
+        "date": "2017",
+        "type": "tv"
+      },
+      {
+        "title": "Captain America: Civil War",
+        "date": "2016",
+        "type": "movie"
+      },
+      {
+        "title": "Black Widow",
+        "date": "2021",
+        "type": "movie"
+      },
+      {
+        "title": "Black Panther",
+        "date": "2018",
+        "type": "movie"
+      },
+      {
+        "title": "Inhumans",
+        "detail": "Season 1",
+        "date": "2017",
+        "type": "tv"
+      },
+      {
+        "title": "Spider-Man: Homecoming",
+        "date": "2017",
+        "type": "movie"
+      },
+      {
+        "title": "The Punisher",
+        "detail": "Season 1",
+        "date": "2017",
+        "type": "tv"
+      },
+      {
+        "title": "Doctor Strange",
+        "date": "2016",
+        "type": "movie"
+      },
+      {
+        "title": "Cloak & Dagger",
+        "detail": "Season 1",
+        "date": "2018",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 4",
+        "date": "2016-2017",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.: Slingshot",
+        "date": "2016",
+        "type": "tv"
+      },
+      {
+        "title": "Jessica Jones",
+        "detail": "Season 2",
+        "date": "2018",
+        "type": "tv"
+      },
+      {
+        "title": "Luke Cage",
+        "detail": "Season 2",
+        "date": "2018",
+        "type": "tv"
+      },
+      {
+        "title": "Iron Fist",
+        "detail": "Season 2",
+        "date": "2018",
+        "type": "tv"
+      },
+      {
+        "title": "Runaways",
+        "detail": "Seasons 1-3",
+        "date": "2017-2019",
+        "type": "tv"
+      },
+      {
+        "title": "Daredevil",
+        "detail": "Season 3",
+        "date": "2018",
+        "type": "tv"
+      },
+      {
+        "title": "Cloak & Dagger",
+        "detail": "Season 2",
+        "date": "2019",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 5",
+        "date": "2017-2018",
+        "type": "tv"
+      },
+      {
+        "title": "Thor: Ragnarok",
+        "date": "2017",
+        "type": "movie"
+      },
+      {
+        "title": "The Punisher",
+        "detail": "Season 2",
+        "date": "2019",
+        "type": "tv"
+      },
+      {
+        "title": "Jessica Jones",
+        "detail": "Season 3",
+        "date": "2019",
+        "type": "tv"
+      },
+      {
+        "title": "Ant-Man and the Wasp",
+        "date": "2018",
+        "type": "movie"
+      },
+      {
+        "title": "Avengers: Infinity War",
+        "date": "2018",
+        "type": "movie"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 6",
+        "date": "2019",
+        "type": "tv"
+      },
+      {
+        "title": "Agents of S.H.I.E.L.D.",
+        "detail": "Season 7",
+        "date": "2020",
+        "type": "tv"
+      },
+      {
+        "title": "Helstrom",
+        "detail": "Season 1",
+        "date": "2020",
+        "type": "tv"
+      },
+      {
+        "title": "Avengers: Endgame",
+        "date": "2019",
+        "type": "movie"
+      }
+    ]
+  },
+  {
+    "id": "phase-4",
+    "title": "Phase 4: Multiverse Saga Begins",
+    "range": "2021 - 2022",
+    "entries": [
+      {
+        "title": "Loki",
+        "detail": "Season 1",
+        "date": "2021",
+        "type": "tv"
+      },
+      {
+        "title": "What If...?",
+        "detail": "Season 1",
+        "date": "2021",
+        "type": "tv"
+      },
+      {
+        "title": "Marvel Zombies",
+        "detail": "Season 1",
+        "date": "2025",
+        "type": "tv"
+      },
+      {
+        "title": "WandaVision",
+        "date": "2021",
+        "type": "tv"
+      },
+      {
+        "title": "Shang-Chi and the Legend of the Ten Rings",
+        "date": "2021",
+        "type": "movie"
+      },
+      {
+        "title": "The Falcon and the Winter Soldier",
+        "date": "2021",
+        "type": "tv"
+      },
+      {
+        "title": "Spider-Man: Far From Home",
+        "date": "2019",
+        "type": "movie"
+      },
+      {
+        "title": "Spider-Man: No Way Home",
+        "date": "2021",
+        "type": "movie"
+      },
+      {
+        "title": "Eternals",
+        "date": "2021",
+        "type": "movie"
+      },
+      {
+        "title": "Doctor Strange in the Multiverse of Madness",
+        "date": "2022",
+        "type": "movie"
+      },
+      {
+        "title": "Hawkeye",
+        "date": "2021",
+        "type": "tv"
+      },
+      {
+        "title": "Moon Knight",
+        "date": "2022",
+        "type": "tv"
+      },
+      {
+        "title": "Black Panther: Wakanda Forever",
+        "date": "2022",
+        "type": "movie"
+      },
+      {
+        "title": "Echo",
+        "date": "2024",
+        "type": "tv"
+      },
+      {
+        "title": "She-Hulk: Attorney at Law",
+        "detail": "Episodes 1-9",
+        "date": "2022",
+        "type": "tv"
+      },
+      {
+        "title": "Ironheart",
+        "detail": "Season 1",
+        "date": "2025",
+        "type": "tv"
+      },
+      {
+        "title": "Ms. Marvel",
+        "date": "2022",
+        "type": "tv"
+      },
+      {
+        "title": "Thor: Love and Thunder",
+        "date": "2022",
+        "type": "movie"
+      },
+      {
+        "title": "Werewolf By Night",
+        "detail": "Special Presentation",
+        "type": "special"
+      },
+      {
+        "title": "The Guardians of the Galaxy Holiday Special",
+        "detail": "Special Presentation",
+        "type": "special"
+      }
+    ]
+  },
+  {
+    "id": "phase-5",
+    "title": "Phase 5: Expanding the Multiverse",
+    "range": "2023 - 2025",
+    "entries": [
+      {
+        "title": "Ant-Man and the Wasp: Quantumania",
+        "date": "2023",
+        "type": "movie"
+      },
+      {
+        "title": "Guardians of the Galaxy Vol. 3",
+        "date": "2023",
+        "type": "movie"
+      },
+      {
+        "title": "Daredevil: Born Again",
+        "detail": "Season 1",
+        "date": "2025",
+        "type": "tv"
+      },
+      {
+        "title": "Secret Invasion",
+        "date": "2023",
+        "type": "tv"
+      },
+      {
+        "title": "The Marvels",
+        "date": "2023",
+        "type": "movie"
+      },
+      {
+        "title": "Loki",
+        "detail": "Season 2",
+        "date": "2023",
+        "type": "tv"
+      },
+      {
+        "title": "What If...?",
+        "detail": "Seasons 2-3",
+        "date": "2023-2024",
+        "type": "tv"
+      },
+      {
+        "title": "Deadpool & Wolverine",
+        "date": "2024",
+        "type": "movie"
+      },
+      {
+        "title": "Agatha All Along",
+        "date": "2024",
+        "type": "tv"
+      },
+      {
+        "title": "Your Friendly Neighborhood Spider-Man",
+        "detail": "Season 1",
+        "date": "2025",
+        "type": "tv"
+      },
+      {
+        "title": "Captain America: Brave New World",
+        "date": "2025",
+        "type": "movie"
+      },
+      {
+        "title": "Thunderbolts*",
+        "date": "2025",
+        "type": "movie"
+      },
+      {
+        "title": "The Fantastic Four: First Steps",
+        "date": "2025",
+        "type": "movie"
+      },
+      {
+        "title": "Wonder Man",
+        "detail": "Airing new episodes",
+        "type": "tv"
+      }
+    ]
+  },
+  {
+    "id": "phase-6",
+    "title": "Phase 6: Multiverse Finale",
+    "range": "2026 - 2027",
+    "entries": [
+      {
+        "title": "VisionQuest",
+        "detail": "Upcoming",
+        "date": "2026",
+        "type": "tv"
+      },
+      {
+        "title": "Spider-Man: Brand New Day",
+        "detail": "Upcoming",
+        "date": "July 2026",
+        "type": "movie"
+      },
+      {
+        "title": "Avengers: Doomsday",
+        "detail": "Upcoming",
+        "date": "Dec 2026",
+        "type": "movie"
+      },
+      {
+        "title": "Avengers: Secret Wars",
+        "detail": "Upcoming",
+        "date": "Dec 2027",
+        "type": "movie"
+      }
+    ]
+  },
+  {
+    "id": "sony-fox",
+    "title": "Connected Multiverse Branches",
+    "range": "Sony / Fox / Legacy universes",
+    "entries": [
+      {
+        "title": "Sony's Spider-Man Universe",
+        "detail": "Connected via No Way Home",
+        "type": "collection"
+      },
+      {
+        "title": "Sam Raimi's Spider-Man",
+        "detail": "Earth-96283",
+        "type": "collection"
+      },
+      {
+        "title": "The Amazing Spider-Man",
+        "detail": "Earth-120703",
+        "type": "collection"
+      },
+      {
+        "title": "Fox X-Men Universe",
+        "detail": "Earth-10005",
+        "type": "collection"
+      }
+    ]
+  }
+]

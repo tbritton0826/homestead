@@ -1,0 +1,6 @@
+services:
+  homestead:
+    build:
+      context: .
+      args:
+        HOMESTEAD_VERSION: "0.6.8.64"

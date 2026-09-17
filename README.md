@@ -1,60 +1,18 @@
-# Homestead
+# Homestead Free Preview
 
-Homestead is a self-hosted household management and personal library platform designed to bring the digital and physical parts of your home together in one unified interface.
+Homestead is a self-hosted digital home for local media and personal archives.
+This public preview is intended for fresh installations on a trusted network.
 
-It provides a central place to organize media, family profiles, pets, calendars, recipes, documents, household inventory, cloud resources, and other personal collections.
+Free includes Movies, TV, Music, Books, locally archived YouTube, local search,
+playback, watchlists, collections, watch orders, and progress. It supports one
+owner and one active stream. Paid-plan areas remain locked and do not require a
+placeholder account or trial.
 
-Homestead is designed for privacy, local ownership, customization, and Docker-based deployment, including planned installation through Unraid Community Applications.
+See `INSTALL.md` for Windows, Docker, Linux, and Unraid instructions.
 
-## Current Status
+The standard Docker install pulls `ghcr.io/tbritton0826/homestead:latest`.
+Release automation and a separate, submission-ready Unraid Community Apps
+metadata repository are included for maintainers.
 
-Homestead is currently in active development and preparing for its first public release. Features, installation requirements, and data structures may change before version 1.0.
-
-## Features
-
-- Movies and television libraries
-- Live TV
-- Music, books, and YouTube collections
-- Family and personal profiles
-- Family tree
-- Pet profiles
-- Calendar and recipes
-- Household inventory
-- Electronics, tools, collectibles, and trading cards
-- Documents and manuals
-- Cloud resource organization
-- Optional adult library
-- Optional AI integrations
-- Desktop, mobile, and touchscreen kiosk interfaces
-- Modular plugin support
-
-## Deployment
-
-Homestead is designed to run as a Docker container.
-
-Planned installation methods include:
-
-- Unraid Community Applications
-- Docker Compose
-- Standard Docker installations
-
-## Privacy
-
-Homestead is intended to be self-hosted. User profiles, databases, credentials, media, documents, and personal configuration should remain in persistent storage outside the application source and Docker image.
-
-No personal content should be committed to this repository.
-
-## Project Status
-
-Current public-release work includes:
-
-- Fresh-install validation
-- Docker image publishing
-- Unraid Community Applications packaging
-- Documentation
-- Interface refinement
-- Plugin-system development
-
-## License
-
-Licensing information will be added before the first public release.
+This is development software. Back up persistent data before updating. Homestead
+does not provide media or grant rights to obtain, copy, or distribute content.

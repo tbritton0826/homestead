@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container version="2">
+  <Name>Homestead</Name>
+  <Repository>ghcr.io/tbritton0826/homestead:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/tbritton0826/homestead-community-apps/issues</Support>
+  <Project>https://gethomesteadapp.com</Project>
+  <Overview>Homestead is a self-hosted digital home for local movies, TV, music, books, archived YouTube, collections, watch orders, progress, and personal archives. This listing installs the free preview for one owner and one active stream.</Overview>
+  <Description>Homestead organizes and plays your local media in one private, self-hosted interface. The free preview includes Movies, TV, Music, Books, locally archived YouTube, search, playback, watchlists, collections, watch orders, and progress. Keep the AppData path backed up before updating. Homestead does not provide media or grant rights to obtain, copy, or distribute content.</Description>
+  <Category>MediaApp:Other</Category>
+  <ExtraSearchTerms>personal media server movies tv music books youtube self-hosted</ExtraSearchTerms>
+  <WebUI>http://[IP]:[PORT:7312]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/tbritton0826/homestead-community-apps/main/templates/homestead.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/tbritton0826/homestead-community-apps/main/icon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <Config Name="Web UI" Target="7312" Default="7312" Mode="tcp" Description="Homestead web interface port." Type="Port" Display="always" Required="true" Mask="false">7312</Config>
+  <Config Name="AppData" Target="/app/data" Default="/mnt/user/appdata/homestead" Mode="rw" Description="Persistent Homestead database, settings, indexes, and generated metadata. Back up this folder before updates." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/homestead</Config>
+  <Config Name="Movies" Target="/media/movies" Default="/mnt/user/Movies" Mode="rw" Description="Your Movies share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/Movies</Config>
+  <Config Name="TV Shows" Target="/media/tv" Default="/mnt/user/TV" Mode="rw" Description="Your TV share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/TV</Config>
+  <Config Name="Music" Target="/media/music" Default="/mnt/user/Music" Mode="rw" Description="Your Music share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/Music</Config>
+  <Config Name="Books" Target="/media/books" Default="/mnt/user/Books" Mode="rw" Description="Your Books share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/Books</Config>
+  <Config Name="YouTube" Target="/media/youtube" Default="/mnt/user/YouTube" Mode="rw" Description="Your locally archived YouTube share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/YouTube</Config>
+  <Config Name="Public origin" Target="HOMESTEAD_PUBLIC_ORIGIN" Default="" Mode="" Description="Optional HTTPS public origin used only behind a correctly configured reverse proxy." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Time zone" Target="TZ" Default="America/New_York" Mode="" Description="IANA time zone used for dates and schedules." Type="Variable" Display="advanced" Required="false" Mask="false">America/New_York</Config>
+</Container>

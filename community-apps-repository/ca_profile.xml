@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CommunityApplications>
+  <Profile>Official Unraid Community Apps templates for Homestead, a self-hosted digital home for local media and personal archives. Support and product information are available from the Homestead website and repository.</Profile>
+  <Icon>https://raw.githubusercontent.com/tbritton0826/homestead-community-apps/main/icon.svg</Icon>
+  <WebPage>https://gethomesteadapp.com</WebPage>
+  <Forum>https://github.com/tbritton0826/homestead-community-apps/issues</Forum>
+</CommunityApplications>

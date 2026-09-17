@@ -1,0 +1,10 @@
+services:
+  homestead:
+    container_name: homestead-free-preview
+    volumes:
+      - ./media:/media
+      - /mnt/user/Movies:/media/movies:ro
+      - /mnt/user/TV:/media/tv:ro
+      - /mnt/user/Music:/media/music:ro
+      - /mnt/user/Books:/media/books:ro
+      - /mnt/user/YouTube:/media/youtube:ro

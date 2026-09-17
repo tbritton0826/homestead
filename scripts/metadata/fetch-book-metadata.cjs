@@ -95,6 +95,7 @@ function normalizeGoogleBook(item = {}) {
 
 async function fetchJson(url, headers = {}) {
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
     headers: {
       Accept: "application/json",
       "User-Agent": "Homestead/1.0 (metadata-fetch)",
@@ -121,7 +122,7 @@ async function fetchJson(url, headers = {}) {
 async function searchOpenLibrary(query, options = {}) {
   const limit = Number(options.limit || 12);
   const encodedQuery = strictEncodeQuery(query);
-  const url = `https://openlibrary.org/search.json?q=${encodedQuery}&limit=${limit}`;
+  const url = `https://openlibrary.org/search.json?q=${encodedQuery}&limit=${limit}&fields=key,title,author_name,first_publish_year,cover_i,isbn,subject,edition_key`;
   const data = await fetchJson(url);
   const docs = Array.isArray(data?.docs) ? data.docs : [];
 

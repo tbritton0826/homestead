@@ -1,0 +1,25 @@
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const root = path.resolve(__dirname, "..");
+const app = fs.readFileSync(path.join(root, "src", "App.jsx"), "utf8");
+const css = fs.readFileSync(path.join(root, "src", "App.css"), "utf8");
+const server = fs.readFileSync(path.join(root, "server.cjs"), "utf8");
+const next = fs.readFileSync(path.join(root, "src", "server", "next-version.cjs"), "utf8");
+const pkg = require(path.join(root, "package.json"));
+const { parseBillOcrText } = require(path.join(root, "src", "server", "bill-recognition.cjs"));
+
+assert.equal(pkg.version, "0.6.8.64");
+assert(app.includes('id: "add-bill"') && app.includes("function BillImportModal"), "Bill intake wizard is missing.");
+assert(server.includes('/api/calendar/bill-preview') && server.includes("parseBillOcrText"), "Bill recognition route is missing.");
+const bill = parseBillOcrText("Xfinity\nAmount Due: $142.37\nDue Date September 25, 2026", new Date("2026-09-12T12:00:00"));
+assert.equal(bill.provider, "Xfinity / Comcast");
+assert.equal(bill.amount, "142.37");
+assert.equal(bill.dueDate, "2026-09-25");
+assert(server.includes("calendarCanViewEvent") && server.includes("calendarCanEditEvent") && server.includes('/api/calendar/audience'), "Server-enforced event audience checks are missing.");
+assert(next.includes("householdId") && app.includes("Household sharing group"), "Explicit household account grouping is missing.");
+assert(app.includes("Only me") && app.includes("Selected people") && app.includes("Everyone with Calendar access"), "Event visibility choices are missing.");
+assert(app.includes("calendarSourceTitleFormats") && app.includes("Series title only") && server.includes("seriesTitle"), "Sonarr display-format controls are missing.");
+assert(app.includes('usePerDeviceFocusMode("calendar")') && app.includes('usePerDeviceFocusMode("recipes")'), "Per-device focus modes are missing.");
+assert(css.includes(".calendar-focus-mode") && css.includes(".recipe-cooking-mode"), "Focus-mode layout styles are missing.");
+console.log("Homestead 0.6.8.52 Sonarr titles, focus modes, bill recognition, and calendar privacy checks passed.");

@@ -1,15 +1,16 @@
 services:
   homestead:
-    build: .
-
+    image: "${HOMESTEAD_IMAGE:-ghcr.io/tbritton0826/homestead}:${HOMESTEAD_TAG:-latest}"
     container_name: homestead
-
     ports:
-      - "7312:7312"
-
+      - "${HOMESTEAD_PORT:-7312}:7312"
+    environment:
+      NODE_ENV: "production"
+      PORT: "7312"
+      MEDIA_ROOT: /media
+      HOMESTEAD_DATA_DIR: /app/data
+      HOMESTEAD_PUBLIC_ORIGIN: "${HOMESTEAD_PUBLIC_ORIGIN:-}"
     volumes:
-      - ./media:/app/media
+      - ./media:/media
       - ./data:/app/data
-      - ./config:/app/config
-
     restart: unless-stopped

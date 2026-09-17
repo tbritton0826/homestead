@@ -1,12 +1,44 @@
 const { createPluginRegistry } = require("./plugins/registry.cjs");
 const { createPluginInstaller } = require("./plugins/installer.cjs");
+const { registerNextVersionRoutes } = require("./src/server/next-version.cjs");
+const { createSubscriptionService } = require("./src/server/subscription-entitlements.cjs");
+const {
+  normalizePreferences: normalizeStructuredAdultRecommendationPreferences,
+  normalizeCandidate: normalizeStructuredAdultRecommendationCandidate,
+  evaluateCandidate: evaluateStructuredAdultRecommendationCandidate,
+  discoverStructuredRecommendations,
+  fetchStructuredProvider: fetchStructuredAdultRecommendationProvider,
+} = require("./src/server/adult-recommendations.cjs");
+const {
+  normalizeEffectiveAt: normalizeAdultMetadataEffectiveAt,
+  buildChanges: buildAdultMetadataChanges,
+  buildTimelineEntries: buildAdultMetadataTimelineEntries,
+  atomicWriteJson,
+  createRevertPatch: createAdultMetadataRevertPatch,
+} = require("./src/server/adult-metadata-service.cjs");
+const { normalizeTimeoutMs, runWithTimeout } = require("./src/server/async-timeout.cjs");
+const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
+const { parseTesseractTsv, tsvToReadableText, parsePersonalScheduleText, parsePositionedSchedule, applyCellTextRecovery, hoursBetween: recognizedScheduleHoursBetween } = require("./src/server/schedule-recognition.cjs");
+const { parseBillOcrText } = require("./src/server/bill-recognition.cjs");
+const requestLifecycle = require("./src/server/request-lifecycle.cjs");
+const { applyArtwork, registerMediaArtwork } = require("./src/server/media-artwork.cjs");
+const seerrReader = requestLifecycle.createSeerrReader(() => getSeerrConfig());
+const requestImportScanAttempts = new Map();
+const requestImportScanErrors = new Map();
+const {
+  SOURCE_PACKS: ADULT_SOURCE_PACKS,
+  buildSourceRegistry: buildAdultSourceRegistry,
+  aggregatePersonCandidates: aggregateAdultPersonCandidates,
+} = require("./src/server/adult-source-packs.cjs");
 
-const { execFile } = require("child_process");
+const { execFile, spawn, fork } = require("child_process");
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const dns = require("dns");
+const net = require("net");
 let sharp = null;
 try {
   sharp = require("sharp");
@@ -31,8 +63,21 @@ const {
 } = require("./src/components/livetv/livetv.cjs");
 
 const app = express();
-const PORT = 7312;
+const PORT = Number(process.env.PORT || 7312);
+const ADULT_PERSON_FULL_FETCH_TIMEOUT_MS = Math.min(
+  60000,
+  Math.max(5000, normalizeTimeoutMs(process.env.HOMESTEAD_ADULT_FULL_FETCH_TIMEOUT_MS, 20000)),
+);
 const dataDir = path.join(__dirname, "data");
+const stationRegistryPath = path.join(dataDir, "stations.json");
+const activityJobsPath = path.join(dataDir, "activity-jobs.json");
+const activityJobStore = createActivityJobStore({ filePath: activityJobsPath });
+activityJobStore.recoverInterrupted();
+const reconciledSkippedLibraryScans = activityJobStore.reconcileSkippedLibraryScans();
+if (reconciledSkippedLibraryScans) {
+  console.log(`[activity] Reclassified ${reconciledSkippedLibraryScans} duplicate watcher scan${reconciledSkippedLibraryScans === 1 ? "" : "s"} as skipped.`);
+}
+const adultRecommendationProvidersPath = path.join(dataDir, "adult-recommendation-providers.json");
 const installedPluginsDir = path.join(dataDir, "installed-plugins");
 const pluginDataDir = path.join(dataDir, "plugin-data");
 const localPluginCatalogDir = path.join(dataDir, "plugin-catalog");
@@ -50,7 +95,160 @@ const pluginInstaller = createPluginInstaller({
 });
 const loadedServerPlugins = new Set();
 
-app.use(cors());
+const DEFAULT_ADULT_RECOMMENDATION_PROVIDERS = [
+  {
+    id: "stashdb",
+    name: "StashDB",
+    type: "stash-box",
+    endpoint: "https://stashdb.org/graphql",
+    profileTypes: ["performer"],
+    enabled: false,
+    requiresApiKey: true,
+  },
+  {
+    id: "theporndb",
+    name: "ThePornDB",
+    type: "theporndb-rest",
+    endpoint: "https://api.theporndb.net",
+    tokenUrl: "https://theporndb.net/user/api-tokens",
+    documentationUrl: "https://api.theporndb.net/docs",
+    profileTypes: ["performer"],
+    enabled: false,
+    requiresApiKey: true,
+  },
+  {
+    id: "custom-structured",
+    name: "Custom structured directory",
+    type: "json",
+    endpoint: "",
+    profileTypes: ["performer", "celebrity"],
+    enabled: false,
+    requiresApiKey: false,
+  },
+];
+
+function currentThePornDbEndpoint(value = "") {
+  const endpoint = String(value || "").trim().replace(/\/+$/, "");
+  if (!endpoint || /^https?:\/\/(?:www\.)?theporndb\.net\/graphql$/i.test(endpoint)) return "https://api.theporndb.net";
+  return endpoint;
+}
+
+function readSavedAdultRecommendationProviders() {
+  let saved = [];
+  try { saved = JSON.parse(fs.readFileSync(adultRecommendationProvidersPath, "utf8"))?.providers || []; } catch { saved = []; }
+  const byId = new Map(saved.map((provider) => [provider.id, provider]));
+  const providers = DEFAULT_ADULT_RECOMMENDATION_PROVIDERS.map((provider) => {
+    const merged = { ...provider, ...(byId.get(provider.id) || {}) };
+    if (provider.id === "theporndb") {
+      merged.type = "theporndb-rest";
+      merged.endpoint = currentThePornDbEndpoint(merged.endpoint);
+      merged.tokenUrl = provider.tokenUrl;
+      merged.documentationUrl = provider.documentationUrl;
+    }
+    return merged;
+  });
+  for (const provider of saved) if (!providers.some((item) => item.id === provider.id)) providers.push(provider);
+  return providers;
+}
+
+function readAdultRecommendationProviders() {
+  const providers = readSavedAdultRecommendationProviders();
+  const environment = {
+    stashdb: { endpoint: process.env.HOMESTEAD_STASHDB_ENDPOINT, apiKey: process.env.HOMESTEAD_STASHDB_API_KEY },
+    theporndb: { endpoint: process.env.HOMESTEAD_TPDB_ENDPOINT, apiKey: process.env.HOMESTEAD_TPDB_API_KEY },
+    "custom-structured": { endpoint: process.env.HOMESTEAD_ADULT_RECOMMENDATIONS_ENDPOINT, apiKey: process.env.HOMESTEAD_ADULT_RECOMMENDATIONS_API_KEY },
+  };
+  return providers.map((provider) => {
+    const override = environment[provider.id] || {};
+    return {
+      ...provider,
+      endpoint: provider.id === "theporndb"
+        ? currentThePornDbEndpoint(override.endpoint || provider.endpoint)
+        : String(override.endpoint || provider.endpoint || "").trim(),
+      apiKey: String(override.apiKey || provider.apiKey || "").trim(),
+      enabled: provider.enabled === true || Boolean(override.apiKey && (override.endpoint || provider.endpoint)),
+    };
+  });
+}
+
+function publicAdultRecommendationProvider(provider = {}) {
+  const { apiKey, ...safe } = provider;
+  return { ...safe, apiKeyConfigured: Boolean(apiKey), configured: Boolean(provider.endpoint && (!provider.requiresApiKey || apiKey)) };
+}
+
+function saveAdultRecommendationProviders(input = []) {
+  const current = new Map(readSavedAdultRecommendationProviders().map((provider) => [provider.id, provider]));
+  const allowedIds = new Set(DEFAULT_ADULT_RECOMMENDATION_PROVIDERS.map((provider) => provider.id));
+  const next = (Array.isArray(input) ? input : []).filter((provider) => allowedIds.has(provider.id)).map((provider) => {
+    const existing = current.get(provider.id) || {};
+    const endpoint = String(provider.endpoint ?? existing.endpoint ?? "").trim();
+    if (endpoint && !/^https?:\/\//i.test(endpoint)) throw new Error(`${existing.name || provider.id} needs an HTTP or HTTPS endpoint.`);
+    return {
+      ...existing,
+      endpoint,
+      enabled: provider.enabled === true,
+      method: provider.method === "GET" ? "GET" : "POST",
+      apiKey: provider.clearApiKey === true ? "" : String(provider.apiKey || existing.apiKey || "").trim(),
+    };
+  });
+  atomicWriteJson(adultRecommendationProvidersPath, { version: 1, providers: next, updatedAt: new Date().toISOString() });
+  return readAdultRecommendationProviders();
+}
+
+app.set("trust proxy", process.env.HOMESTEAD_TRUST_PROXY || "loopback");
+app.disable("x-powered-by");
+app.use(cors({
+  credentials: true,
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    const configured = String(process.env.HOMESTEAD_PUBLIC_ORIGIN || readSetupConfig()?.network?.publicOrigin || "").replace(/\/$/, "");
+    const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin);
+    return callback(null, !configured || origin === configured || localOrigin);
+  },
+}));
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  // YouTube requires an origin-bearing referrer for embedded playback (Error 153).
+  // Keep cross-origin requests private while allowing the scheme/host to be sent.
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()");
+  next();
+});
+app.use(express.json({ limit: "32mb" }));
+
+// Register authentication before every API route, including plugin management.
+const subscriptionService = createSubscriptionService();
+const homesteadAccess = registerNextVersionRoutes({
+  app,
+  express,
+  dataDir,
+  readSetupConfig,
+  writeSetupConfig: (config) => fs.writeFileSync(setupConfigPath, JSON.stringify(config, null, 2)),
+  subscriptionService,
+});
+
+// Product entitlements are enforced at the API boundary. Hiding navigation is
+// useful UX, but it is never the security boundary for a paid feature.
+app.use("/api/plugins", subscriptionService.requireFeature("plugins"));
+app.use("/api/plugin-catalog", subscriptionService.requireFeature("plugins"));
+app.use("/api/automation", subscriptionService.requireFeature("automation"));
+app.use("/api/cloud", subscriptionService.requireFeature("cloud"));
+app.use("/api/appearance", subscriptionService.requireFeature("appearance"));
+app.use("/api/recipes", subscriptionService.requireFeature("recipes"));
+app.use("/api/calendar", subscriptionService.requireFeature("calendar"));
+app.use("/api/livetv", subscriptionService.requireFeature("liveTV"));
+app.use("/api/adult", subscriptionService.requireFeature("adult"));
+app.use("/api/metadata/adult", subscriptionService.requireFeature("adult"));
+app.use("/api/discovery/adult", subscriptionService.requireFeature("adult"));
+app.use("/api/profiles", subscriptionService.requireFeature("adult"));
+app.use("/api/integrations", subscriptionService.requireFeature("externalIntegrations"));
+app.use("/api/intake", (req, res, next) => {
+  const inventoryLibrary = String(req.body?.libraryId || req.query?.libraryId || "").toLowerCase();
+  const inventoryPath = /^\/(?:tcg|electronics|valuation)(?:\/|$)/i.test(req.path)
+    || /^\/library-records\/(?:inventory|electronics|tools|collectibles|tcg|outdoor|file-cabinet)(?:\/|$)/i.test(req.path)
+    || ["inventory", "electronics", "tools", "collectibles", "tcg", "outdoor", "file-cabinet"].includes(inventoryLibrary);
+  return inventoryPath ? subscriptionService.requireFeature("inventory")(req, res, next) : next();
+});
 
 function pluginDescriptor(plugin) {
   const hasClient = Boolean(plugin.clientEntryPath);
@@ -68,6 +266,7 @@ function pluginDescriptor(plugin) {
     errors: plugin.errors,
     permissions: Array.isArray(plugin.manifest?.permissions) ? plugin.manifest.permissions : [],
     navigation: plugin.manifest?.navigation || null,
+    hostIntegration: plugin.manifest?.hostIntegration || null,
     hasClient,
     hasServer,
     clientUrl: plugin.valid && plugin.enabled && hasClient
@@ -101,8 +300,6 @@ app.post(
     }
   }
 );
-
-app.use(express.json({ limit: "32mb" }));
 
 app.get("/api/plugin-catalog/catalog.json", (req, res) => {
   if (!fs.existsSync(localPluginCatalogPath)) {
@@ -236,13 +433,27 @@ app.use("/plugins/:pluginId", (req, res) => {
 
 const watchlistPath = path.join(dataDir, "watchlist.json");
 const namedWatchlistsPath = path.join(dataDir, "named-watchlists.json");
+const userWatchlistsDir = path.join(dataDir, "watchlists", "users");
 const requestsPath = path.join(dataDir, "requests.json");
+const movieUpgradeRequestsPath = path.join(dataDir, "movie-upgrade-requests.json");
+const tvUpgradeRequestsPath = path.join(dataDir, "tv-upgrade-requests.json");
 const { Readable } = require("stream");
 
-const { searchBookMetadata } = require("./scripts/metadata/fetch-book-metadata.cjs");
+const {
+  searchBookMetadata,
+  searchBookMetadataDetailed,
+  enrichBookCandidate,
+  searchBookArtwork,
+} = require("./scripts/metadata/fetch-book-metadata-v2.cjs");
 const { searchMusicMetadata } = require("./scripts/metadata/fetch-music-metadata.cjs");
 const { searchYouTubeMetadata } = require("./scripts/metadata/fetch-youtube-metadata.cjs");
-const { searchAdultMetadata, normalizeAdultCandidateForMetadata } = require("./scripts/metadata/fetch-adult-metadata.cjs");
+const {
+  searchAdultMetadata,
+  normalizeAdultCandidateForMetadata,
+  validatedAdultHeight,
+  searchTheNudeMetadata,
+  fetchLinkedAdultMetadataCandidates,
+} = require("./scripts/metadata/fetch-adult-metadata.cjs");
 const {
   DEFAULT_ADULT_SOURCES,
   getConfiguredAdultSources,
@@ -255,6 +466,44 @@ const {
 
 
 const HOMESTEAD_ADULT_BROWSE_SOURCES = [
+  {
+    id: "tiny4k",
+    name: "Tiny4K",
+    enabled: true,
+    status: "active",
+    priority: 33,
+    category: "Performer content · studio search",
+    role: "performer",
+    baseUrl: "https://www.tiny4k.com/",
+    searchUrlTemplate: "https://www.google.com/search?q=site%3Atiny4k.com+{queryPlus}",
+    supports: ["performerMetadata", "videos", "scenes", "studio", "artwork"],
+    searchModes: ["person", "media", "general"],
+    supportsArtwork: true,
+    supportsImport: false,
+    supportsScenes: true,
+    requiresSession: false,
+    externalOnly: true,
+    badges: ["Performer search", "Videos", "External"],
+  },
+  {
+    id: "exxxtrasmall",
+    name: "ExxxtraSmall",
+    enabled: true,
+    status: "active",
+    priority: 34,
+    category: "Performer content · studio search",
+    role: "performer",
+    baseUrl: "https://www.exxxtrasmall.com/",
+    searchUrlTemplate: "https://www.google.com/search?q=site%3Aexxxtrasmall.com+{queryPlus}",
+    supports: ["performerMetadata", "videos", "scenes", "studio", "artwork"],
+    searchModes: ["person", "media", "general"],
+    supportsArtwork: true,
+    supportsImport: false,
+    supportsScenes: true,
+    requiresSession: false,
+    externalOnly: true,
+    badges: ["Performer search", "Videos", "External"],
+  },
   {
     id: "baldpussypics",
     name: "Bald Pussy Pics",
@@ -338,6 +587,7 @@ function setupConfigWithHomesteadAdultBrowseSources(setupConfig = {}) {
 const setupConfigPath = path.join(dataDir, "setup-config.json");
 const brandingDir = path.join(dataDir, "branding");
 const brandingIconPath = path.join(brandingDir, "app-icon.png");
+const acquisitionJobsPath = path.join(dataDir, "acquisition-jobs.json");
 
 const defaultSetupConfig = {
   completed: false,
@@ -380,6 +630,44 @@ function readJsonFile(filePath, fallback) {
 function writeJsonFile(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function readAcquisitionJobs() {
+  const data = readJsonFile(acquisitionJobsPath, { version: 1, jobs: [] });
+  return Array.isArray(data?.jobs) ? data.jobs : [];
+}
+
+function writeAcquisitionJobs(jobs = []) {
+  writeJsonFile(acquisitionJobsPath, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    jobs: jobs.slice(-500),
+  });
+}
+
+function acquisitionIdentity(value = {}) {
+  return String(
+    value.key ||
+    `${value.library || value.type || "media"}:${value.provider || "provider"}:${value.providerId || value.foreignBookId || value.foreignAlbumId || value.foreignArtistId || value.title || "item"}`
+  ).toLowerCase();
+}
+
+function upsertAcquisitionJob(job = {}) {
+  const jobs = readAcquisitionJobs();
+  const key = acquisitionIdentity(job);
+  const index = jobs.findIndex((candidate) => acquisitionIdentity(candidate) === key);
+  const current = index >= 0 ? jobs[index] : {};
+  const next = {
+    ...current,
+    ...job,
+    key,
+    createdAt: current.createdAt || job.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  if (index >= 0) jobs[index] = next;
+  else jobs.push(next);
+  writeAcquisitionJobs(jobs);
+  return next;
 }
 
 function getBrandingIconState() {
@@ -448,8 +736,9 @@ function sendHomesteadBrandIcon(req, res) {
 }
 
 function sendHomesteadManifest(req, res) {
-  const setupConfig = readSetupConfig();
-  const branding = getBrandingIconState();
+  try {
+  const setupConfig = readSetupConfig() || {};
+  const branding = getBrandingIconState() || {};
   const name = String(setupConfig.serverName || "Homestead").trim() || "Homestead";
   const shortName = name.length > 24 ? name.slice(0, 24).trim() : name;
   const iconUrl = `/api/branding/icon?v=${encodeURIComponent(branding.appIconVersion)}`;
@@ -471,6 +760,13 @@ function sendHomesteadManifest(req, res) {
       { src: iconUrl, sizes: "512x512", type: "image/png", purpose: "any maskable" },
     ],
   }));
+  } catch (error) {
+    console.error("Failed to build web manifest:", error);
+    res.status(200).type("application/manifest+json").send(JSON.stringify({
+      id: "/", name: "Homestead", short_name: "Homestead", start_url: "/", scope: "/",
+      display: "standalone", background_color: "#0f1117", theme_color: "#11141d", icons: [],
+    }));
+  }
 }
 
 function escapeHomesteadHtml(value = "") {
@@ -582,11 +878,116 @@ const METADATA_MATCHES_FILE = path.join(
   HOMESTEAD_DATA_DIR,
   "metadata-matches.json"
 );
+const ARTWORK_RECOVERY_ROOT = path.join(HOMESTEAD_DATA_DIR, "artwork-recovery");
+const REMOTE_ARTWORK_CACHE_ROOT = path.join(HOMESTEAD_DATA_DIR, "artwork-cache");
 
 function ensureHomesteadDataDir() {
   if (!fs.existsSync(HOMESTEAD_DATA_DIR)) {
     fs.mkdirSync(HOMESTEAD_DATA_DIR, { recursive: true });
   }
+}
+
+function backupArtworkIndexes(reason = "artwork-change") {
+  ensureHomesteadDataDir();
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = path.join(ARTWORK_RECOVERY_ROOT, `${stamp}-${String(reason || "backup").replace(/[^a-z0-9-]+/gi, "-")}`);
+  const sources = [
+    { name: "metadata-matches.json", file: METADATA_MATCHES_FILE },
+    { name: "media-index.json", file: path.join(HOMESTEAD_DATA_DIR, "media-index.json") },
+  ].filter((entry) => fs.existsSync(entry.file));
+  if (!sources.length) return "";
+  fs.mkdirSync(destination, { recursive: true });
+  for (const source of sources) fs.copyFileSync(source.file, path.join(destination, source.name));
+  fs.writeFileSync(path.join(destination, "backup.json"), JSON.stringify({ reason, createdAt: new Date().toISOString(), files: sources.map((entry) => entry.name) }, null, 2));
+  return destination;
+}
+
+const METADATA_MATCH_VOLATILE_FIELDS = new Set([
+  "localItem",
+  "originalItem",
+  "files",
+  "episodes",
+  "seasons",
+  "versions",
+  "localVersions",
+  "raw",
+]);
+
+function musicReleaseGroupCoverUrl(value = "") {
+  const match = String(value || "").trim().match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
+  return match ? `https://coverartarchive.org/release-group/${match[0]}/front-500` : "";
+}
+
+function compactMetadataMatchRecord(record = {}) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return {};
+  const compact = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "aliasOf" || METADATA_MATCH_VOLATILE_FIELDS.has(key)) continue;
+    if (key === "metadata" && value && typeof value === "object" && !Array.isArray(value)) {
+      compact.metadata = Object.fromEntries(
+        Object.entries(value).filter(([nestedKey]) => !METADATA_MATCH_VOLATILE_FIELDS.has(nestedKey))
+      );
+      continue;
+    }
+    compact[key] = value;
+  }
+  compact.aliases = uniqueMetadataMatchAliases(compact.aliases || []);
+  if (
+    compact.libraryType === "music" &&
+    ["album", "release-group"].includes(String(compact.mediaType || "").toLowerCase()) &&
+    !compact.poster && !compact.cover
+  ) {
+    compact.poster = musicReleaseGroupCoverUrl(
+      compact.providerId || compact.foreignAlbumId || compact.releaseGroupId ||
+      compact.musicbrainzId || compact.identifiers?.musicbrainzId || ""
+    );
+  }
+  return compact;
+}
+
+function compactMetadataMatches(matches = {}) {
+  const source = matches && typeof matches === "object" && !Array.isArray(matches) ? matches : {};
+  const compact = {};
+  const ambiguousAliases = new Set();
+
+  const claimAlias = (aliasKey, canonicalKey) => {
+    if (!aliasKey || !canonicalKey || aliasKey === canonicalKey || ambiguousAliases.has(aliasKey)) return;
+    const existing = compact[aliasKey];
+    if (existing && !existing.aliasOf) return;
+    if (existing?.aliasOf && existing.aliasOf !== canonicalKey) {
+      delete compact[aliasKey];
+      ambiguousAliases.add(aliasKey);
+      return;
+    }
+    compact[aliasKey] = { aliasOf: canonicalKey };
+  };
+
+  for (const [key, record] of Object.entries(source)) {
+    if (!record || typeof record !== "object" || record.aliasOf) continue;
+    compact[key] = compactMetadataMatchRecord(record);
+  }
+
+  for (const [key, record] of Object.entries(source)) {
+    if (!record || typeof record !== "object" || !record.aliasOf) continue;
+    const canonicalKey = String(record.aliasOf || key);
+    if (!compact[canonicalKey]) {
+      compact[canonicalKey] = compactMetadataMatchRecord(source[canonicalKey] || record);
+    }
+    claimAlias(key, canonicalKey);
+  }
+
+  for (const [canonicalKey, record] of Object.entries({ ...compact })) {
+    if (!record || record.aliasOf) continue;
+    const libraryType = String(record.libraryType || canonicalKey.split(":", 1)[0] || "");
+    for (const alias of record.aliases || []) {
+      const aliasKey = String(alias).startsWith(`${libraryType}:`)
+        ? String(alias)
+        : `${libraryType}:${alias}`;
+      claimAlias(aliasKey, canonicalKey);
+    }
+  }
+
+  return compact;
 }
 
 function readMetadataMatches() {
@@ -597,7 +998,7 @@ function readMetadataMatches() {
       return {};
     }
 
-    return JSON.parse(fs.readFileSync(METADATA_MATCHES_FILE, "utf8"));
+    return compactMetadataMatches(JSON.parse(fs.readFileSync(METADATA_MATCHES_FILE, "utf8")));
   } catch (error) {
     console.error("Failed to read metadata matches:", error);
     return {};
@@ -679,9 +1080,25 @@ function buildMetadataMatchAliases({ localId = "", localItem = null, metadata = 
   return uniqueMetadataMatchAliases(names);
 }
 
+function buildStableTvMatchAliases({ localId = "", localItem = null, metadata = null } = {}) {
+  const item = localItem || {};
+  const original = item.originalItem || {};
+  const values = [
+    localId,
+    item.libraryKey,
+    item.localId, item.id, item.path, item.filePath, item.folderPath, item.sourcePath, item.folderName,
+    original.libraryKey,
+    original.localId, original.id, original.path, original.filePath, original.folderPath, original.sourcePath, original.folderName,
+  ];
+  return uniqueMetadataMatchAliases(values);
+}
+
 function writeMetadataMatches(matches) {
   ensureHomesteadDataDir();
-  fs.writeFileSync(METADATA_MATCHES_FILE, JSON.stringify(matches, null, 2));
+  if (fs.existsSync(METADATA_MATCHES_FILE)) backupArtworkIndexes("metadata-match");
+  const temporaryPath = `${METADATA_MATCHES_FILE}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(compactMetadataMatches(matches), null, 2));
+  fs.renameSync(temporaryPath, METADATA_MATCHES_FILE);
 }
 
 function getMetadataMatchStats(matches = readMetadataMatches()) {
@@ -704,6 +1121,45 @@ function firstAdultBodyValue(...values) {
   return "";
 }
 
+function parseAdultHipInches(value = "") {
+  const text = String(value || "").trim().toLowerCase();
+  const amount = Number.parseFloat(text.replace(",", "."));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (/\bcm\b/.test(text) || amount > 70) return Math.round((amount / 2.54) * 10) / 10;
+  return amount;
+}
+
+function inferAdultPantySizeFromHips(value = "") {
+  const hipsInches = parseAdultHipInches(value);
+  if (!hipsInches || hipsInches < 24 || hipsInches > 60) return null;
+  const bands = [
+    [31, "XXS / US 3"], [34, "XS / US 4"], [37, "S / US 5"],
+    [40, "M / US 6"], [43, "L / US 7"], [46, "XL / US 8"],
+    [50, "2XL / US 9"], [54, "3XL / US 10"], [Infinity, "4XL / US 11"],
+  ];
+  const size = bands.find(([maximum]) => hipsInches < maximum)?.[1] || "";
+  return size ? { size, hipsInches, method: "hip-measurement-chart", confidence: "inferred" } : null;
+}
+
+function normalizeAdultBraDetails(braSize = "", braBand = "", cupSize = "") {
+  const rawSize = String(braSize || "").trim().toUpperCase().replace(/\s+/g, "");
+  const rawBand = String(braBand || "").trim();
+  const rawCup = String(cupSize || "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  const completeMatch = rawSize.match(/^(\d{2,3})([A-Z]{1,4})$/);
+  const band = completeMatch?.[1] || rawBand;
+  const cup = completeMatch?.[2] || (/^[A-Z]{1,4}$/.test(rawSize) ? rawSize : rawCup);
+  return {
+    braBand: band,
+    cupSize: cup,
+    braSize: band && cup ? `${band}${cup}` : rawSize || cup,
+    complete: Boolean(band && cup),
+  };
+}
+
+function isCompleteAdultBraSize(value = "") {
+  return /^\d{2,3}\s*[A-Z]{1,4}$/i.test(String(value || "").trim());
+}
+
 function augmentAdultBodyMetadata(candidate = {}, base = {}) {
   const existingBody = base.body || base.bodyDetails || {};
   const candidateBody = candidate.body || candidate.bodyDetails || candidate.physicalDetails || {};
@@ -711,23 +1167,37 @@ function augmentAdultBodyMetadata(candidate = {}, base = {}) {
   const measurementsRaw = typeof rawMeasurements === "string"
     ? rawMeasurements
     : firstAdultBodyValue(candidate.measurementsRaw, candidateBody.measurementsRaw, base.measurementsRaw, existingBody.measurementsRaw);
-  const bust = firstAdultBodyValue(candidate.bust, candidateBody.bust, rawMeasurements?.bust, base.bust, existingBody.bust);
-  const waist = firstAdultBodyValue(candidate.waist, candidateBody.waist, rawMeasurements?.waist, base.waist, existingBody.waist);
-  const hips = firstAdultBodyValue(candidate.hips, candidateBody.hips, rawMeasurements?.hips, base.hips, existingBody.hips);
+  const parsedTriplet = typeof measurementsRaw === "string" && !/[?]/.test(measurementsRaw)
+    ? measurementsRaw.match(/(\d{2,3}(?:\.\d+)?)(?:[A-Z]{1,4})?\s*[-–]\s*(\d{2,3}(?:\.\d+)?)\s*[-–]\s*(\d{2,3}(?:\.\d+)?)/i)
+    : null;
+  const bust = firstAdultBodyValue(candidate.bust, candidateBody.bust, rawMeasurements?.bust, base.bust, existingBody.bust, parsedTriplet?.[1]);
+  const waist = firstAdultBodyValue(candidate.waist, candidateBody.waist, rawMeasurements?.waist, base.waist, existingBody.waist, parsedTriplet?.[2]);
+  const hips = firstAdultBodyValue(candidate.hips, candidateBody.hips, rawMeasurements?.hips, base.hips, existingBody.hips, parsedTriplet?.[3]);
   const composedMeasurements = measurementsRaw || [bust, waist, hips].filter(Boolean).join("-");
   const sourceName = firstAdultBodyValue(candidate.source, candidate.provider, candidateBody.sourceName, existingBody.sourceName);
   const sourceUrl = firstAdultBodyValue(candidate.url, candidate.sourceUrl, candidateBody.sourceUrl, existingBody.sourceUrl);
+  const suppliedPantySize = firstAdultBodyValue(candidate.pantySize, candidate.underwearSize, candidateBody.pantySize, candidateBody.underwearSize, base.pantySize, base.underwearSize, existingBody.pantySize, existingBody.underwearSize);
+  const pantyInference = suppliedPantySize ? null : inferAdultPantySizeFromHips(hips);
+  const braDetails = normalizeAdultBraDetails(
+    firstAdultBodyValue(candidate.braSize, candidateBody.braSize, base.braSize, existingBody.braSize, candidate.cupSize, candidateBody.cupSize, base.cupSize, existingBody.cupSize),
+    firstAdultBodyValue(candidate.braBand, candidate.bandSize, candidateBody.braBand, candidateBody.bandSize, base.braBand, base.bandSize, existingBody.braBand, existingBody.bandSize),
+    firstAdultBodyValue(candidate.cupSize, candidateBody.cupSize, base.cupSize, existingBody.cupSize),
+  );
 
   const bodyDetails = {
-    height: firstAdultBodyValue(candidate.height, candidateBody.height, base.height, existingBody.height),
+    height: validatedAdultHeight(firstAdultBodyValue(candidate.height, candidateBody.height, base.height, existingBody.height)),
     weight: firstAdultBodyValue(base.weight, base.weightValue, existingBody.weight, candidate.weight, candidateBody.weight),
     weightUnit: firstAdultBodyValue(base.weightUnit, existingBody.weightUnit, candidate.weightUnit, candidateBody.weightUnit),
     measurementsRaw: composedMeasurements,
     bust,
     waist,
     hips,
-    braSize: firstAdultBodyValue(candidate.braSize, candidate.cupSize, candidateBody.braSize, candidateBody.cupSize, base.braSize, base.cupSize, existingBody.braSize, existingBody.cupSize),
-    pantySize: firstAdultBodyValue(candidate.pantySize, candidate.underwearSize, candidateBody.pantySize, candidateBody.underwearSize, base.pantySize, base.underwearSize, existingBody.pantySize, existingBody.underwearSize),
+    braBand: braDetails.braBand,
+    cupSize: braDetails.cupSize,
+    braSize: braDetails.braSize,
+    pantySize: suppliedPantySize || pantyInference?.size || "",
+    pantySizeInferred: pantyInference ? true : undefined,
+    pantySizeInference: pantyInference || undefined,
     shoeSize: firstAdultBodyValue(candidate.shoeSize, candidateBody.shoeSize, base.shoeSize, existingBody.shoeSize),
     dressSize: firstAdultBodyValue(candidate.dressSize, candidateBody.dressSize, base.dressSize, existingBody.dressSize),
     clothingSize: firstAdultBodyValue(candidate.clothingSize, candidateBody.clothingSize, base.clothingSize, existingBody.clothingSize),
@@ -760,8 +1230,12 @@ function augmentAdultBodyMetadata(candidate = {}, base = {}) {
     bust: compactBody.bust || base.bust || "",
     waist: compactBody.waist || base.waist || "",
     hips: compactBody.hips || base.hips || "",
+    braBand: compactBody.braBand || base.braBand || "",
+    cupSize: compactBody.cupSize || base.cupSize || "",
     braSize: compactBody.braSize || base.braSize || "",
     pantySize: compactBody.pantySize || base.pantySize || "",
+    pantySizeInferred: compactBody.pantySizeInferred === true,
+    pantySizeInference: compactBody.pantySizeInference || base.pantySizeInference,
     shoeSize: compactBody.shoeSize || base.shoeSize || "",
     dressSize: compactBody.dressSize || base.dressSize || "",
     clothingSize: compactBody.clothingSize || base.clothingSize || "",
@@ -773,6 +1247,7 @@ function augmentAdultBodyMetadata(candidate = {}, base = {}) {
       ...(base.clothingSizes || {}),
       bra: compactBody.braSize || base.clothingSizes?.bra || base.braSize || "",
       panty: compactBody.pantySize || base.clothingSizes?.panty || base.pantySize || "",
+      pantyInferred: Boolean(compactBody.pantySizeInferred),
       shoe: compactBody.shoeSize || base.clothingSizes?.shoe || base.shoeSize || "",
       dress: compactBody.dressSize || base.clothingSizes?.dress || base.dressSize || "",
       size: compactBody.clothingSize || base.clothingSizes?.size || base.clothingSize || "",
@@ -852,6 +1327,365 @@ function getSeerrConfig() {
   };
 }
 
+let movieAutoMatchRunning = false;
+let movieAutoMatchStatus = {
+  state: "idle",
+  scanned: 0,
+  matched: 0,
+  skipped: 0,
+  ambiguous: 0,
+  errors: 0,
+  remaining: 0,
+  startedAt: "",
+  completedAt: "",
+  message: "Automatic filename matching has not run yet.",
+};
+
+let tvAutoMatchRunning = false;
+let tvAutoMatchStatus = {
+  state: "idle",
+  scanned: 0,
+  matched: 0,
+  migrated: 0,
+  skipped: 0,
+  ambiguous: 0,
+  errors: 0,
+  remaining: 0,
+  startedAt: "",
+  completedAt: "",
+  message: "Automatic TV filename matching has not run yet.",
+};
+
+function normalizeMovieAutoMatchTitle(value = "") {
+  return cleanMetadataQuery(value)
+    .replace(/\b(?:extended|unrated|uncut|directors? cut|theatrical|edition|version|disc \d+)\b/gi, " ")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getMovieAutoMatchIdentity(item = {}) {
+  const files = Array.isArray(item.files) ? item.files : [];
+  const firstVideo = files.find((file) => /\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(file?.name || file?.path || file?.sourcePath || ""));
+  const sourceFolder = String(item.sourcePath || item.folderPath || item.path || "").replaceAll("\\", "/").split("/").filter(Boolean).pop() || "";
+  const fileBase = String(firstVideo?.name || firstVideo?.path || "").replaceAll("\\", "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
+  const rawCandidates = [item.name, item.title, sourceFolder, fileBase].filter(Boolean);
+  const rawTitle = rawCandidates.find((value) => normalizeMovieAutoMatchTitle(value)) || "";
+  const joined = rawCandidates.join(" ");
+  const yearMatch = joined.match(/\b((?:19|20)\d{2})\b/);
+  return {
+    query: cleanMetadataQuery(rawTitle),
+    normalizedTitle: normalizeMovieAutoMatchTitle(rawTitle),
+    year: yearMatch ? yearMatch[1] : String(item?.metadata?.year || item?.year || "").slice(0, 4),
+  };
+}
+
+function findStoredMetadataMatch(matches = {}, libraryType = "movies", item = {}) {
+  const resolve = (key) => {
+    let match = matches[key];
+    const visited = new Set([key]);
+    while (match?.aliasOf && !visited.has(match.aliasOf)) {
+      visited.add(match.aliasOf);
+      match = matches[match.aliasOf];
+    }
+    return match && !match.aliasOf ? match : null;
+  };
+  const aliases = libraryType === "tv"
+    ? buildStableTvMatchAliases({ localId: item.id || item.localId || "", localItem: item })
+    : buildMetadataMatchAliases({ localId: item.id || item.localId || "", localItem: item });
+  const matchesForItem = aliases.map((alias) => resolve(`${libraryType}:${alias}`)).filter((match) => {
+    if (!match || libraryType !== "tv") return Boolean(match);
+    const expectedIds = [item.id, item.localId, item.libraryKey, item.originalItem?.id, item.originalItem?.localId, item.originalItem?.libraryKey]
+      .filter(Boolean)
+      .map((value) => String(value).replace(/^tv:/, ""));
+    if (!expectedIds.length) return false;
+    return expectedIds.includes(String(match.localId || "").replace(/^tv:/, ""));
+  });
+  const manual = matchesForItem.find((match) => match.manualOverride === true || match.matchLocked === true);
+  if (manual) return manual;
+  for (const match of matchesForItem) {
+    if (match) return match;
+  }
+  return null;
+}
+
+function makeAutomaticMovieMatch(candidate = {}, item = {}) {
+  const releaseDate = candidate.releaseDate || candidate.release_date || candidate.firstAirDate || "";
+  const posterPath = candidate.posterPath || candidate.poster_path || "";
+  const backdropPath = candidate.backdropPath || candidate.backdrop_path || "";
+  const localId = String(item.id || item.localId || item.sourcePath || item.name || "");
+  return {
+    libraryType: "movies",
+    localId,
+    provider: "tmdb",
+    source: "tmdb",
+    matchSource: "auto-filename-v1",
+    manualOverride: false,
+    providerId: candidate.id,
+    tmdbId: candidate.id,
+    mediaType: "movie",
+    title: candidate.title || candidate.originalTitle || item.name || "Untitled",
+    sortTitle: candidate.title || candidate.originalTitle || item.name || "Untitled",
+    year: String(releaseDate || "").slice(0, 4),
+    releaseDate,
+    description: candidate.overview || "",
+    genres: Array.isArray(candidate.genres) ? candidate.genres : [],
+    poster: posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : "",
+    backdrop: backdropPath ? `https://image.tmdb.org/t/p/original${backdropPath}` : "",
+    matchedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function runMovieAutoMatch({ limit = 75, force = false } = {}) {
+  if (movieAutoMatchRunning) return movieAutoMatchStatus;
+  const setup = readSetupConfig();
+  if (!force && setup?.librarySettings?.movies?.autoMatchV1 === false) {
+    movieAutoMatchStatus = { ...movieAutoMatchStatus, state: "disabled", message: "Automatic movie matching is disabled in Movies settings." };
+    return movieAutoMatchStatus;
+  }
+  const { baseUrl, apiKey } = getSeerrConfig();
+  if (!baseUrl || !apiKey) {
+    movieAutoMatchStatus = { ...movieAutoMatchStatus, state: "unconfigured", message: "Connect Jellyseerr before using automatic movie matching." };
+    return movieAutoMatchStatus;
+  }
+
+  movieAutoMatchRunning = true;
+  movieAutoMatchStatus = { state: "running", scanned: 0, matched: 0, skipped: 0, ambiguous: 0, errors: 0, remaining: 0, startedAt: new Date().toISOString(), completedAt: "", message: "Matching newly scanned movie folders by title…" };
+  try {
+    const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {});
+    const movies = Object.values(mediaIndex?.libraries?.movies || {});
+    const matches = readMetadataMatches();
+    const unmatched = movies.filter((item) => !findStoredMetadataMatch(matches, "movies", item));
+    const batch = unmatched.slice(0, Math.max(1, Math.min(Number(limit) || 75, 250)));
+    movieAutoMatchStatus.remaining = Math.max(0, unmatched.length - batch.length);
+
+    for (const item of batch) {
+      const identity = getMovieAutoMatchIdentity(item);
+      if (!identity.query || !identity.normalizedTitle) {
+        movieAutoMatchStatus.skipped += 1;
+        continue;
+      }
+      movieAutoMatchStatus.scanned += 1;
+      try {
+        const response = await fetch(`${String(baseUrl).replace(/\/+$/, "")}/api/v1/search?query=${strictEncodeQuery(identity.query)}`, {
+          headers: { "X-Api-Key": apiKey, Accept: "application/json" },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.message || `Seerr returned ${response.status}`);
+        const exact = (Array.isArray(data?.results) ? data.results : [])
+          .filter((candidate) => String(candidate?.mediaType || "") === "movie")
+          .filter((candidate) => normalizeMovieAutoMatchTitle(candidate.title || candidate.originalTitle || "") === identity.normalizedTitle)
+          .filter((candidate) => {
+            if (!identity.year) return true;
+            const candidateYear = String(candidate.releaseDate || candidate.release_date || "").slice(0, 4);
+            return !candidateYear || candidateYear === identity.year;
+          });
+        if (exact.length !== 1) {
+          movieAutoMatchStatus.ambiguous += 1;
+          continue;
+        }
+        const record = makeAutomaticMovieMatch(exact[0], item);
+        const aliases = buildMetadataMatchAliases({ localId: record.localId, localItem: item, metadata: record });
+        record.aliases = aliases;
+        const canonicalKey = `movies:${record.localId}`;
+        matches[canonicalKey] = record;
+        aliases.forEach((alias) => {
+          const aliasKey = `movies:${alias}`;
+          if (aliasKey !== canonicalKey) matches[aliasKey] = { aliasOf: canonicalKey };
+        });
+        movieAutoMatchStatus.matched += 1;
+      } catch (error) {
+        movieAutoMatchStatus.errors += 1;
+        console.warn(`[auto-match] ${item.name || item.id}:`, error.message || error);
+      }
+    }
+    writeMetadataMatches(matches);
+    movieAutoMatchStatus = { ...movieAutoMatchStatus, state: "complete", completedAt: new Date().toISOString(), message: `Matched ${movieAutoMatchStatus.matched} movie${movieAutoMatchStatus.matched === 1 ? "" : "s"}; ${movieAutoMatchStatus.ambiguous} left for Fix Match review.` };
+  } catch (error) {
+    movieAutoMatchStatus = { ...movieAutoMatchStatus, state: "error", errors: movieAutoMatchStatus.errors + 1, completedAt: new Date().toISOString(), message: error.message || "Automatic matching failed." };
+  } finally {
+    movieAutoMatchRunning = false;
+  }
+  return movieAutoMatchStatus;
+}
+
+function getTvAutoMatchIdentity(item = {}) {
+  const files = Array.isArray(item.files) ? item.files : [];
+  const firstEpisode = files.find((file) => /\.(mp4|m4v|mov|mkv|avi|webm)$/i.test(file?.name || file?.path || file?.sourcePath || ""));
+  const sourceFolder = String(item.sourcePath || item.folderPath || item.path || "").replaceAll("\\", "/").split("/").filter(Boolean).pop() || "";
+  const episodePath = String(firstEpisode?.sourcePath || firstEpisode?.path || firstEpisode?.name || "").replaceAll("\\", "/");
+  const episodeParts = episodePath.split("/").filter(Boolean);
+  const seasonIndex = episodeParts.findIndex((part) => /^(?:season|series)[\s._-]*\d+$/i.test(part));
+  const episodeShowFolder = seasonIndex > 0 ? episodeParts[seasonIndex - 1] : (episodeParts.length > 1 ? episodeParts[episodeParts.length - 2] : "");
+  const rawCandidates = [item.name, item.title, sourceFolder, episodeShowFolder].filter(Boolean);
+  const rawTitle = rawCandidates.find((value) => normalizeMovieAutoMatchTitle(value)) || "";
+  const joined = rawCandidates.join(" ");
+  const yearMatch = joined.match(/\b((?:19|20)\d{2})\b/);
+  return {
+    query: cleanMetadataQuery(rawTitle),
+    normalizedTitle: normalizeMovieAutoMatchTitle(rawTitle),
+    year: yearMatch ? yearMatch[1] : String(item?.metadata?.year || item?.year || "").slice(0, 4),
+  };
+}
+
+function migrateLegacyTvMetadataMatches(matches = {}, shows = []) {
+  const canonicalRecords = Object.entries(matches)
+    .filter(([, record]) => record && !record.aliasOf && String(record.libraryType || "") === "tv")
+    .map(([key, record]) => ({ key, record }));
+  const titleCounts = new Map();
+  const identities = shows.map((show) => {
+    const identity = getTvAutoMatchIdentity(show);
+    titleCounts.set(identity.normalizedTitle, (titleCounts.get(identity.normalizedTitle) || 0) + 1);
+    return { show, identity };
+  });
+  let migrated = 0;
+
+  for (const { show, identity } of identities) {
+    if (!identity.normalizedTitle || findStoredMetadataMatch(matches, "tv", show)) continue;
+    const candidates = canonicalRecords.filter(({ record }) => {
+      const recordTitle = normalizeMovieAutoMatchTitle(record.title || record.sortTitle || "");
+      if (recordTitle !== identity.normalizedTitle) return false;
+      const recordYear = String(record.year || record.firstAirDate || record.releaseDate || "").slice(0, 4);
+      if (identity.year) return recordYear === identity.year;
+      return (titleCounts.get(identity.normalizedTitle) || 0) === 1;
+    });
+    if (candidates.length !== 1) continue;
+
+    const sourceRecord = candidates[0].record;
+    const localId = String(show.id || show.localId || show.libraryKey || show.sourcePath || "").trim();
+    if (!localId) continue;
+    const canonicalKey = `tv:${localId}`;
+    const aliases = buildStableTvMatchAliases({ localId, localItem: show, metadata: sourceRecord });
+    matches[canonicalKey] = compactMetadataMatchRecord({
+      ...sourceRecord,
+      libraryType: "tv",
+      localId,
+      aliases,
+      matchSource: sourceRecord.matchSource || "legacy-title-year-migration",
+      migratedFromLegacyKey: candidates[0].key,
+      migratedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    for (const alias of aliases) {
+      const aliasKey = `tv:${alias}`;
+      if (aliasKey !== canonicalKey && !matches[aliasKey]) matches[aliasKey] = { aliasOf: canonicalKey };
+    }
+    migrated += 1;
+  }
+
+  return migrated;
+}
+
+function makeAutomaticTvMatch(candidate = {}, item = {}) {
+  const firstAirDate = candidate.firstAirDate || candidate.first_air_date || candidate.releaseDate || "";
+  const posterPath = candidate.posterPath || candidate.poster_path || "";
+  const backdropPath = candidate.backdropPath || candidate.backdrop_path || "";
+  const localId = String(item.id || item.localId || item.sourcePath || item.name || "");
+  return {
+    libraryType: "tv",
+    localId,
+    provider: "tmdb",
+    source: "tmdb",
+    matchSource: "auto-filename-v1",
+    manualOverride: false,
+    matchLocked: false,
+    providerId: candidate.id,
+    tmdbId: candidate.id,
+    mediaType: "tv",
+    title: candidate.name || candidate.title || candidate.originalName || item.name || "Untitled",
+    sortTitle: candidate.name || candidate.title || candidate.originalName || item.name || "Untitled",
+    year: String(firstAirDate || "").slice(0, 4),
+    firstAirDate,
+    releaseDate: firstAirDate,
+    description: candidate.overview || "",
+    genres: Array.isArray(candidate.genres) ? candidate.genres : [],
+    poster: posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : "",
+    backdrop: backdropPath ? `https://image.tmdb.org/t/p/original${backdropPath}` : "",
+    matchedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function runTvAutoMatch({ limit = 75, force = false } = {}) {
+  if (tvAutoMatchRunning) return tvAutoMatchStatus;
+  const setup = readSetupConfig();
+  if (!force && setup?.librarySettings?.tvshows?.autoMatchV1 === false) {
+    tvAutoMatchStatus = { ...tvAutoMatchStatus, state: "disabled", message: "Automatic TV matching is disabled in TV settings." };
+    return tvAutoMatchStatus;
+  }
+  const { baseUrl, apiKey } = getSeerrConfig();
+  if (!baseUrl || !apiKey) {
+    tvAutoMatchStatus = { ...tvAutoMatchStatus, state: "unconfigured", message: "Connect Jellyseerr before using automatic TV matching." };
+    return tvAutoMatchStatus;
+  }
+
+  tvAutoMatchRunning = true;
+  tvAutoMatchStatus = { state: "running", scanned: 0, matched: 0, migrated: 0, skipped: 0, ambiguous: 0, errors: 0, remaining: 0, startedAt: new Date().toISOString(), completedAt: "", message: "Matching newly scanned TV folders by series title and release year…" };
+  try {
+    const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {});
+    const shows = Object.values(mediaIndex?.libraries?.tv || mediaIndex?.libraries?.tvshows || {});
+    const matches = readMetadataMatches();
+    tvAutoMatchStatus.migrated = migrateLegacyTvMetadataMatches(matches, shows);
+    if (tvAutoMatchStatus.migrated > 0) writeMetadataMatches(matches);
+    const unmatched = shows.filter((item) => {
+      const stored = findStoredMetadataMatch(matches, "tv", item);
+      return !(stored?.manualOverride === true || stored?.matchLocked === true || stored?.tmdbId || stored?.providerId);
+    });
+    const batch = unmatched.slice(0, Math.max(1, Math.min(Number(limit) || 75, 250)));
+    tvAutoMatchStatus.remaining = Math.max(0, unmatched.length - batch.length);
+
+    for (const item of batch) {
+      const identity = getTvAutoMatchIdentity(item);
+      if (!identity.query || !identity.normalizedTitle) {
+        tvAutoMatchStatus.skipped += 1;
+        continue;
+      }
+      tvAutoMatchStatus.scanned += 1;
+      try {
+        const response = await fetch(`${String(baseUrl).replace(/\/+$/, "")}/api/v1/search?query=${strictEncodeQuery(identity.query)}`, {
+          headers: { "X-Api-Key": apiKey, Accept: "application/json" },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.message || `Seerr returned ${response.status}`);
+        const exact = (Array.isArray(data?.results) ? data.results : [])
+          .filter((candidate) => String(candidate?.mediaType || "") === "tv")
+          .filter((candidate) => normalizeMovieAutoMatchTitle(candidate.name || candidate.title || candidate.originalName || "") === identity.normalizedTitle)
+          .filter((candidate) => {
+            if (!identity.year) return true;
+            const candidateYear = String(candidate.firstAirDate || candidate.first_air_date || "").slice(0, 4);
+            return candidateYear === identity.year;
+          });
+        if (exact.length !== 1) {
+          tvAutoMatchStatus.ambiguous += 1;
+          continue;
+        }
+        const record = makeAutomaticTvMatch(exact[0], item);
+        const aliases = buildStableTvMatchAliases({ localId: record.localId, localItem: item, metadata: record });
+        record.aliases = aliases;
+        const canonicalKey = `tv:${record.localId}`;
+        matches[canonicalKey] = record;
+        aliases.forEach((alias) => {
+          const aliasKey = `tv:${alias}`;
+          if (aliasKey !== canonicalKey) matches[aliasKey] = { aliasOf: canonicalKey };
+        });
+        tvAutoMatchStatus.matched += 1;
+      } catch (error) {
+        tvAutoMatchStatus.errors += 1;
+        console.warn(`[tv-auto-match] ${item.name || item.id}:`, error.message || error);
+      }
+    }
+    writeMetadataMatches(matches);
+    tvAutoMatchStatus = { ...tvAutoMatchStatus, state: "complete", completedAt: new Date().toISOString(), message: `Matched ${tvAutoMatchStatus.matched} TV show${tvAutoMatchStatus.matched === 1 ? "" : "s"}; migrated ${tvAutoMatchStatus.migrated} legacy match${tvAutoMatchStatus.migrated === 1 ? "" : "es"}; ${tvAutoMatchStatus.ambiguous} left for Fix Match review.` };
+  } catch (error) {
+    tvAutoMatchStatus = { ...tvAutoMatchStatus, state: "error", errors: tvAutoMatchStatus.errors + 1, completedAt: new Date().toISOString(), message: error.message || "Automatic TV matching failed." };
+  } finally {
+    tvAutoMatchRunning = false;
+  }
+  return tvAutoMatchStatus;
+}
+
 function getTubeArchivistConfig() {
   const setupConfig = readSetupConfig();
 
@@ -862,8 +1696,248 @@ function getTubeArchivistConfig() {
   return {
     baseUrl: ta.url || process.env.TUBEARCHIVIST_URL || "",
     apiKey: ta.apiKey || process.env.TUBEARCHIVIST_API_KEY || "",
+    youtubeApiKey: ta.youtubeApiKey || process.env.YOUTUBE_API_KEY || "",
   };
 }
+
+function normalizeYouTubeChannelMetadata(payload = {}, source = "youtube") {
+  const item = payload?.data || payload?.channel || payload?.items?.[0] || payload || {};
+  const snippet = item.snippet || {};
+  const statistics = item.statistics || {};
+  const branding = item.brandingSettings?.image || {};
+  return {
+    channelId: item.channel_id || item.channelId || item.youtube_id || item.id || "",
+    displayName: item.channel_name || item.channelName || snippet.title || item.title || item.name || "",
+    description: item.channel_description || item.description || snippet.description || "",
+    subscribers: Number(item.channel_subs ?? item.subscriberCount ?? statistics.subscriberCount ?? 0) || 0,
+    subscriberCount: Number(item.channel_subs ?? item.subscriberCount ?? statistics.subscriberCount ?? 0) || 0,
+    videoCount: Number(item.channel_vids ?? item.videoCount ?? statistics.videoCount ?? 0) || 0,
+    totalViews: Number(item.channel_views ?? item.viewCount ?? statistics.viewCount ?? 0) || 0,
+    joined: item.channel_created || item.joined || snippet.publishedAt || "",
+    poster: item.channel_thumb_url || item.channel_thumb || snippet.thumbnails?.high?.url || snippet.thumbnails?.medium?.url || snippet.thumbnails?.default?.url || "",
+    banner: item.channel_banner_url || item.channel_banner || branding.bannerExternalUrl || "",
+    country: item.channel_country || snippet.country || "",
+    customUrl: snippet.customUrl || item.channel_url || "",
+    source,
+  };
+}
+
+function mergeYouTubeChannelMetadata(primary = {}, fallback = {}) {
+  const merged = { ...fallback, ...primary };
+  for (const key of Object.keys(fallback || {})) {
+    if (primary?.[key] === "" || primary?.[key] == null || primary?.[key] === 0) merged[key] = fallback[key];
+  }
+  return merged;
+}
+
+const youtubeCreatorArtworkDir = path.join(dataDir, "youtube", "creator-artwork");
+
+function youtubeCreatorArtworkBase(channelId = "", kind = "poster") {
+  const safeChannel = String(channelId || "creator").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "creator";
+  const safeKind = kind === "banner" ? "banner" : "poster";
+  return path.join(youtubeCreatorArtworkDir, `${safeChannel}-${safeKind}`);
+}
+
+function findYouTubeCreatorArtworkFile(channelId = "", kind = "poster") {
+  const base = youtubeCreatorArtworkBase(channelId, kind);
+  return [".jpg", ".jpeg", ".png", ".webp", ".gif"]
+    .map((extension) => `${base}${extension}`)
+    .find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+async function cacheYouTubeCreatorArtwork(channelId, kind, remoteValue, config = {}) {
+  const existing = findYouTubeCreatorArtworkFile(channelId, kind);
+  if (existing) return `/api/youtube/channel/${encodeURIComponent(channelId)}/artwork/${kind}?v=${fs.statSync(existing).mtimeMs}`;
+  let remoteUrl = String(remoteValue || "").trim();
+  if (!remoteUrl) return "";
+  if (remoteUrl.startsWith("/") && config.baseUrl) remoteUrl = new URL(remoteUrl, `${config.baseUrl.replace(/\/$/, "")}/`).toString();
+  if (!/^https?:\/\//i.test(remoteUrl)) return "";
+  const headers = { Accept: "image/*" };
+  try {
+    if (config.apiKey && config.baseUrl && new URL(remoteUrl).origin === new URL(config.baseUrl).origin) {
+      headers.Authorization = `Token ${config.apiKey}`;
+    }
+  } catch {
+    return "";
+  }
+  const response = await fetch(remoteUrl, { headers, signal: AbortSignal.timeout(8000) });
+  if (!response.ok) return "";
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 20 * 1024 * 1024) return "";
+  const mime = String(response.headers.get("content-type") || "image/jpeg").toLowerCase();
+  const extension = mime.includes("png") ? ".png" : mime.includes("webp") ? ".webp" : mime.includes("gif") ? ".gif" : ".jpg";
+  fs.mkdirSync(youtubeCreatorArtworkDir, { recursive: true });
+  const target = `${youtubeCreatorArtworkBase(channelId, kind)}${extension}`;
+  fs.writeFileSync(target, bytes);
+  return `/api/youtube/channel/${encodeURIComponent(channelId)}/artwork/${kind}?v=${fs.statSync(target).mtimeMs}`;
+}
+
+app.get("/api/youtube/channel/:channelId/artwork/:kind", (req, res) => {
+  const kind = req.params.kind === "banner" ? "banner" : "poster";
+  const filePath = findYouTubeCreatorArtworkFile(req.params.channelId, kind);
+  if (!filePath) return res.status(404).end();
+  res.setHeader("Cache-Control", "private, max-age=86400, immutable");
+  return res.sendFile(filePath);
+});
+
+app.get("/api/youtube/channel/:channelId/metadata", async (req, res) => {
+  const channelId = String(req.params.channelId || "").trim();
+  if (!channelId) return res.status(400).json({ ok: false, message: "Channel ID is required." });
+  const { baseUrl, apiKey, youtubeApiKey } = getTubeArchivistConfig();
+  let tubeArchivist = {};
+  let youtube = {};
+  const warnings = [];
+  if (baseUrl && apiKey) {
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/channel/${encodeURIComponent(channelId)}/`, {
+        headers: { Authorization: `Token ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (response.ok) tubeArchivist = normalizeYouTubeChannelMetadata(await response.json(), "tubearchivist");
+      else warnings.push(`TubeArchivist returned ${response.status}`);
+    } catch (error) {
+      warnings.push(`TubeArchivist: ${error.message || "request failed"}`);
+    }
+  }
+  if (youtubeApiKey) {
+    try {
+      const url = new URL("https://www.googleapis.com/youtube/v3/channels");
+      url.searchParams.set("part", "snippet,statistics,brandingSettings");
+      url.searchParams.set("id", channelId);
+      url.searchParams.set("key", youtubeApiKey);
+      const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (response.ok) youtube = normalizeYouTubeChannelMetadata(await response.json(), "youtube");
+      else warnings.push(`YouTube returned ${response.status}`);
+    } catch (error) {
+      warnings.push(`YouTube: ${error.message || "request failed"}`);
+    }
+  }
+  const metadata = mergeYouTubeChannelMetadata(tubeArchivist, youtube);
+  if (!Object.values(metadata).some(Boolean)) {
+    return res.status(404).json({ ok: false, message: "No channel metadata source returned this creator.", warnings });
+  }
+  const [cachedPoster, cachedBanner] = await Promise.all([
+    cacheYouTubeCreatorArtwork(channelId, "poster", metadata.poster, { baseUrl, apiKey }).catch(() => ""),
+    cacheYouTubeCreatorArtwork(channelId, "banner", metadata.banner, { baseUrl, apiKey }).catch(() => ""),
+  ]);
+  if (cachedPoster) metadata.poster = cachedPoster;
+  if (cachedBanner) metadata.banner = cachedBanner;
+  res.setHeader("Cache-Control", "private, max-age=900");
+  return res.json({ ok: true, metadata, sources: [tubeArchivist.source, youtube.source].filter(Boolean), warnings });
+});
+
+const youtubeSeriesArtworkDir = path.join(dataDir, "youtube", "series-artwork");
+const youtubeSeriesBannerDir = path.join(dataDir, "youtube", "series-banners");
+const youtubeSeriesAppearancePath = path.join(dataDir, "youtube", "series-appearance.json");
+
+function youtubeSeriesArtworkPath(seriesId = "", extension = ".jpg") {
+  const safeId = String(seriesId || "series").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "series";
+  return path.join(youtubeSeriesArtworkDir, `${safeId}${extension}`);
+}
+
+app.get("/api/youtube/series-artwork", (req, res) => {
+  fs.mkdirSync(youtubeSeriesArtworkDir, { recursive: true });
+  const artwork = {};
+  for (const filename of fs.readdirSync(youtubeSeriesArtworkDir)) {
+    const match = filename.match(/^(.+)\.(jpg|jpeg|png|webp|gif)$/i);
+    if (!match) continue;
+    const filePath = path.join(youtubeSeriesArtworkDir, filename);
+    artwork[match[1]] = `/api/youtube/series/${encodeURIComponent(match[1])}/poster?v=${fs.statSync(filePath).mtimeMs}`;
+  }
+  res.json({ ok: true, artwork });
+});
+
+app.get("/api/youtube/series/:seriesId/poster", (req, res) => {
+  fs.mkdirSync(youtubeSeriesArtworkDir, { recursive: true });
+  const basePath = youtubeSeriesArtworkPath(req.params.seriesId, "").replace(/\.$/, "");
+  const filePath = [".jpg", ".jpeg", ".png", ".webp", ".gif"].map((ext) => `${basePath}${ext}`).find((candidate) => fs.existsSync(candidate));
+  if (!filePath) return res.status(404).end();
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  return res.sendFile(filePath);
+});
+
+app.post("/api/youtube/series/:seriesId/poster", express.raw({ type: "application/octet-stream", limit: "20mb" }), (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ ok: false, message: "Choose an image to upload." });
+    const mime = String(req.headers["x-homestead-content-type"] || "image/jpeg").toLowerCase();
+    const extension = mime.includes("png") ? ".png" : mime.includes("webp") ? ".webp" : mime.includes("gif") ? ".gif" : ".jpg";
+    fs.mkdirSync(youtubeSeriesArtworkDir, { recursive: true });
+    const target = youtubeSeriesArtworkPath(req.params.seriesId, extension);
+    const basePath = youtubeSeriesArtworkPath(req.params.seriesId, "").replace(/\.$/, "");
+    for (const ext of [".jpg", ".jpeg", ".png", ".webp", ".gif"]) {
+      const candidate = `${basePath}${ext}`;
+      if (candidate !== target && fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    }
+    fs.writeFileSync(target, req.body);
+    res.json({ ok: true, url: `/api/youtube/series/${encodeURIComponent(req.params.seriesId)}/poster?v=${Date.now()}` });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Could not save series poster." });
+  }
+});
+
+function youtubeSeriesBannerPath(seriesId = "", extension = ".jpg") {
+  const safeId = String(seriesId || "series").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "series";
+  return path.join(youtubeSeriesBannerDir, `${safeId}${extension}`);
+}
+
+app.get("/api/youtube/series-banners", (req, res) => {
+  fs.mkdirSync(youtubeSeriesBannerDir, { recursive: true });
+  const banners = {};
+  for (const filename of fs.readdirSync(youtubeSeriesBannerDir)) {
+    const match = filename.match(/^(.+)\.(jpg|jpeg|png|webp|gif)$/i);
+    if (!match) continue;
+    const filePath = path.join(youtubeSeriesBannerDir, filename);
+    banners[match[1]] = `/api/youtube/series/${encodeURIComponent(match[1])}/banner?v=${fs.statSync(filePath).mtimeMs}`;
+  }
+  res.json({ ok: true, banners });
+});
+
+app.get("/api/youtube/series/:seriesId/banner", (req, res) => {
+  fs.mkdirSync(youtubeSeriesBannerDir, { recursive: true });
+  const basePath = youtubeSeriesBannerPath(req.params.seriesId, "").replace(/\.$/, "");
+  const filePath = [".jpg", ".jpeg", ".png", ".webp", ".gif"].map((ext) => `${basePath}${ext}`).find((candidate) => fs.existsSync(candidate));
+  if (!filePath) return res.status(404).end();
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  return res.sendFile(filePath);
+});
+
+app.post("/api/youtube/series/:seriesId/banner", express.raw({ type: "application/octet-stream", limit: "30mb" }), (req, res) => {
+  try {
+    if (!req.body?.length) return res.status(400).json({ ok: false, message: "Choose a banner image to upload." });
+    const mime = String(req.headers["x-homestead-content-type"] || "image/jpeg").toLowerCase();
+    const extension = mime.includes("png") ? ".png" : mime.includes("webp") ? ".webp" : mime.includes("gif") ? ".gif" : ".jpg";
+    fs.mkdirSync(youtubeSeriesBannerDir, { recursive: true });
+    const target = youtubeSeriesBannerPath(req.params.seriesId, extension);
+    const basePath = youtubeSeriesBannerPath(req.params.seriesId, "").replace(/\.$/, "");
+    for (const ext of [".jpg", ".jpeg", ".png", ".webp", ".gif"]) {
+      const candidate = `${basePath}${ext}`;
+      if (candidate !== target && fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    }
+    fs.writeFileSync(target, req.body);
+    res.json({ ok: true, url: `/api/youtube/series/${encodeURIComponent(req.params.seriesId)}/banner?v=${Date.now()}` });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Could not save series banner." });
+  }
+});
+
+app.get("/api/youtube/series-appearance", (req, res) => {
+  res.json({ ok: true, appearances: readJsonFile(youtubeSeriesAppearancePath, {}) });
+});
+
+app.put("/api/youtube/series/:seriesId/appearance", (req, res) => {
+  const appearances = readJsonFile(youtubeSeriesAppearancePath, {});
+  const id = String(req.params.seriesId || "series").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "series";
+  const incoming = req.body || {};
+  appearances[id] = {
+    backgroundPosition: ["top", "center", "bottom"].includes(incoming.backgroundPosition) ? incoming.backgroundPosition : "center",
+    opacity: Math.max(0, Math.min(1, Number(incoming.opacity ?? 0.72))),
+    darkness: Math.max(0, Math.min(0.95, Number(incoming.darkness ?? 0.48))),
+    blur: Math.max(0, Math.min(30, Number(incoming.blur ?? 0))),
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonFile(youtubeSeriesAppearancePath, appearances);
+  res.json({ ok: true, appearance: appearances[id] });
+});
 
 async function downloadTubeArchivistAsset(assetPath, destinationPath) {
   if (!assetPath) return false;
@@ -949,6 +2023,37 @@ function getLidarrConfig() {
   );
 }
 
+function getBinderyConfig() {
+  const setupConfig = readSetupConfig();
+  return (
+    setupConfig?.integrationSettings?.bindery ||
+    setupConfig?.integrations?.bindery ||
+    {}
+  );
+}
+
+async function binderyFetch(route, options = {}) {
+  const config = getBinderyConfig();
+  const baseUrl = String(config.url || "").replace(/\/+$/, "");
+  const apiKey = String(config.apiKey || "").trim();
+  if (!baseUrl || !apiKey) throw new Error("Bindery is not configured. Add its URL and API key in Homestead integrations.");
+  const response = await fetch(`${baseUrl}${route}`, {
+    ...options,
+    signal: options.signal || AbortSignal.timeout(30000),
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-Api-Key": apiKey,
+      ...(options.headers || {}),
+    },
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.error || data?.message || `Bindery returned HTTP ${response.status}`);
+  }
+  return data;
+}
+
 ensureDataFiles();
 
 
@@ -960,26 +2065,75 @@ function normalizeNamedWatchlistId(value = "") {
     .replace(/^-+|-+$/g, "") || "watchlist";
 }
 
-function readNamedWatchlists() {
+function emptyDefaultWatchlist() {
+  return { movies: [], tv: [], books: [], music: [], youtube: [] };
+}
+
+function sanitizeWatchlistUserId(value = "") {
+  return String(value || "user").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "user";
+}
+
+function getUserWatchlistPaths(req) {
+  const user = homesteadAccess.getCurrentUser(req);
+  if (!user?.id) throw new Error("Sign in to access a watchlist.");
+  fs.mkdirSync(userWatchlistsDir, { recursive: true });
+  const userId = sanitizeWatchlistUserId(user.id);
+  return {
+    user,
+    watchlist: path.join(userWatchlistsDir, `${userId}.json`),
+    named: path.join(userWatchlistsDir, `${userId}.named.json`),
+  };
+}
+
+function readUserWatchlist(req) {
+  const paths = getUserWatchlistPaths(req);
+  if (!fs.existsSync(paths.watchlist)) {
+    const legacy = paths.user.role === "owner" && fs.existsSync(watchlistPath)
+      ? readJsonFile(watchlistPath, emptyDefaultWatchlist())
+      : emptyDefaultWatchlist();
+    writeJsonFile(paths.watchlist, { ...emptyDefaultWatchlist(), ...(legacy || {}) });
+  }
+  return { ...emptyDefaultWatchlist(), ...(readJsonFile(paths.watchlist, emptyDefaultWatchlist()) || {}) };
+}
+
+function writeUserWatchlist(req, value = {}) {
+  const paths = getUserWatchlistPaths(req);
+  const normalized = { ...emptyDefaultWatchlist() };
+  Object.keys(normalized).forEach((key) => {
+    normalized[key] = Array.isArray(value?.[key]) ? value[key] : [];
+  });
+  writeJsonFile(paths.watchlist, normalized);
+  return normalized;
+}
+
+function readNamedWatchlists(req) {
   try {
-    const data = JSON.parse(fs.readFileSync(namedWatchlistsPath, "utf8"));
+    const paths = getUserWatchlistPaths(req);
+    if (!fs.existsSync(paths.named)) {
+      const legacy = paths.user.role === "owner" && fs.existsSync(namedWatchlistsPath)
+        ? readJsonFile(namedWatchlistsPath, null)
+        : null;
+      writeJsonFile(paths.named, legacy || { watchlists: [{ id: "my-watchlist", name: "My Watchlist", items: [] }] });
+    }
+    const data = JSON.parse(fs.readFileSync(paths.named, "utf8"));
     return { watchlists: Array.isArray(data.watchlists) ? data.watchlists : [] };
   } catch {
     return { watchlists: [{ id: "my-watchlist", name: "My Watchlist", items: [] }] };
   }
 }
 
-function writeNamedWatchlists(data) {
-  fs.writeFileSync(namedWatchlistsPath, JSON.stringify(data, null, 2));
+function writeNamedWatchlists(req, data) {
+  const paths = getUserWatchlistPaths(req);
+  fs.writeFileSync(paths.named, JSON.stringify(data, null, 2));
 }
 
-app.get("/api/watchlists/named", (req, res) => {
-  res.json({ ok: true, ...readNamedWatchlists() });
+app.get("/api/watchlists/named", homesteadAccess.requireSession, (req, res) => {
+  res.json({ ok: true, ...readNamedWatchlists(req) });
 });
 
-app.post("/api/watchlists/named", (req, res) => {
+app.post("/api/watchlists/named", homesteadAccess.requireSession, (req, res) => {
   try {
-    const existing = readNamedWatchlists();
+    const existing = readNamedWatchlists(req);
     const incoming = req.body || {};
     const name = String(incoming.name || "").trim();
     if (!name) return res.status(400).json({ ok: false, message: "Watchlist name is required." });
@@ -995,14 +2149,14 @@ app.post("/api/watchlists/named", (req, res) => {
     const index = existing.watchlists.findIndex((entry) => String(entry.id) === id);
     if (index >= 0) existing.watchlists[index] = watchlist;
     else existing.watchlists.push(watchlist);
-    writeNamedWatchlists(existing);
+    writeNamedWatchlists(req, existing);
     res.json({ ok: true, watchlist });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Unable to save watchlist." });
   }
 });
 
-app.delete("/api/watchlists/named/:id", (req, res) => {
+app.delete("/api/watchlists/named/:id", homesteadAccess.requireSession, (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok: false, message: "Watchlist ID is required." });
@@ -1010,7 +2164,7 @@ app.delete("/api/watchlists/named/:id", (req, res) => {
       return res.status(400).json({ ok: false, message: "The default My Watchlist cannot be deleted." });
     }
 
-    const existing = readNamedWatchlists();
+    const existing = readNamedWatchlists(req);
     const previousCount = existing.watchlists.length;
     existing.watchlists = existing.watchlists.filter((entry) => String(entry?.id) !== id);
 
@@ -1018,26 +2172,19 @@ app.delete("/api/watchlists/named/:id", (req, res) => {
       return res.status(404).json({ ok: false, message: "Watchlist not found." });
     }
 
-    writeNamedWatchlists(existing);
+    writeNamedWatchlists(req, existing);
     res.json({ ok: true, deletedId: id, watchlists: existing.watchlists });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Unable to delete watchlist." });
   }
 });
 
-app.get("/api/watchlist", (req, res) => {
-  const watchlist = JSON.parse(
-    fs.readFileSync(watchlistPath, "utf8")
-  );
-  res.json(watchlist);
+app.get("/api/watchlist", homesteadAccess.requireSession, (req, res) => {
+  res.json(readUserWatchlist(req));
 });
 
-app.post("/api/watchlist", (req, res) => {
-  fs.writeFileSync(
-    watchlistPath,
-    JSON.stringify(req.body, null, 2)
-  );
-  res.json(req.body);
+app.post("/api/watchlist", homesteadAccess.requireSession, (req, res) => {
+  res.json(writeUserWatchlist(req, req.body || {}));
 });
 
 function readRequests() {
@@ -1065,22 +2212,123 @@ function readRequests() {
 }
 
 app.get("/api/requests", (req, res) => {
-  res.json(readRequests());
+  const user = homesteadAccess.accessContext(req).user;
+  const userId = String(user?.id || "owner");
+  const isOwner = user?.role === "owner";
+  const data = readRequests();
+  const scoped = {};
+  for (const bucket of ["movies", "tv", "books", "music", "youtube"]) {
+    scoped[bucket] = (data[bucket] || []).filter((item) =>
+      String(item?.requestedByUserId || "") === userId || (isOwner && !item?.requestedByUserId)
+    );
+  }
+  res.json(scoped);
 });
 
 app.post("/api/requests", (req, res) => {
-  const data = {
-    movies: req.body.movies || [],
-    tv: req.body.tv || [],
-    books: req.body.books || [],
-    music: req.body.music || [],
-    youtube: req.body.youtube || [],
-  };
+  const user = homesteadAccess.accessContext(req).user;
+  const userId = String(user?.id || "owner");
+  const isOwner = user?.role === "owner";
+  const existing = readRequests();
+  const data = {};
+  for (const bucket of ["movies", "tv", "books", "music", "youtube"]) {
+    const otherUsers = (existing[bucket] || []).filter((item) =>
+      String(item?.requestedByUserId || "") !== userId && !(isOwner && !item?.requestedByUserId)
+    );
+    const currentUser = (req.body?.[bucket] || []).map((item) => ({ ...item, requestedByUserId: userId }));
+    data[bucket] = [...otherUsers, ...currentUser];
+  }
 
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(requestsPath, JSON.stringify(data, null, 2));
 
-  res.json(data);
+  res.json(Object.fromEntries(Object.entries(data).map(([bucket, items]) => [bucket, items.filter((item) => item.requestedByUserId === userId)])));
+});
+
+app.get("/api/movies/upgrade-requests", (req, res) => {
+  const user = homesteadAccess.accessContext(req).user;
+  const rows = readJsonFile(movieUpgradeRequestsPath, []);
+  const elevated = ["owner", "admin"].includes(user?.role);
+  res.json({ ok: true, requests: elevated ? rows : rows.filter((row) => row.requestedByUserId === user?.id) });
+});
+
+app.post("/api/movies/upgrade-requests", express.json({ limit: "1mb" }), (req, res) => {
+  const user = homesteadAccess.accessContext(req).user;
+  if (!user || user.role === "child") return res.status(403).json({ ok: false, message: "This account cannot request movie upgrades." });
+  const localId = String(req.body?.localId || "").trim();
+  const tmdbId = String(req.body?.tmdbId || "").trim();
+  const title = String(req.body?.title || "Untitled movie").trim();
+  if (!localId && !tmdbId) return res.status(400).json({ ok: false, message: "A local movie or TMDB identity is required." });
+  const rows = readJsonFile(movieUpgradeRequestsPath, []);
+  const existing = rows.find((row) => ["pending-approval", "approved-to-search", "searching", "downloading"].includes(row.status) && ((tmdbId && row.tmdbId === tmdbId) || (localId && row.localId === localId)));
+  if (existing) return res.status(409).json({ ok: false, code: "UPGRADE_ALREADY_QUEUED", message: "An active upgrade request already exists for this movie.", request: existing });
+  const elevated = ["owner", "admin"].includes(user.role);
+  const record = {
+    id: `movie-upgrade-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    localId, tmdbId, title,
+    currentVersions: Array.isArray(req.body?.currentVersions) ? req.body.currentVersions.slice(0, 20) : [],
+    preferences: req.body?.preferences && typeof req.body.preferences === "object" ? req.body.preferences : {},
+    status: elevated ? "approved-to-search" : "pending-approval",
+    requestedByUserId: user.id,
+    requestedBy: user.displayName || user.username,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonFile(movieUpgradeRequestsPath, [record, ...rows].slice(0, 2000));
+  res.status(201).json({ ok: true, request: record, message: elevated ? "Upgrade search queued for an administrator." : "Upgrade request sent to an administrator for approval." });
+});
+
+app.patch("/api/movies/upgrade-requests/:requestId", homesteadAccess.requireAdmin, express.json({ limit: "1mb" }), (req, res) => {
+  const rows = readJsonFile(movieUpgradeRequestsPath, []);
+  const index = rows.findIndex((row) => row.id === req.params.requestId);
+  if (index < 0) return res.status(404).json({ ok: false, message: "Upgrade request not found." });
+  const status = ["approved-to-search", "declined", "searching", "downloading", "completed", "failed"].includes(req.body?.status) ? req.body.status : rows[index].status;
+  rows[index] = { ...rows[index], status, adminNote: String(req.body?.adminNote || rows[index].adminNote || ""), reviewedByUserId: req.homesteadUser.id, updatedAt: new Date().toISOString() };
+  writeJsonFile(movieUpgradeRequestsPath, rows);
+  res.json({ ok: true, request: rows[index] });
+});
+
+app.get("/api/tv/upgrade-requests", (req, res) => {
+  const user = homesteadAccess.accessContext(req).user;
+  const rows = readJsonFile(tvUpgradeRequestsPath, []);
+  const elevated = ["owner", "admin"].includes(user?.role);
+  res.json({ ok: true, requests: elevated ? rows : rows.filter((row) => row.requestedByUserId === user?.id) });
+});
+
+app.post("/api/tv/upgrade-requests", express.json({ limit: "1mb" }), (req, res) => {
+  const user = homesteadAccess.accessContext(req).user;
+  if (!user || user.role === "child") return res.status(403).json({ ok: false, message: "This account cannot request TV upgrades." });
+  const localId = String(req.body?.localId || "").trim();
+  const tmdbId = String(req.body?.tmdbId || "").trim();
+  const title = String(req.body?.title || "Untitled TV show").trim();
+  if (!localId && !tmdbId) return res.status(400).json({ ok: false, message: "A local TV show or TMDB identity is required." });
+  const rows = readJsonFile(tvUpgradeRequestsPath, []);
+  const existing = rows.find((row) => ["pending-approval", "approved-to-search", "searching", "downloading"].includes(row.status) && ((tmdbId && row.tmdbId === tmdbId) || (localId && row.localId === localId)));
+  if (existing) return res.status(409).json({ ok: false, code: "UPGRADE_ALREADY_QUEUED", message: "An active upgrade request already exists for this TV show.", request: existing });
+  const elevated = ["owner", "admin"].includes(user.role);
+  const record = {
+    id: `tv-upgrade-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    localId, tmdbId, title,
+    currentVersions: Array.isArray(req.body?.currentVersions) ? req.body.currentVersions.slice(0, 40) : [],
+    preferences: req.body?.preferences && typeof req.body.preferences === "object" ? req.body.preferences : {},
+    status: elevated ? "approved-to-search" : "pending-approval",
+    requestedByUserId: user.id,
+    requestedBy: user.displayName || user.username,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonFile(tvUpgradeRequestsPath, [record, ...rows].slice(0, 2000));
+  res.status(201).json({ ok: true, request: record, message: elevated ? "TV upgrade search queued for an administrator." : "TV upgrade request sent to an administrator for approval." });
+});
+
+app.patch("/api/tv/upgrade-requests/:requestId", homesteadAccess.requireAdmin, express.json({ limit: "1mb" }), (req, res) => {
+  const rows = readJsonFile(tvUpgradeRequestsPath, []);
+  const index = rows.findIndex((row) => row.id === req.params.requestId);
+  if (index < 0) return res.status(404).json({ ok: false, message: "TV upgrade request not found." });
+  const status = ["approved-to-search", "declined", "searching", "downloading", "completed", "failed"].includes(req.body?.status) ? req.body.status : rows[index].status;
+  rows[index] = { ...rows[index], status, adminNote: String(req.body?.adminNote || rows[index].adminNote || ""), reviewedByUserId: req.homesteadUser.id, updatedAt: new Date().toISOString() };
+  writeJsonFile(tvUpgradeRequestsPath, rows);
+  res.json({ ok: true, request: rows[index] });
 });
 
 function resolveCaseInsensitivePath(candidate = "") {
@@ -1208,15 +2456,259 @@ function sendImagePlaceholder(res) {
   );
 }
 
-app.get("/api/file", (req, res) => {
+const HEIC_FILE_PATTERN = /\.(?:heic|heif)$/i;
+const heicPreviewCacheDir = path.join(dataDir, "image-cache", "heic");
+const heicPreviewJobs = new Map();
+
+function isHeicFilePath(filePath = "") {
+  return HEIC_FILE_PATTERN.test(String(filePath || "").split(/[?#]/, 1)[0]);
+}
+
+function runImageConverter(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        error.message = `${error.message}${stderr ? `: ${String(stderr).trim()}` : ""}`;
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+function normalizeHeicPreviewOptions(options = {}) {
+  const requestedWidth = Number.parseInt(options.width, 10);
+  const requestedQuality = Number.parseInt(options.quality, 10);
+  return {
+    width: Number.isFinite(requestedWidth) ? Math.min(3840, Math.max(256, requestedWidth)) : 2560,
+    quality: Number.isFinite(requestedQuality) ? Math.min(92, Math.max(60, requestedQuality)) : 88,
+  };
+}
+
+async function createHeicPreview(filePath, options = {}) {
+  const sourcePath = path.resolve(filePath);
+  const { width, quality } = normalizeHeicPreviewOptions(options);
+  const stats = await fs.promises.stat(sourcePath);
+  const cacheKey = crypto
+    .createHash("sha256")
+    .update(`${sourcePath}\0${stats.size}\0${stats.mtimeMs}\0${width}\0${quality}`)
+    .digest("hex");
+  const previewPath = path.join(heicPreviewCacheDir, `${cacheKey}.jpg`);
+
+  try {
+    const cachedStats = await fs.promises.stat(previewPath);
+    if (cachedStats.isFile() && cachedStats.size > 0) return previewPath;
+  } catch {
+    // A cache miss is expected the first time an HEIC image is requested.
+  }
+
+  if (heicPreviewJobs.has(cacheKey)) return heicPreviewJobs.get(cacheKey);
+
+  const job = (async () => {
+    await fs.promises.mkdir(heicPreviewCacheDir, { recursive: true });
+    const temporaryPath = `${previewPath}.${process.pid}-${Date.now()}.tmp.jpg`;
+    const decodedPath = `${previewPath}.${process.pid}-${Date.now()}.decoded.jpg`;
+    let sharpError = null;
+
+    try {
+      if (!sharp) throw new Error("Sharp is unavailable");
+      await sharp(sourcePath, { pages: 1, failOn: "none" })
+        .rotate()
+        .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality, progressive: true })
+        .toFile(temporaryPath);
+    } catch (error) {
+      sharpError = error;
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      const converterAttempts = [
+        ["heif-convert", ["-q", String(quality), sourcePath, decodedPath]],
+        ["heif-dec", ["--quiet", "-q", String(quality), sourcePath, decodedPath]],
+      ];
+      const converterErrors = [`Sharp: ${sharpError?.message || "unavailable"}`];
+
+      for (const [command, args] of converterAttempts) {
+        try {
+          await runImageConverter(command, args);
+          const decoded = await fs.promises.stat(decodedPath).catch(() => null);
+          if (decoded?.isFile() && decoded.size > 0) {
+            await sharp(decodedPath, { pages: 1, failOn: "none" })
+              .rotate()
+              .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+              .jpeg({ quality, progressive: true })
+              .toFile(temporaryPath);
+            break;
+          }
+          converterErrors.push(`${command}: conversion produced no output`);
+        } catch (converterError) {
+          converterErrors.push(`${command}: ${converterError.message}`);
+        }
+        await fs.promises.rm(decodedPath, { force: true }).catch(() => {});
+        await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      }
+
+      const converted = await fs.promises.stat(temporaryPath).catch(() => null);
+      if (!converted?.isFile() || converted.size <= 0) {
+        throw new Error(converterErrors.join("; "));
+      }
+    } finally {
+      await fs.promises.rm(decodedPath, { force: true }).catch(() => {});
+    }
+
+    const convertedStats = await fs.promises.stat(temporaryPath);
+    if (!convertedStats.isFile() || convertedStats.size <= 0) {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      throw new Error("HEIC conversion produced an empty preview");
+    }
+
+    await fs.promises.rename(temporaryPath, previewPath).catch(async (error) => {
+      if (error.code !== "EEXIST") throw error;
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+    });
+    return previewPath;
+  })().finally(() => {
+    heicPreviewJobs.delete(cacheKey);
+  });
+
+  heicPreviewJobs.set(cacheKey, job);
+  return job;
+}
+
+async function sendHeicPreview(res, filePath, options = {}) {
+  try {
+    const previewPath = await createHeicPreview(filePath, options);
+    res.type("image/jpeg");
+    res.setHeader("Cache-Control", "private, max-age=86400, immutable");
+    return res.sendFile(previewPath);
+  } catch (error) {
+    console.warn(`Unable to create HEIC preview for ${filePath}:`, error.message);
+    return sendImagePlaceholder(res);
+  }
+}
+
+app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
   const filePath = String(req.query.path || "").trim();
 
   if (!filePath || !fs.existsSync(filePath)) {
     return res.status(404).send("File not found");
   }
 
-  res.setHeader("Cache-Control", "private, max-age=300");
-  return res.sendFile(path.resolve(filePath));
+  if (isHeicFilePath(filePath) && String(req.query.raw || "") !== "1") {
+    return sendHeicPreview(res, filePath, req.query);
+  }
+
+  const replaceableArtwork = /(?:^|[\\/])(?:poster|banner|headshot|breasts|pussy|ass)(?:-cutout)?\.(?:jpe?g|png|webp|gif|avif|heic|heif|mp4|m4v|mov|webm)$/i.test(filePath);
+  if (replaceableArtwork && !req.query.v) res.setHeader("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
+  else if (replaceableArtwork) res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+  else res.setHeader("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800");
+  const mediaFile = /\.(?:mp4|m4v|mov|webm|ogv|mp3|m4a|aac|flac|wav|ogg|opus)$/i.test(filePath);
+  if (!mediaFile) return res.sendFile(path.resolve(filePath));
+
+  const stat = fs.statSync(filePath);
+  const total = stat.size;
+  res.setHeader("Accept-Ranges", "bytes");
+  res.type(filePath);
+  const range = String(req.headers.range || "").match(/^bytes=(\d*)-(\d*)$/i);
+  if (!range) {
+    res.status(200).setHeader("Content-Length", total);
+    if (req.method === "HEAD") return res.end();
+    return fs.createReadStream(filePath).pipe(res);
+  }
+
+  const suffixLength = range[1] === "" && range[2] !== "" ? Number(range[2]) : null;
+  const start = suffixLength !== null ? Math.max(0, total - suffixLength) : Number(range[1] || 0);
+  const requestedEnd = suffixLength !== null ? total - 1 : Number(range[2] || total - 1);
+  const end = Math.min(total - 1, requestedEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || start >= total) {
+    res.status(416).setHeader("Content-Range", `bytes */${total}`);
+    return res.end();
+  }
+  res.status(206);
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+  res.setHeader("Content-Length", end - start + 1);
+  if (req.method === "HEAD") return res.end();
+  return fs.createReadStream(filePath, { start, end }).pipe(res);
+});
+
+const mediaDurationProbeCache = new Map();
+
+function probeMediaDuration(filePath) {
+  const stat = fs.statSync(filePath);
+  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+  if (mediaDurationProbeCache.has(cacheKey)) return mediaDurationProbeCache.get(cacheKey);
+  const probe = new Promise((resolve, reject) => {
+    const child = spawn("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1", filePath,
+    ]);
+    let output = "";
+    let errorText = "";
+    const timer = setTimeout(() => child.kill("SIGTERM"), 12000);
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { errorText = `${errorText}${chunk}`.slice(-2000); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const duration = Number.parseFloat(output.trim());
+      if (!code && Number.isFinite(duration) && duration > 0) resolve(duration);
+      else reject(new Error(errorText || "Unable to read media duration."));
+    });
+  }).catch((error) => {
+    mediaDurationProbeCache.delete(cacheKey);
+    throw error;
+  });
+  mediaDurationProbeCache.set(cacheKey, probe);
+  return probe;
+}
+
+app.get("/api/media/probe", homesteadAccess.authorizeFile, async (req, res) => {
+  try {
+    const filePath = String(req.query.path || "").trim();
+    if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      return res.status(404).json({ ok: false, message: "Media file not found." });
+    }
+    const duration = await probeMediaDuration(filePath);
+    return res.json({ ok: true, duration, seekable: true });
+  } catch (error) {
+    return res.status(422).json({ ok: false, message: error.message || "Unable to read media duration." });
+  }
+});
+
+app.get("/api/media/transcode", homesteadAccess.authorizeFile, (req, res) => {
+  const requested = String(req.query.path || "").trim();
+  const filePath = resolveHomesteadFilePath(requested);
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return res.status(404).json({ ok: false, message: "Media file not found." });
+  }
+  res.status(200);
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Homestead-Playback", "compatibility-transcode");
+  const requestedStart = Number.parseFloat(String(req.query.start || "0"));
+  const start = Number.isFinite(requestedStart) && requestedStart > 0 ? requestedStart : 0;
+  res.setHeader("X-Homestead-Start-Time", String(start));
+  const transcoder = spawn("ffmpeg", [
+    "-hide_banner", "-loglevel", "error", ...(start > 0 ? ["-ss", String(start)] : []), "-i", filePath,
+    "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+    "-c:a", "aac", "-b:a", "192k", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+    "-f", "mp4", "pipe:1",
+  ]);
+  transcoder.stdout.pipe(res);
+  let errorText = "";
+  transcoder.stderr.on("data", (chunk) => { errorText = `${errorText}${chunk}`.slice(-4000); });
+  transcoder.on("error", (error) => {
+    console.error("Movie compatibility transcode failed to start:", error.message);
+    if (!res.headersSent) res.status(503).json({ ok: false, message: "FFmpeg is unavailable for this movie format." });
+    else res.destroy(error);
+  });
+  transcoder.on("close", (code) => {
+    if (code && !res.destroyed) {
+      console.error("Movie compatibility transcode failed:", errorText || `ffmpeg exited ${code}`);
+      res.end();
+    }
+  });
+  req.on("close", () => { if (!transcoder.killed) transcoder.kill("SIGTERM"); });
+  return undefined;
 });
 
 const SCAN_LIBRARY_ALIASES = {
@@ -1283,9 +2775,10 @@ function normalizeScanFolders(folder, folders) {
 
 function buildScanCommands({ libraryId = "all", folder = "", folders = [], mode = "" } = {}) {
   const requestedLibrary = normalizeScanLibraryId(libraryId || mode || "all");
-  const requestedMode = normalizeScanLibraryId(mode || "");
+  const rawMode = String(mode || "").trim();
+  const requestedMode = rawMode ? normalizeScanLibraryId(rawMode) : "";
   const requestedFolders = normalizeScanFolders(folder, folders);
-  const isBulkScan = requestedLibrary === "all" || requestedMode === "all" || requestedMode === "bulk";
+  const isBulkScan = requestedLibrary === "all" || requestedMode === "all";
   const commands = [];
 
   const addMediaScan = (args = []) => {
@@ -1318,12 +2811,60 @@ function buildScanCommands({ libraryId = "all", folder = "", folders = [], mode 
   return commands;
 }
 
+let mediaScanRunning = false;
+let bulkMediaScanRunning = false;
+
 function runScannerCommands(commands = [], callback) {
   const results = [];
 
+  const isBulkScan = commands.some((command) =>
+    command?.script === "scan-media.cjs" &&
+    Array.isArray(command.args) &&
+    command.args.includes("--all")
+  );
+  const hasMediaScan = commands.some((command) => command?.script === "scan-media.cjs");
+
+  if (hasMediaScan && mediaScanRunning) {
+    const error = new Error(isBulkScan || bulkMediaScanRunning
+      ? "A full media-library scan is already running."
+      : "A media-library scan is already running.");
+    error.code = "SCAN_ALREADY_RUNNING";
+    console.warn("[scanner] Deferred overlapping media-library scan.");
+    return callback(error, results);
+  }
+
+  if (hasMediaScan) mediaScanRunning = true;
+  if (isBulkScan) {
+    bulkMediaScanRunning = true;
+    console.log("[scanner] Full-library scan lock acquired.");
+  }
+
+  // Scanner output can always be rolled back to the exact artwork references
+  // that existed before this run. Media files themselves are never moved.
+  try {
+    backupArtworkIndexes(isBulkScan ? "before-full-scan" : "before-library-scan");
+  } catch (backupError) {
+    console.warn("[artwork] Could not create pre-scan index backup:", backupError.message);
+  }
+
+  let finished = false;
+
+  const finish = (error = null) => {
+    if (finished) return;
+    finished = true;
+
+    if (isBulkScan) {
+      bulkMediaScanRunning = false;
+      console.log("[scanner] Full-library scan lock released.");
+    }
+    if (hasMediaScan) mediaScanRunning = false;
+
+    callback(error, results);
+  };
+
   const runNext = (index = 0) => {
     const command = commands[index];
-    if (!command) return callback(null, results);
+    if (!command) return finish();
 
     const scriptPath = path.join(__dirname, "scripts", "scanners", command.script);
     const nodeArgs = [scriptPath, ...(command.args || [])];
@@ -1341,7 +2882,7 @@ function runScannerCommands(commands = [], callback) {
 
       if (error) {
         error.scannerResult = result;
-        return callback(error, results);
+        return finish(error);
       }
 
       runNext(index + 1);
@@ -1351,7 +2892,7 @@ function runScannerCommands(commands = [], callback) {
   runNext(0);
 }
 
-app.post("/api/scan-library", (req, res) => {
+app.post("/api/scan-library", homesteadAccess.requireAdmin, (req, res) => {
   const { libraryId, folder, folders, mode } = req.body || {};
   const normalizedLibraryId = normalizeScanLibraryId(libraryId || mode || "all");
   const requestedFolders = normalizeScanFolders(folder, folders);
@@ -1371,7 +2912,8 @@ app.post("/api/scan-library", (req, res) => {
     if (scanErr) {
       console.error("Media scan failed:", scanErr);
 
-      return res.status(500).json({
+      const statusCode = scanErr.code === "SCAN_ALREADY_RUNNING" ? 409 : 500;
+      return res.status(statusCode).json({
         ok: false,
         error: scanErr.message,
         libraryId: normalizedLibraryId,
@@ -1382,7 +2924,23 @@ app.post("/api/scan-library", (req, res) => {
       });
     }
 
-    const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {});
+    const mediaIndex = ["books", "all"].includes(normalizedLibraryId)
+      ? reconcileNestedBooksMediaIndex()
+      : readJsonFile(path.join(dataDir, "media-index.json"), {});
+
+    if (["movies", "all"].includes(normalizedLibraryId)) {
+      setImmediate(() => runMovieAutoMatch().catch((error) => console.error("[auto-match] Post-scan matching failed:", error)));
+    }
+    if (["tv", "all"].includes(normalizedLibraryId)) {
+      setImmediate(() => runTvAutoMatch().catch((error) => console.error("[tv-auto-match] Post-scan matching failed:", error)));
+    }
+    for (const library of ["music", "books"]) {
+      if ([library, "all"].includes(normalizedLibraryId)) libraryAutoMatch.start(library, { automatic: true });
+    }
+    if (["music", "all"].includes(normalizedLibraryId) && getLidarrConfig()?.autoLinkLocalArtists === true) {
+      setImmediate(() => syncLocalMusicArtistsWithLidarr({ refreshMetadata: false })
+        .catch((error) => console.error("[lidarr] Post-scan local artist sync failed:", error)));
+    }
 
     res.json({
       ok: true,
@@ -1403,11 +2961,1820 @@ app.post("/api/scan-library", (req, res) => {
   });
 });
 
+app.get("/api/movies/auto-match/status", homesteadAccess.requireSession, (req, res) => {
+  res.json({ ok: true, ...movieAutoMatchStatus, running: movieAutoMatchRunning });
+});
+
+app.post("/api/movies/auto-match/run", homesteadAccess.requireAdmin, async (req, res) => {
+  const status = await runMovieAutoMatch({ limit: req.body?.limit, force: req.body?.force === true });
+  res.json({ ok: status.state !== "error", ...status, running: movieAutoMatchRunning, stats: getMetadataMatchStats() });
+});
+
+app.get("/api/tv/auto-match/status", homesteadAccess.requireSession, (req, res) => {
+  res.json({ ok: true, ...tvAutoMatchStatus, running: tvAutoMatchRunning });
+});
+
+app.post("/api/tv/auto-match/run", homesteadAccess.requireAdmin, async (req, res) => {
+  const status = await runTvAutoMatch({ limit: req.body?.limit, force: req.body?.force === true });
+  res.json({ ok: status.state !== "error", ...status, running: tvAutoMatchRunning, stats: getMetadataMatchStats() });
+});
+
 app.get("/api/test", (req, res) => {
   res.json({
     ok: true,
     message: "test route works"
   });
+});
+
+// Book/music jobs are asynchronous; opening the library never waits on providers.
+const { createLibraryAutoMatch } = require("./src/server/library-auto-match.cjs");
+const libraryAutoMatch = createLibraryAutoMatch({
+  stateFile: path.join(dataDir, "library-auto-match.json"),
+  readIndex: () => readJsonFile(path.join(dataDir, "media-index.json"), {}),
+  readMatches: readMetadataMatches, writeMatches: writeMetadataMatches,
+  searchBooks: (query, options = {}) => searchBookMetadata(query, { ...options, provider: options.provider || "all", mode: "auto-match" }),
+  searchMusic: searchMusicMetadata,
+  linkArtist: async (candidate) => {
+    const config = getLidarrConfig();
+    if (!config.url || !config.apiKey) return;
+    // Read-only linking: don't add/monitor/download a catalog during Auto Match.
+    const artists = await lidarrFetch("/api/v1/artist");
+    const found = (Array.isArray(artists) ? artists : []).find((artist) => artist.foreignArtistId === candidate.providerId);
+    if (!found) return;
+    const matches = readMetadataMatches();
+    for (const record of Object.values(matches)) {
+      if (record?.libraryType === "music" && record.mediaType === "artist" && record.providerId === candidate.providerId && !record.aliasOf) {
+        record.lidarrId = found.id;
+        if (!record.poster) record.poster = found.images?.find((img) => img.coverType === "poster")?.remoteUrl || "";
+      }
+    }
+    writeMetadataMatches(matches);
+  },
+});
+for (const library of ["music", "books"]) {
+  app.get(`/api/${library}/auto-match/status`, homesteadAccess.requireAdmin, (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(libraryAutoMatch.getStatus(library, Math.max(0, Number(req.query.offset) || 0)));
+  });
+  app.post(`/api/${library}/auto-match/run`, homesteadAccess.requireAdmin, (req, res) => {
+    res.status(202).json(libraryAutoMatch.start(library, { force: req.body?.force === true, localId: req.body?.localId }));
+  });
+  app.post(`/api/${library}/auto-match/settings`, homesteadAccess.requireAdmin, (req, res) => {
+    if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, message: "enabled must be a boolean" });
+    res.json(libraryAutoMatch.setEnabled(library, req.body.enabled));
+  });
+  app.post(`/api/${library}/auto-match/search`, homesteadAccess.requireAdmin, async (req, res) => {
+    try {
+      const item = libraryAutoMatch.findEntity(library, req.body?.localId);
+      if (!item) return res.status(404).json({ ok: false, message: "Local item no longer exists. Rescan the library." });
+      const candidates = await libraryAutoMatch.search(item, String(req.body?.query || "").trim() || undefined);
+      res.json({ ok: true, item, candidates: candidates.map((candidate) => ({ ...libraryAutoMatch.makeRecord(library, item, candidate), compatibility: libraryAutoMatch.evaluateCandidate(item, candidate) })) });
+    } catch (error) { res.status(502).json({ ok: false, message: error.message }); }
+  });
+}
+
+const bookArtworkRoot = path.join(dataDir, "book-artwork");
+const bookSeriesArtworkRoot = path.join(dataDir, "book-series-artwork");
+const bookSeriesAppearancePath = path.join(dataDir, "book-series-appearance.json");
+
+function sanitizeBookSeriesId(value = "") {
+  return String(value || "series").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "series";
+}
+
+function readBookSeriesAppearances() {
+  const saved = readJsonFile(bookSeriesAppearancePath, {});
+  return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+}
+
+app.get("/api/books/series-appearance", homesteadAccess.requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, appearances: readBookSeriesAppearances() });
+});
+
+app.post("/api/books/series-appearance", homesteadAccess.requireAdmin, (req, res) => {
+  try {
+    const series = String(req.body?.series || "").trim();
+    if (!series) return res.status(400).json({ ok: false, message: "Choose a book series first." });
+    const id = sanitizeBookSeriesId(series);
+    const appearances = readBookSeriesAppearances();
+    const appearance = {
+      id,
+      series,
+      banner: String(req.body?.banner || "").trim(),
+      opacity: Math.max(0, Math.min(1, Number(req.body?.opacity ?? 0.34))),
+      darkness: Math.max(0, Math.min(0.95, Number(req.body?.darkness ?? 0.68))),
+      blur: Math.max(0, Math.min(30, Number(req.body?.blur ?? 0))),
+      position: ["center", "top", "bottom", "left", "right"].includes(req.body?.position) ? req.body.position : "center",
+      updatedAt: new Date().toISOString(),
+    };
+    appearances[id] = appearance;
+    writeJsonFile(bookSeriesAppearancePath, appearances);
+    res.json({ ok: true, id, appearance, message: `Saved artwork for ${series}.` });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Unable to save book series artwork." });
+  }
+});
+
+app.get("/api/books/series/:seriesId/banner", homesteadAccess.requireSession, (req, res) => {
+  const id = sanitizeBookSeriesId(req.params.seriesId);
+  for (const extension of [".jpg", ".png", ".webp", ".gif"]) {
+    const filePath = path.join(bookSeriesArtworkRoot, `${id}${extension}`);
+    if (fs.existsSync(filePath)) {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.sendFile(filePath);
+    }
+  }
+  return res.status(404).end();
+});
+
+app.post("/api/books/series/:seriesId/banner", homesteadAccess.requireAdmin, express.raw({ type: "application/octet-stream", limit: "32mb" }), async (req, res) => {
+  try {
+    const id = sanitizeBookSeriesId(req.params.seriesId);
+    const contentType = String(req.get("x-homestead-content-type") || "").toLowerCase();
+    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : contentType.includes("gif") ? ".gif" : contentType.includes("jpeg") || contentType.includes("jpg") ? ".jpg" : "";
+    if (!extension || !Buffer.isBuffer(req.body) || req.body.length < 32) throw new Error("Choose a JPG, PNG, WebP, or GIF image.");
+    if (sharp) await sharp(req.body, { animated: false }).metadata();
+    fs.mkdirSync(bookSeriesArtworkRoot, { recursive: true });
+    for (const previousExtension of [".jpg", ".png", ".webp", ".gif"]) {
+      const previous = path.join(bookSeriesArtworkRoot, `${id}${previousExtension}`);
+      if (fs.existsSync(previous)) fs.unlinkSync(previous);
+    }
+    const destination = path.join(bookSeriesArtworkRoot, `${id}${extension}`);
+    fs.writeFileSync(destination, req.body);
+    const version = Math.floor(fs.statSync(destination).mtimeMs);
+    res.json({ ok: true, id, url: `/api/books/series/${encodeURIComponent(id)}/banner?v=${version}` });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Unable to save book series banner." });
+  }
+});
+
+function bookArtworkExtension(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return ".jpg";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return ".png";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
+  if (buffer.length >= 6 && ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))) return ".gif";
+  return "";
+}
+
+function isPrivateArtworkAddress(value = "") {
+  const address = String(value || "").toLowerCase().split("%")[0];
+  if (net.isIPv4(address)) {
+    const parts = address.split(".").map(Number);
+    return parts[0] === 0 || parts[0] === 10 || parts[0] === 127 ||
+      (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) ||
+      (parts[0] === 169 && parts[1] === 254) ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+      (parts[0] === 192 && parts[1] === 168) ||
+      (parts[0] === 198 && [18, 19].includes(parts[1])) || parts[0] >= 224;
+  }
+  if (net.isIPv6(address)) {
+    if (["::", "::1"].includes(address) || /^(?:fc|fd|fe8|fe9|fea|feb)/.test(address)) return true;
+    const mapped = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return mapped ? isPrivateArtworkAddress(mapped[1]) : false;
+  }
+  return true;
+}
+
+async function safeBookArtworkRemoteUrl(value = "") {
+  const parsed = new URL(String(value || ""));
+  const host = parsed.hostname.toLowerCase();
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || (parsed.port && !["80", "443"].includes(parsed.port))) {
+    throw new Error("Enter a public HTTP or HTTPS image or webpage URL.");
+  }
+  if (!host || host === "localhost" || /\.(?:localhost|local|internal|lan|home)$/i.test(host)) throw new Error("Local and private network artwork URLs are not allowed.");
+  const addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some((entry) => isPrivateArtworkAddress(entry.address))) throw new Error("That artwork URL resolves to a local or private network address.");
+  return parsed.toString();
+}
+
+const remoteArtworkNegativeCache = new Map();
+
+async function fetchRemoteArtworkBuffer(initialUrl = "", { timeoutMs = 7000 } = {}) {
+  let currentUrl = String(initialUrl || "").trim();
+  for (let redirectCount = 0; redirectCount <= 4; redirectCount += 1) {
+    currentUrl = await safeBookArtworkRemoteUrl(currentUrl);
+    const response = await fetch(currentUrl, {
+      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*", "User-Agent": "Homestead/0.6.8.57" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.status >= 300 && response.status < 400 && response.headers.get("location")) {
+      currentUrl = new URL(response.headers.get("location"), currentUrl).toString();
+      continue;
+    }
+    if (!response.ok) throw new Error(`Artwork provider returned HTTP ${response.status}.`);
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > 25 * 1024 * 1024) throw new Error("Artwork is larger than 25 MB.");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const extension = bookArtworkExtension(buffer);
+    if (!extension || !buffer.length || buffer.length > 25 * 1024 * 1024) throw new Error("Artwork provider did not return a supported image.");
+    return { buffer, extension, contentType: extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : extension === ".gif" ? "image/gif" : "image/jpeg", finalUrl: currentUrl };
+  }
+  throw new Error("Artwork provider redirected too many times.");
+}
+
+app.get("/api/artwork/cache", homesteadAccess.requireSession, async (req, res) => {
+  const requestedUrl = String(req.query.url || "").trim();
+  if (!requestedUrl) return res.status(400).send("Missing artwork URL");
+  const cacheKey = crypto.createHash("sha256").update(requestedUrl).digest("hex");
+  for (const extension of [".jpg", ".png", ".webp", ".gif"]) {
+    const cachedPath = path.join(REMOTE_ARTWORK_CACHE_ROOT, `${cacheKey}${extension}`);
+    if (fs.existsSync(cachedPath)) {
+      res.setHeader("Cache-Control", "private, max-age=604800, immutable");
+      res.setHeader("X-Homestead-Artwork-Source", "cache");
+      return res.sendFile(cachedPath);
+    }
+  }
+  const failedAt = remoteArtworkNegativeCache.get(cacheKey) || 0;
+  if (Date.now() - failedAt < 2 * 60 * 1000) {
+    res.setHeader("Cache-Control", "private, max-age=60");
+    return res.status(404).send("Artwork temporarily unavailable");
+  }
+  try {
+    const artwork = await fetchRemoteArtworkBuffer(requestedUrl, { timeoutMs: 7000 });
+    fs.mkdirSync(REMOTE_ARTWORK_CACHE_ROOT, { recursive: true });
+    const cachePath = path.join(REMOTE_ARTWORK_CACHE_ROOT, `${cacheKey}${artwork.extension}`);
+    const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporaryPath, artwork.buffer);
+    fs.renameSync(temporaryPath, cachePath);
+    remoteArtworkNegativeCache.delete(cacheKey);
+    res.setHeader("Content-Type", artwork.contentType);
+    res.setHeader("Cache-Control", "private, max-age=604800, immutable");
+    res.setHeader("X-Homestead-Artwork-Source", "provider");
+    return res.send(artwork.buffer);
+  } catch (error) {
+    remoteArtworkNegativeCache.set(cacheKey, Date.now());
+    console.warn("[artwork] Provider image unavailable:", error.message);
+    res.setHeader("Cache-Control", "private, max-age=60");
+    return res.status(404).send("Artwork unavailable");
+  }
+});
+
+function resolveMatchArtworkDirectory(localItem = {}) {
+  const original = localItem?.originalItem || {};
+  const candidates = [
+    localItem?.folderPath, localItem?.sourcePath, localItem?.path,
+    original?.folderPath, original?.sourcePath, original?.path,
+    localItem?.files?.[0]?.sourcePath, localItem?.files?.[0]?.path,
+    original?.files?.[0]?.sourcePath, original?.files?.[0]?.path,
+  ].filter(Boolean);
+  const mediaRoot = path.resolve(process.env.MEDIA_ROOT || "/media");
+  for (const candidate of candidates) {
+    const resolved = resolveHomesteadFilePath(candidate);
+    if (!resolved || !fs.existsSync(resolved)) continue;
+    const directory = fs.statSync(resolved).isDirectory() ? resolved : path.dirname(resolved);
+    const normalizedDirectory = path.resolve(directory);
+    if (normalizedDirectory !== mediaRoot && !normalizedDirectory.startsWith(`${mediaRoot}${path.sep}`)) continue;
+    try {
+      fs.accessSync(normalizedDirectory, fs.constants.W_OK);
+      return normalizedDirectory;
+    } catch {
+      // Read-only media is still supported through Homestead's provider cache.
+    }
+  }
+  return "";
+}
+
+function localArtworkPublicUrl(filePath = "") {
+  const mediaRoot = path.resolve(process.env.MEDIA_ROOT || "/media");
+  const resolved = path.resolve(filePath);
+  if (resolved !== mediaRoot && !resolved.startsWith(`${mediaRoot}${path.sep}`)) return "";
+  return `/media/${path.relative(mediaRoot, resolved).split(path.sep).map(encodeURIComponent).join("/")}`;
+}
+
+async function saveConfirmedMatchArtwork({ libraryType = "", localItem = {}, metadata = {}, preserveArtwork = false } = {}) {
+  if (preserveArtwork || !["movies", "tv"].includes(String(libraryType))) return { preserved: Boolean(preserveArtwork) };
+  const targetDirectory = resolveMatchArtworkDirectory(localItem);
+  if (!targetDirectory) return { cachedOnly: true, reason: "media-folder-read-only-or-unavailable" };
+  const artworkEntries = [
+    { slot: "poster", url: String(metadata.poster || "").trim(), fileName: "poster.jpg" },
+    { slot: "backdrop", url: String(metadata.backdrop || metadata.banner || "").trim(), fileName: "fanart.jpg" },
+  ].filter((entry) => /^https?:\/\//i.test(entry.url));
+  if (!artworkEntries.length) return { saved: [] };
+  const backupDirectory = path.join(ARTWORK_RECOVERY_ROOT, `${new Date().toISOString().replace(/[:.]/g, "-")}-fix-match-${crypto.createHash("sha1").update(targetDirectory).digest("hex").slice(0, 10)}`);
+  const saved = [];
+  await Promise.all(artworkEntries.map(async (entry) => {
+    const artwork = await fetchRemoteArtworkBuffer(entry.url, { timeoutMs: 9000 });
+    if (sharp) await sharp(artwork.buffer, { animated: false }).metadata();
+    const destination = path.join(targetDirectory, entry.fileName);
+    if (fs.existsSync(destination)) {
+      fs.mkdirSync(backupDirectory, { recursive: true });
+      fs.copyFileSync(destination, path.join(backupDirectory, entry.fileName));
+    }
+    const temporaryPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+    // Normalize provider images to JPEG so poster.jpg/fanart.jpg always match
+    // their on-disk extension and remain compatible with Plex-style agents.
+    const output = sharp ? await sharp(artwork.buffer, { animated: false }).jpeg({ quality: 92, mozjpeg: true }).toBuffer() : artwork.buffer;
+    fs.writeFileSync(temporaryPath, output);
+    fs.renameSync(temporaryPath, destination);
+    saved.push({ slot: entry.slot, file: destination, publicUrl: localArtworkPublicUrl(destination) });
+  }));
+  return { saved, backupDirectory: fs.existsSync(backupDirectory) ? backupDirectory : "" };
+}
+
+function decodeArtworkHtml(value = "") {
+  return String(value || "").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+}
+
+function findArtworkPageImage(html = "", pageUrl = "") {
+  const metaTags = String(html || "").match(/<meta\b[^>]*>/gi) || [];
+  for (const tag of metaTags) {
+    if (!/(?:property|name|itemprop)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image(?::src)?|image)["']/i.test(tag)) continue;
+    const content = tag.match(/content\s*=\s*(["'])(.*?)\1/i)?.[2];
+    if (!content) continue;
+    try { return new URL(decodeArtworkHtml(content), pageUrl).toString(); } catch {}
+  }
+  return "";
+}
+
+async function fetchSafeBookArtworkUrl(initialUrl = "", allowWebpage = true) {
+  let currentUrl = await safeBookArtworkRemoteUrl(initialUrl);
+  for (let redirectCount = 0; redirectCount <= 4; redirectCount += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(currentUrl, {
+        headers: { Accept: "image/jpeg,image/png,image/webp,image/gif,text/html;q=0.6", "User-Agent": "Homestead/0.6.8.11" },
+        redirect: "manual",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error("The artwork host returned an invalid redirect.");
+      currentUrl = await safeBookArtworkRemoteUrl(new URL(location, currentUrl).toString());
+      continue;
+    }
+    if (!response.ok) throw new Error(`Artwork host returned ${response.status}.`);
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > 20 * 1024 * 1024) throw new Error("Artwork is larger than 20 MB.");
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > 20 * 1024 * 1024) throw new Error("Artwork is larger than 20 MB.");
+    if (bookArtworkExtension(buffer)) return buffer;
+    if (allowWebpage && contentType.includes("text/html") && buffer.length <= 2 * 1024 * 1024) {
+      const pageImage = findArtworkPageImage(buffer.toString("utf8"), currentUrl);
+      if (!pageImage) throw new Error("That webpage does not advertise a usable cover image. Paste a direct image URL or upload the cover.");
+      return fetchSafeBookArtworkUrl(pageImage, false);
+    }
+    throw new Error("The URL did not return a supported JPEG, PNG, WebP, or GIF image.");
+  }
+  throw new Error("The artwork URL redirected too many times.");
+}
+
+async function fetchSafeBookMetadataPage(initialUrl = "") {
+  let currentUrl = await safeBookArtworkRemoteUrl(initialUrl);
+  for (let redirectCount = 0; redirectCount <= 4; redirectCount += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(currentUrl, { headers: { Accept: "text/html,application/xhtml+xml", "User-Agent": "Homestead/0.6.8.11" }, redirect: "manual", signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error("The metadata website returned an invalid redirect.");
+      currentUrl = await safeBookArtworkRemoteUrl(new URL(location, currentUrl).toString());
+      continue;
+    }
+    if (!response.ok) throw new Error(`Metadata website returned ${response.status}.`);
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) throw new Error("That URL is not a metadata webpage.");
+    const length = Number(response.headers.get("content-length") || 0);
+    if (length > 3 * 1024 * 1024) throw new Error("That metadata webpage is too large.");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > 3 * 1024 * 1024) throw new Error("That metadata webpage is too large.");
+    return { html: buffer.toString("utf8"), url: currentUrl };
+  }
+  throw new Error("The metadata webpage redirected too many times.");
+}
+
+function webpageMetaContent(html = "", keys = []) {
+  const wanted = new Set(keys.map((key) => key.toLowerCase()));
+  for (const tag of String(html || "").match(/<meta\b[^>]*>/gi) || []) {
+    const name = tag.match(/(?:property|name|itemprop)\s*=\s*(["'])(.*?)\1/i)?.[2]?.toLowerCase();
+    if (!name || !wanted.has(name)) continue;
+    const content = tag.match(/content\s*=\s*(["'])(.*?)\1/i)?.[2];
+    if (content) return decodeArtworkHtml(content).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  return "";
+}
+
+function findStructuredBook(value) {
+  if (Array.isArray(value)) {
+    for (const child of value) { const found = findStructuredBook(child); if (found) return found; }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+  if (types.some((type) => /^(?:book|audiobook)$/i.test(String(type || "")))) return value;
+  for (const child of Object.values(value)) { const found = findStructuredBook(child); if (found) return found; }
+  return null;
+}
+
+function parseBookMetadataWebpage(html = "", sourceUrl = "") {
+  let book = null;
+  for (const script of String(html || "").match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || []) {
+    const json = script.replace(/^.*?>/s, "").replace(/<\/script>\s*$/i, "").trim();
+    try { book = findStructuredBook(JSON.parse(json)); } catch {}
+    if (book) break;
+  }
+  const pageText = String(html || "").replace(/<script\b[\s\S]*?<\/script>/gi, " ").replace(/<style\b[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const seriesMatch = pageText.match(/Book\s*#?\s*(\d+(?:\.\d+)?)\s+of\s+(?:the\s+)?([^|•<>]{2,100}?)(?=\s+(?:By|Author|Publisher|Format|Paperback|Hardcover|eBook)\b|[|•]|$)/i)
+    || pageText.match(/(?:the\s+)?([^|•<>]{2,100}?)\s+series\s*[,—-]+\s*Book\s*#?\s*(\d+(?:\.\d+)?)/i);
+  const numberFirst = seriesMatch && /^\d/.test(seriesMatch[1]);
+  const structuredSeries = typeof book?.isPartOf === "string" ? book.isPartOf : book?.isPartOf?.name || book?.bookSeries?.name || "";
+  const structuredIndex = book?.position || book?.bookEdition || "";
+  const structuredNumber = String(structuredIndex).match(/\d+(?:\.\d+)?/)?.[0] || "";
+  const inferredNumber = seriesMatch ? (numberFirst ? seriesMatch[1] : seriesMatch[2]) : "";
+  const image = Array.isArray(book?.image) ? book.image[0] : typeof book?.image === "string" ? book.image : book?.image?.url || webpageMetaContent(html, ["og:image", "twitter:image"]);
+  const author = Array.isArray(book?.author) ? book.author.map((entry) => typeof entry === "string" ? entry : entry?.name).filter(Boolean) : [typeof book?.author === "string" ? book.author : book?.author?.name].filter(Boolean);
+  const publisher = typeof book?.publisher === "string" ? book.publisher : book?.publisher?.name || "";
+  return {
+    sourceUrl,
+    sourceHost: new URL(sourceUrl).hostname,
+    title: String(book?.name || webpageMetaContent(html, ["og:title", "twitter:title"]) || "").trim(),
+    authors: author,
+    description: String(book?.description || webpageMetaContent(html, ["og:description", "description"]) || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+    series: String(structuredSeries || (seriesMatch ? (numberFirst ? seriesMatch[2] : seriesMatch[1]) : "")).trim(),
+    seriesIndex: structuredNumber || String(inferredNumber).match(/\d+(?:\.\d+)?/)?.[0] || "",
+    publisher: String(publisher).trim(),
+    publishedDate: String(book?.datePublished || "").trim(),
+    isbn: String(book?.isbn || "").trim(),
+    image: image ? new URL(String(image), sourceUrl).toString() : "",
+  };
+}
+
+async function readBookArtworkPayload(body = {}) {
+  if (body.dataUrl) {
+    const match = String(body.dataUrl).match(/^data:image\/(?:jpeg|jpg|png|webp|gif);base64,([a-z0-9+/=]+)$/i);
+    if (!match) throw new Error("The uploaded cover is not a supported image.");
+    return Buffer.from(match[1], "base64");
+  }
+  return fetchSafeBookArtworkUrl(body.url, true);
+}
+
+const recipesDataPath = path.join(HOMESTEAD_DATA_DIR, "recipes.json");
+const recipeCategoriesDataPath = path.join(HOMESTEAD_DATA_DIR, "recipe-categories.json");
+const recipeArtworkRoot = path.join(HOMESTEAD_DATA_DIR, "recipe-artwork");
+
+function cleanRecipeValue(value = "", maximum = 4000) {
+  return String(value || "").replace(/\0/g, "").trim().slice(0, maximum);
+}
+
+function cleanRecipeLines(value, maximumItems = 300) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/\r?\n/);
+  return source.map((entry) => cleanRecipeValue(typeof entry === "string" ? entry : entry?.text || entry?.name || "", 1000)).filter(Boolean).slice(0, maximumItems);
+}
+
+function readRecipes() {
+  const stored = readJsonFile(recipesDataPath, { version: 1, recipes: [] });
+  return Array.isArray(stored?.recipes) ? stored.recipes : [];
+}
+
+function writeRecipes(recipes = []) {
+  writeJsonFile(recipesDataPath, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    recipes: Array.isArray(recipes) ? recipes.slice(-5000) : [],
+  });
+}
+
+function recipeAccountId(req) {
+  const user = homesteadAccess.accessContext(req).user;
+  return String(user?.id || "owner").replace(/[^a-z0-9_-]+/gi, "-");
+}
+
+function readRecipeCategoryStore() {
+  const stored = readJsonFile(recipeCategoriesDataPath, { version: 1, users: {} });
+  return { version: 1, users: stored?.users && typeof stored.users === "object" ? stored.users : {} };
+}
+
+function writeRecipeCategoryStore(store = {}) {
+  writeJsonFile(recipeCategoriesDataPath, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    users: store?.users && typeof store.users === "object" ? store.users : {},
+  });
+}
+
+function recipeCategoriesForRequest(req, store = readRecipeCategoryStore()) {
+  const categories = store.users?.[recipeAccountId(req)];
+  return Array.isArray(categories) ? categories : [];
+}
+
+function cleanRecipeCategoryInput(body = {}, current = {}) {
+  const name = cleanRecipeValue(body.name ?? current.name, 80);
+  if (!name) throw new Error("Enter a category name.");
+  return {
+    ...current,
+    name,
+    icon: cleanRecipeValue(body.icon ?? current.icon ?? "🍽️", 16) || "🍽️",
+    description: cleanRecipeValue(body.description ?? current.description, 240),
+    color: cleanRecipeValue(body.color ?? current.color, 32),
+  };
+}
+
+function recipeDurationLabel(value = "") {
+  const text = cleanRecipeValue(value, 80);
+  const duration = text.match(/^P(?:([0-9]+)D)?T?(?:([0-9]+)H)?(?:([0-9]+)M)?$/i);
+  if (!duration) return text;
+  const parts = [];
+  if (Number(duration[1])) parts.push(`${Number(duration[1])} day${Number(duration[1]) === 1 ? "" : "s"}`);
+  if (Number(duration[2])) parts.push(`${Number(duration[2])} hr`);
+  if (Number(duration[3])) parts.push(`${Number(duration[3])} min`);
+  return parts.join(" ");
+}
+
+function findStructuredRecipe(value) {
+  if (Array.isArray(value)) {
+    for (const child of value) { const found = findStructuredRecipe(child); if (found) return found; }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+  if (types.some((type) => /^Recipe$/i.test(String(type || "")))) return value;
+  for (const child of Object.values(value)) { const found = findStructuredRecipe(child); if (found) return found; }
+  return null;
+}
+
+function recipeInstructionLines(value) {
+  if (typeof value === "string") return cleanRecipeLines(value);
+  if (!Array.isArray(value)) return [];
+  const lines = [];
+  for (const item of value) {
+    if (typeof item === "string") lines.push(item);
+    else if (/HowToSection/i.test(String(item?.["@type"] || ""))) {
+      if (item.name) lines.push(item.name);
+      lines.push(...recipeInstructionLines(item.itemListElement || item.steps || []));
+    } else if (item?.text || item?.name) lines.push(item.text || item.name);
+  }
+  return cleanRecipeLines(lines);
+}
+
+function structuredRecipeImage(value, pageUrl = "") {
+  const source = Array.isArray(value) ? value[0] : value;
+  const image = typeof source === "string" ? source : source?.url || source?.contentUrl || "";
+  try { return image ? new URL(String(image), pageUrl).toString() : ""; } catch { return ""; }
+}
+
+function parseRecipeWebpage(html = "", sourceUrl = "") {
+  let recipe = null;
+  for (const script of String(html || "").match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || []) {
+    const json = script.replace(/^.*?>/s, "").replace(/<\/script>\s*$/i, "").trim();
+    try { recipe = findStructuredRecipe(JSON.parse(json)); } catch {}
+    if (recipe) break;
+  }
+  const keywords = Array.isArray(recipe?.keywords) ? recipe.keywords : String(recipe?.keywords || "").split(",");
+  const categories = [recipe?.recipeCategory, recipe?.recipeCuisine].flatMap((entry) => Array.isArray(entry) ? entry : String(entry || "").split(","));
+  const sourceHost = new URL(sourceUrl).hostname.replace(/^www\./, "");
+  return {
+    sourceUrl,
+    sourceName: sourceHost,
+    title: cleanRecipeValue(recipe?.name || webpageMetaContent(html, ["og:title", "twitter:title"]), 240),
+    description: cleanRecipeValue(recipe?.description || webpageMetaContent(html, ["og:description", "description"]), 4000),
+    imageUrl: structuredRecipeImage(recipe?.image, sourceUrl) || (() => { try { const value = webpageMetaContent(html, ["og:image", "twitter:image"]); return value ? new URL(value, sourceUrl).toString() : ""; } catch { return ""; } })(),
+    servings: cleanRecipeValue(recipe?.recipeYield, 120),
+    prepTime: recipeDurationLabel(recipe?.prepTime),
+    cookTime: recipeDurationLabel(recipe?.cookTime),
+    totalTime: recipeDurationLabel(recipe?.totalTime),
+    ingredients: cleanRecipeLines(recipe?.recipeIngredient || []),
+    directions: recipeInstructionLines(recipe?.recipeInstructions || []),
+    tags: [...new Set([...keywords, ...categories].map((entry) => cleanRecipeValue(entry, 80)).filter(Boolean))].slice(0, 30),
+    author: cleanRecipeValue(typeof recipe?.author === "string" ? recipe.author : Array.isArray(recipe?.author) ? recipe.author.map((entry) => entry?.name || entry).join(", ") : recipe?.author?.name, 240),
+    structured: Boolean(recipe),
+  };
+}
+
+function parseRecipeOcrText(value = "") {
+  const lines = cleanRecipeLines(String(value || "").split(/\r?\n/), 400);
+  const ingredientHeading = lines.findIndex((line) => /^ingredients?\b/i.test(line));
+  const directionHeading = lines.findIndex((line) => /^(?:directions?|instructions?|method|preparation)\b/i.test(line));
+  const titleEnd = [ingredientHeading, directionHeading].filter((index) => index > 0).sort((a, b) => a - b)[0] || Math.min(lines.length, 1);
+  const title = lines.slice(0, titleEnd).join(" ").slice(0, 240);
+  const ingredients = ingredientHeading >= 0
+    ? lines.slice(ingredientHeading + 1, directionHeading > ingredientHeading ? directionHeading : lines.length)
+    : [];
+  const directions = directionHeading >= 0 ? lines.slice(directionHeading + 1) : [];
+  return { title, ingredients, directions, rawText: lines.join("\n") };
+}
+
+function decodeRecipeImageDataUrl(value = "") {
+  const match = String(value || "").match(/^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) throw new Error("Choose a JPG, PNG, or WebP recipe photo.");
+  const buffer = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+  if (buffer.length < 32 || buffer.length > 24 * 1024 * 1024) throw new Error("Recipe photos must be smaller than 24 MB.");
+  return buffer;
+}
+
+async function saveRecipeArtwork(recipeId, input) {
+  const buffer = Buffer.isBuffer(input) ? input : await fetchSafeBookArtworkUrl(input, false);
+  const extension = bookArtworkExtension(buffer);
+  if (!extension) throw new Error("The recipe photo is not a supported image.");
+  fs.mkdirSync(recipeArtworkRoot, { recursive: true });
+  const safeId = String(recipeId).replace(/[^a-z0-9-]/gi, "");
+  const fileName = sharp ? `${safeId}.webp` : `${safeId}${extension}`;
+  const destination = path.join(recipeArtworkRoot, fileName);
+  if (sharp) {
+    const temporary = `${destination}.tmp`;
+    await sharp(buffer).rotate().resize({ width: 1600, height: 1200, fit: "inside", withoutEnlargement: true }).webp({ quality: 86 }).toFile(temporary);
+    fs.renameSync(temporary, destination);
+  } else {
+    fs.writeFileSync(destination, buffer);
+  }
+  return `/api/recipes/artwork/${fileName}?v=${Date.now()}`;
+}
+
+app.get("/api/recipes", homesteadAccess.requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, recipes: readRecipes().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))) });
+});
+
+app.get("/api/recipes/categories", homesteadAccess.requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  const categories = recipeCategoriesForRequest(req)
+    .slice()
+    .sort((a, b) => Number(a.order || 0) - Number(b.order || 0) || String(a.name || "").localeCompare(String(b.name || "")));
+  res.json({ ok: true, categories });
+});
+
+app.post("/api/recipes/categories", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const store = readRecipeCategoryStore();
+    const categories = recipeCategoriesForRequest(req, store);
+    const category = cleanRecipeCategoryInput(req.body || {}, {
+      id: `recipe-category-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`,
+      order: categories.length,
+      createdAt: new Date().toISOString(),
+    });
+    if (categories.some((entry) => String(entry.name || "").toLowerCase() === category.name.toLowerCase())) {
+      return res.status(409).json({ ok: false, message: "That recipe category already exists." });
+    }
+    category.updatedAt = category.createdAt;
+    store.users[recipeAccountId(req)] = [...categories, category];
+    writeRecipeCategoryStore(store);
+    res.status(201).json({ ok: true, category });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not create that category." });
+  }
+});
+
+app.patch("/api/recipes/categories/:categoryId", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const store = readRecipeCategoryStore();
+    const categories = recipeCategoriesForRequest(req, store);
+    const index = categories.findIndex((entry) => entry.id === req.params.categoryId);
+    if (index < 0) return res.status(404).json({ ok: false, message: "Recipe category not found." });
+    const category = cleanRecipeCategoryInput(req.body || {}, categories[index]);
+    if (categories.some((entry, categoryIndex) => categoryIndex !== index && String(entry.name || "").toLowerCase() === category.name.toLowerCase())) {
+      return res.status(409).json({ ok: false, message: "That recipe category already exists." });
+    }
+    category.updatedAt = new Date().toISOString();
+    const nextCategories = categories.slice();
+    nextCategories[index] = category;
+    store.users[recipeAccountId(req)] = nextCategories;
+    writeRecipeCategoryStore(store);
+    writeRecipes(readRecipes().map((recipe) => recipe.categoryId === category.id ? { ...recipe, category: category.name, updatedAt: category.updatedAt } : recipe));
+    res.json({ ok: true, category });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not update that category." });
+  }
+});
+
+app.delete("/api/recipes/categories/:categoryId", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const store = readRecipeCategoryStore();
+    const categories = recipeCategoriesForRequest(req, store);
+    if (!categories.some((entry) => entry.id === req.params.categoryId)) return res.status(404).json({ ok: false, message: "Recipe category not found." });
+    store.users[recipeAccountId(req)] = categories.filter((entry) => entry.id !== req.params.categoryId);
+    writeRecipeCategoryStore(store);
+    const now = new Date().toISOString();
+    writeRecipes(readRecipes().map((recipe) => recipe.categoryId === req.params.categoryId ? { ...recipe, categoryId: "", category: "", updatedAt: now } : recipe));
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not delete that category." });
+  }
+});
+
+app.post("/api/recipes/import-preview", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const url = cleanRecipeValue(req.body?.url, 2000);
+    if (!url) return res.status(400).json({ ok: false, message: "Paste a public recipe or social-media link." });
+    const page = await fetchSafeBookMetadataPage(url);
+    const recipe = parseRecipeWebpage(page.html, page.url);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, recipe, message: recipe.structured ? "Recipe details found. Review them before saving." : "The page did not expose a complete recipe. Its available title and description were imported for review." });
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.name === "AbortError" ? "The recipe page timed out." : error.message || "Unable to read that recipe page." });
+  }
+});
+
+app.post("/api/recipes/photo-preview", homesteadAccess.requireSession, async (req, res) => {
+  const temporaryDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "homestead-recipe-"));
+  try {
+    const buffer = decodeRecipeImageDataUrl(req.body?.dataUrl);
+    const sourcePath = path.join(temporaryDir, "recipe-image.png");
+    if (sharp) await sharp(buffer).rotate().png().toFile(sourcePath); else fs.writeFileSync(sourcePath, buffer);
+    const rawText = await runTesseractOcr(sourcePath, "6");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, recipe: parseRecipeOcrText(rawText), message: "Photo text extracted. Check every ingredient and instruction before saving." });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Unable to read that recipe photo." });
+  } finally {
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
+});
+
+app.post("/api/recipes", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const title = cleanRecipeValue(req.body?.title, 240);
+    if (!title) return res.status(400).json({ ok: false, message: "Enter a recipe title before saving." });
+    const recipes = readRecipes();
+    const sourceUrl = cleanRecipeValue(req.body?.sourceUrl, 2000);
+    const duplicate = recipes.find((recipe) => sourceUrl && String(recipe.sourceUrl || "").toLowerCase() === sourceUrl.toLowerCase());
+    if (duplicate) return res.status(409).json({ ok: false, duplicate, message: "That source link is already saved in Recipes." });
+    const now = new Date().toISOString();
+    const id = `recipe-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`;
+    let image = "";
+    let artworkWarning = "";
+    try {
+      if (req.body?.imageDataUrl) image = await saveRecipeArtwork(id, decodeRecipeImageDataUrl(req.body.imageDataUrl));
+      else if (req.body?.imageUrl) image = await saveRecipeArtwork(id, cleanRecipeValue(req.body.imageUrl, 2000));
+    } catch (error) {
+      artworkWarning = error.message || "The source artwork could not be saved.";
+    }
+    const requestedCategoryId = cleanRecipeValue(req.body?.categoryId, 160);
+    const selectedCategory = requestedCategoryId ? recipeCategoriesForRequest(req).find((entry) => entry.id === requestedCategoryId) : null;
+    if (requestedCategoryId && !selectedCategory) return res.status(400).json({ ok: false, message: "Choose one of your recipe categories." });
+    const recipe = {
+      id,
+      title,
+      entryType: req.body?.entryType === "quick-instruction" ? "quick-instruction" : "recipe",
+      description: cleanRecipeValue(req.body?.description, 8000),
+      categoryId: selectedCategory?.id || "",
+      category: selectedCategory?.name || "",
+      servings: cleanRecipeValue(req.body?.servings, 120),
+      prepTime: cleanRecipeValue(req.body?.prepTime, 80),
+      cookTime: cleanRecipeValue(req.body?.cookTime, 80),
+      totalTime: cleanRecipeValue(req.body?.totalTime, 80),
+      ingredients: cleanRecipeLines(req.body?.ingredients),
+      directions: cleanRecipeLines(req.body?.directions),
+      tags: cleanRecipeLines(req.body?.tags, 30).map((tag) => tag.replace(/^#/, "")),
+      notes: cleanRecipeValue(req.body?.notes, 8000),
+      appliance: cleanRecipeValue(req.body?.appliance, 120),
+      temperature: cleanRecipeValue(req.body?.temperature, 80),
+      quickSteps: Array.isArray(req.body?.quickSteps) ? req.body.quickSteps.map((step) => ({
+        text: cleanRecipeValue(step?.text, 1000),
+        timerSeconds: Math.min(86400, Math.max(0, Number(step?.timerSeconds) || 0)),
+      })).filter((step) => step.text).slice(0, 40) : [],
+      householdVisible: req.body?.householdVisible !== false,
+      sourceUrl,
+      sourceName: cleanRecipeValue(req.body?.sourceName, 240),
+      image,
+      favorite: req.body?.favorite === true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    writeRecipes([...recipes, recipe]);
+    res.status(201).json({ ok: true, recipe, artworkWarning });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Unable to save that recipe." });
+  }
+});
+
+app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const recipes = readRecipes();
+    const index = recipes.findIndex((recipe) => recipe.id === req.params.recipeId);
+    if (index < 0) return res.status(404).json({ ok: false, message: "Recipe not found." });
+    const current = recipes[index];
+    const fullEdit = Object.prototype.hasOwnProperty.call(req.body || {}, "title");
+    let next = {
+      ...current,
+      ...(typeof req.body?.favorite === "boolean" ? { favorite: req.body.favorite } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    if (fullEdit) {
+      const title = cleanRecipeValue(req.body?.title, 240);
+      if (!title) return res.status(400).json({ ok: false, message: "Enter a recipe title before saving." });
+      let image = current.image || "";
+      if (req.body?.imageDataUrl) image = await saveRecipeArtwork(current.id, decodeRecipeImageDataUrl(req.body.imageDataUrl));
+      else if (req.body?.imageUrl) image = await saveRecipeArtwork(current.id, cleanRecipeValue(req.body.imageUrl, 2000));
+      next = {
+        ...current,
+        title,
+        entryType: current.entryType === "quick-instruction" || req.body?.entryType === "quick-instruction" ? "quick-instruction" : "recipe",
+        description: cleanRecipeValue(req.body?.description, 8000),
+        servings: cleanRecipeValue(req.body?.servings, 120),
+        prepTime: cleanRecipeValue(req.body?.prepTime, 80),
+        cookTime: cleanRecipeValue(req.body?.cookTime, 80),
+        totalTime: cleanRecipeValue(req.body?.totalTime, 80),
+        ingredients: cleanRecipeLines(req.body?.ingredients),
+        directions: cleanRecipeLines(req.body?.directions),
+        notes: cleanRecipeValue(req.body?.notes, 8000),
+        appliance: cleanRecipeValue(req.body?.appliance, 120),
+        temperature: cleanRecipeValue(req.body?.temperature, 80),
+        quickSteps: Array.isArray(req.body?.quickSteps) ? req.body.quickSteps.map((step) => ({
+          text: cleanRecipeValue(step?.text, 1000),
+          timerSeconds: Math.min(86400, Math.max(0, Number(step?.timerSeconds) || 0)),
+        })).filter((step) => step.text).slice(0, 40) : current.quickSteps || [],
+        householdVisible: req.body?.householdVisible !== false,
+        image,
+        favorite: req.body?.favorite === true,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    recipes[index] = next;
+    writeRecipes(recipes);
+    res.json({ ok: true, recipe: next });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Unable to update that recipe." });
+  }
+});
+
+app.get("/api/recipes/artwork/:fileName", homesteadAccess.requireSession, (req, res) => {
+  const fileName = String(req.params.fileName || "");
+  if (!/^recipe-[a-z0-9-]+\.(?:jpe?g|png|webp|gif)$/i.test(fileName)) return res.status(400).end();
+  const target = path.join(recipeArtworkRoot, fileName);
+  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return res.status(404).end();
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  return res.sendFile(target);
+});
+
+const familyCalendarPath = path.join(HOMESTEAD_DATA_DIR, "family-calendar.json");
+const familyScheduleUploadRoot = path.join(HOMESTEAD_DATA_DIR, "family-schedule-uploads");
+const familyScheduleMetadataRoot = path.join(HOMESTEAD_DATA_DIR, "schedules");
+const CALENDAR_KINDS = new Set(["appointment", "work", "school", "pickup", "dropoff", "ride", "family", "reminder", "off"]);
+const CALENDAR_COLORS = { appointment: "#6d7ee8", work: "#3978c7", school: "#a66fd4", pickup: "#cf7e35", dropoff: "#cf7e35", ride: "#cf7e35", family: "#3e9b72", reminder: "#747d90", off: "#536174" };
+const CALENDAR_ARR_SERVICES = new Set(["radarr", "sonarr", "lidarr", "readarr"]);
+const NFL_TEAMS = {
+  ari: "Arizona Cardinals", atl: "Atlanta Falcons", bal: "Baltimore Ravens", buf: "Buffalo Bills", car: "Carolina Panthers", chi: "Chicago Bears", cin: "Cincinnati Bengals", cle: "Cleveland Browns", dal: "Dallas Cowboys", den: "Denver Broncos", det: "Detroit Lions", gb: "Green Bay Packers", hou: "Houston Texans", ind: "Indianapolis Colts", jax: "Jacksonville Jaguars", kc: "Kansas City Chiefs", lv: "Las Vegas Raiders", lac: "Los Angeles Chargers", lar: "Los Angeles Rams", mia: "Miami Dolphins", min: "Minnesota Vikings", ne: "New England Patriots", no: "New Orleans Saints", nyg: "New York Giants", nyj: "New York Jets", phi: "Philadelphia Eagles", pit: "Pittsburgh Steelers", sf: "San Francisco 49ers", sea: "Seattle Seahawks", tb: "Tampa Bay Buccaneers", ten: "Tennessee Titans", wsh: "Washington Commanders",
+};
+const NFL_TEAM_SLUGS = Object.fromEntries(Object.entries(NFL_TEAMS).map(([id, name]) => [id, name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")]));
+
+function readFamilyCalendar() {
+  const stored = readJsonFile(familyCalendarPath, { version: 3, events: [], imports: [], series: [], sources: [] });
+  return {
+    version: 3,
+    events: Array.isArray(stored?.events) ? stored.events : [],
+    imports: Array.isArray(stored?.imports) ? stored.imports : [],
+    series: Array.isArray(stored?.series) ? stored.series : [],
+    sources: Array.isArray(stored?.sources) ? stored.sources : [],
+  };
+}
+
+function familyScheduleSlug(value = "") {
+  return String(value || "unassigned").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unassigned";
+}
+
+function onlineScheduleCategory(source = {}) {
+  if (source.type === "nfl" || /sport/i.test(source.name || "")) return "sports";
+  if (source.service === "sonarr") return "television";
+  if (source.service === "radarr") return "movies";
+  if (source.service === "lidarr") return "music";
+  if (source.service === "readarr") return "books";
+  if (source.type === "ical") return "calendars";
+  return "other";
+}
+
+function syncFamilyScheduleSidecars(calendar = {}) {
+  const now = new Date().toISOString();
+  const events = Array.isArray(calendar.events) ? calendar.events : [];
+  const sources = Array.isArray(calendar.sources) ? calendar.sources : [];
+  const people = new Map();
+  for (const event of events) {
+    const personName = calendarText(event.personName || "", 120);
+    if (!personName) continue;
+    const key = familyScheduleSlug(event.profileId || personName);
+    if (!people.has(key)) people.set(key, { personName, profileId: event.profileId || "", events: [] });
+    people.get(key).events.push(event);
+  }
+  for (const [key, record] of people) {
+    const target = path.join(familyScheduleMetadataRoot, "people", key, "schedule.json");
+    const existing = readJsonFile(target, {});
+    writeJsonFile(target, { ...existing, version: 1, type: "person-schedule", personName: record.personName, profileId: record.profileId, timezone: process.env.TZ || "local", updatedAt: now, events: record.events });
+  }
+  const categories = new Map();
+  for (const source of sources) {
+    const category = onlineScheduleCategory(source);
+    if (!categories.has(category)) categories.set(category, { sources: [], events: [] });
+    categories.get(category).sources.push(source);
+    categories.get(category).events.push(...events.filter((event) => event.sourceId === source.id));
+  }
+  for (const [category, record] of categories) {
+    const target = path.join(familyScheduleMetadataRoot, "online", category, "metadata.json");
+    const existing = readJsonFile(target, {});
+    writeJsonFile(target, { ...existing, version: 1, type: "online-schedule-category", category, timezone: process.env.TZ || "local", updatedAt: now, sources: record.sources, events: record.events });
+  }
+}
+
+function writeFamilyCalendar(calendar) {
+  writeJsonFile(familyCalendarPath, {
+    version: 3,
+    updatedAt: new Date().toISOString(),
+    events: (calendar.events || []).slice(-10000),
+    imports: (calendar.imports || []).slice(-1000),
+    series: (calendar.series || []).slice(-2000),
+    sources: (calendar.sources || []).slice(-200),
+  });
+  try { syncFamilyScheduleSidecars(calendar); }
+  catch (error) { console.warn("Unable to update calendar schedule sidecars:", error.message); }
+}
+
+function calendarText(value = "", maximum = 300) {
+  return String(value || "").replace(/\0/g, "").trim().slice(0, maximum);
+}
+
+function validCalendarDate(value = "") {
+  const text = String(value || "");
+  return /^20\d{2}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(new Date(`${text}T12:00:00`).getTime());
+}
+
+function validCalendarTime(value = "") {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
+}
+
+function calendarColor(value = "", fallback = "#6d7ee8") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : fallback;
+}
+
+const CALENDAR_VISIBILITY = new Set(["self", "household", "selected", "all"]);
+
+function normalizeCalendarAudience(input = {}, user = null, fallback = "all") {
+  const visibility = CALENDAR_VISIBILITY.has(input.visibility) ? input.visibility : fallback;
+  const ownerUserId = calendarText(user?.id || input.ownerUserId, 160);
+  const householdId = calendarText(user?.householdId || input.householdId, 80).toLowerCase();
+  const visibleToUserIds = [...new Set((Array.isArray(input.visibleToUserIds) ? input.visibleToUserIds : []).map((id) => calendarText(id, 160)).filter(Boolean))].slice(0, 100);
+  return { visibility, ownerUserId, householdId, visibleToUserIds };
+}
+
+function calendarCanViewEvent(event = {}, user = null) {
+  if (!event.visibility || event.visibility === "all") return true;
+  if (!user) return false;
+  if (event.ownerUserId && event.ownerUserId === user.id) return true;
+  if (event.visibility === "self") return false;
+  if (event.visibility === "household") return Boolean(event.householdId && String(user.householdId || "").toLowerCase() === String(event.householdId).toLowerCase());
+  if (event.visibility === "selected") return Array.isArray(event.visibleToUserIds) && event.visibleToUserIds.includes(user.id);
+  return false;
+}
+
+function calendarCanEditEvent(event = {}, user = null) {
+  return !event.ownerUserId || Boolean(user && event.ownerUserId === user.id);
+}
+
+function calendarEventFromInput(input = {}, id = "") {
+  const title = calendarText(input.title, 180);
+  const kind = CALENDAR_KINDS.has(input.kind) ? input.kind : "appointment";
+  const date = calendarText(input.date, 10);
+  const startTime = calendarText(input.startTime, 5);
+  const endTime = calendarText(input.endTime, 5);
+  if (!title) throw new Error("Enter an event name.");
+  const allDay = input.allDay === true || kind === "off";
+  if (!validCalendarDate(date) || (!allDay && (!validCalendarTime(startTime) || !validCalendarTime(endTime)))) throw new Error(allDay ? "Choose a valid date." : "Choose a valid date, start time, and end time.");
+  if (allDay) {
+    const color = calendarColor(input.color, CALENDAR_COLORS[kind]);
+    return { id: id || `calendar-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`, title, personName: calendarText(input.personName, 120), profileId: calendarText(input.profileId, 160), kind, start: date, end: addCalendarDays(date, 1), allDay: true, location: calendarText(input.location, 240), assignedDriver: "", coverageStatus: "", color, backgroundColor: color, borderColor: color, createdAt: new Date().toISOString(), source: calendarText(input.source, 40) || "manual", importId: calendarText(input.importId, 160), seriesId: calendarText(input.seriesId, 160), occurrenceDate: calendarText(input.occurrenceDate, 10), billProvider: "", billAmount: "", billDueDate: "" };
+  }
+  const start = `${date}T${startTime}:00`;
+  let endDate = date;
+  if (endTime <= startTime) { const next = new Date(`${date}T12:00:00`); next.setDate(next.getDate() + 1); endDate = next.toISOString().slice(0, 10); }
+  const color = calendarColor(input.color, CALENDAR_COLORS[kind]);
+  return { id: id || `calendar-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`, title, personName: calendarText(input.personName, 120), profileId: calendarText(input.profileId, 160), kind, start, end: `${endDate}T${endTime}:00`, allDay: false, location: calendarText(input.location, 240), assignedDriver: calendarText(input.assignedDriver, 120), coverageStatus: calendarText(input.coverageStatus, 30), color, backgroundColor: color, borderColor: color, createdAt: new Date().toISOString(), source: calendarText(input.source, 40) || "manual", importId: calendarText(input.importId, 160), seriesId: calendarText(input.seriesId, 160), occurrenceDate: calendarText(input.occurrenceDate, 10), billProvider: calendarText(input.billProvider, 120), billAmount: calendarText(input.billAmount, 30), billDueDate: calendarText(input.billDueDate, 10) };
+}
+
+function calendarDateAtNoon(value = "") {
+  return validCalendarDate(value) ? new Date(`${value}T12:00:00Z`) : null;
+}
+
+function addCalendarDays(value = "", count = 0) {
+  const date = calendarDateAtNoon(value);
+  if (!date) return "";
+  date.setUTCDate(date.getUTCDate() + count);
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeCalendarExceptions(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 80).map((item) => {
+    const startsOn = calendarText(item?.startsOn || item?.startDate || item?.date, 10);
+    const endsOn = calendarText(item?.endsOn || item?.endDate || startsOn, 10);
+    if (!validCalendarDate(startsOn) || !validCalendarDate(endsOn) || endsOn < startsOn) return null;
+    return { startsOn, endsOn, label: calendarText(item?.label, 120) };
+  }).filter(Boolean);
+}
+
+function calendarDateIsExcluded(date, exceptions = []) {
+  return exceptions.some((item) => date >= item.startsOn && date <= item.endsOn);
+}
+
+function normalizeCalendarRecurrence(input = {}) {
+  const recurrence = input?.recurrence && typeof input.recurrence === "object" ? input.recurrence : {};
+  const startsOn = calendarText(recurrence.startsOn || input.date, 10);
+  const endsOn = calendarText(recurrence.endsOn, 10);
+  if (!validCalendarDate(startsOn) || !validCalendarDate(endsOn)) throw new Error("Choose a valid start and end date for the repeating event.");
+  if (endsOn < startsOn) throw new Error("The repeating event must end on or after its start date.");
+  const spanDays = Math.floor((calendarDateAtNoon(endsOn) - calendarDateAtNoon(startsOn)) / 86400000);
+  if (spanDays > 1095) throw new Error("Repeating events can cover up to three years at a time.");
+  const frequency = recurrence.frequency === "rotating" ? "rotating" : "weekly";
+  const rotationWeeks = frequency === "rotating" && Array.isArray(recurrence.rotationWeeks)
+    ? recurrence.rotationWeeks.slice(0, 12).map((week) => {
+        const workDays = [...new Set((Array.isArray(week?.workDays) ? week.workDays : []).map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b);
+        const offDays = [...new Set((Array.isArray(week?.offDays) ? week.offDays : []).map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6 && !workDays.includes(day)))].sort((a, b) => a - b);
+        return { workDays, offDays };
+      })
+    : [];
+  if (frequency === "rotating" && (!rotationWeeks.length || !rotationWeeks.some((week) => week.workDays.length || week.offDays.length))) throw new Error("Choose at least one working or off day in the rotation.");
+  const requestedDays = frequency === "rotating" ? rotationWeeks.flatMap((week) => week.workDays) : Array.isArray(recurrence.daysOfWeek) ? recurrence.daysOfWeek.map(Number) : [];
+  const daysOfWeek = [...new Set(requestedDays.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b);
+  if (frequency === "weekly" && !daysOfWeek.length) throw new Error("Choose at least one day for the repeating event.");
+  return {
+    frequency,
+    preset: frequency === "rotating" ? "rotation" : ["daily", "weekdays", "weekends", "custom"].includes(recurrence.preset) ? recurrence.preset : "custom",
+    startsOn,
+    endsOn,
+    daysOfWeek,
+    rotationWeeks,
+    exceptions: normalizeCalendarExceptions(recurrence.exceptions),
+  };
+}
+
+function calendarEventDuplicate(events = [], candidate = {}) {
+  const title = String(candidate.title || "").trim().toLowerCase();
+  const person = String(candidate.personName || "").trim().toLowerCase();
+  return events.some((event) => String(event.title || "").trim().toLowerCase() === title
+    && String(event.personName || "").trim().toLowerCase() === person
+    && event.start === candidate.start
+    && event.end === candidate.end);
+}
+
+function buildCalendarSeriesEvents(input = {}, recurrence, seriesId, audience = {}) {
+  const events = [];
+  for (let date = recurrence.startsOn, safety = 0; date <= recurrence.endsOn && safety < 1100; date = addCalendarDays(date, 1), safety += 1) {
+    const weekday = calendarDateAtNoon(date)?.getUTCDay();
+    if (calendarDateIsExcluded(date, recurrence.exceptions)) continue;
+    if (recurrence.frequency === "rotating") {
+      const rotationAnchor = addCalendarDays(recurrence.startsOn, -calendarDateAtNoon(recurrence.startsOn).getUTCDay());
+      const elapsedDays = Math.floor((calendarDateAtNoon(date) - calendarDateAtNoon(rotationAnchor)) / 86400000);
+      const rotationWeek = recurrence.rotationWeeks[Math.floor(elapsedDays / 7) % recurrence.rotationWeeks.length];
+      const state = rotationWeek?.workDays.includes(weekday) ? "work" : rotationWeek?.offDays.includes(weekday) ? "off" : "unscheduled";
+      if (state === "unscheduled") continue;
+      const eventInput = state === "off"
+        ? { ...input, title: "Off", kind: "off", allDay: true, date, seriesId, occurrenceDate: date, source: "recurring-series" }
+        : { ...input, kind: input.kind === "off" ? "work" : input.kind, allDay: false, date, seriesId, occurrenceDate: date, source: "recurring-series" };
+      events.push({ ...calendarEventFromInput(eventInput), ...audience, rotationState: state });
+      continue;
+    }
+    if (!recurrence.daysOfWeek.includes(weekday)) continue;
+    events.push({ ...calendarEventFromInput({ ...input, date, seriesId, occurrenceDate: date, source: "recurring-series" }), ...audience });
+  }
+  if (!events.length) throw new Error("This repeat pattern has no included dates. Check the selected days and exceptions.");
+  return events;
+}
+
+function calendarSourceUrl(value = "") {
+  const normalized = String(value || "").trim().replace(/^webcal:/i, "https:");
+  const parsed = new URL(normalized);
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Use an HTTP, HTTPS, or webcal calendar address.");
+  return parsed.toString();
+}
+
+function calendarSourceEventId(sourceId, remoteId) {
+  return `calendar-source-${crypto.createHash("sha256").update(`${sourceId}:${remoteId}`).digest("hex").slice(0, 24)}`;
+}
+
+function calendarExternalEvent(source, input = {}) {
+  const startDate = new Date(input.start);
+  if (Number.isNaN(startDate.getTime())) return null;
+  const allDay = input.allDay === true;
+  const endDate = input.end ? new Date(input.end) : new Date(startDate.getTime() + (allDay ? 86400000 : 3 * 3600000));
+  const color = calendarColor(source.color, "#5865d8");
+  const remoteId = calendarText(input.remoteId || `${input.title}:${startDate.toISOString()}`, 500);
+  return {
+    id: calendarSourceEventId(source.id, remoteId),
+    title: calendarText(input.title || source.name, 180),
+    personName: "",
+    profileId: "",
+    kind: "external",
+    start: allDay ? startDate.toISOString().slice(0, 10) : startDate.toISOString(),
+    end: allDay ? endDate.toISOString().slice(0, 10) : endDate.toISOString(),
+    allDay,
+    location: calendarText(input.location, 240),
+    color,
+    backgroundColor: color,
+    borderColor: color,
+    source: "calendar-source",
+    sourceId: source.id,
+    sourceName: source.name,
+    sourceType: source.type,
+    sourceService: calendarText(source.service, 30),
+    seriesTitle: calendarText(input.seriesTitle, 180),
+    episodeCode: calendarText(input.episodeCode, 30),
+    episodeTitle: calendarText(input.episodeTitle, 180),
+    readOnly: true,
+    remoteId,
+    externalUrl: calendarText(input.externalUrl, 1000),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function unfoldIcalendarText(value = "") {
+  return String(value || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+}
+
+function decodeIcalendarText(value = "") {
+  return String(value || "").replace(/\\n/gi, "\n").replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\\\/g, "\\").trim();
+}
+
+function parseIcalendarDate(value = "") {
+  const raw = String(value || "").trim();
+  if (/^\d{8}$/.test(raw)) return { value: `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T00:00:00Z`, allDay: true };
+  const match = raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/);
+  if (!match) return null;
+  return { value: `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}${match[7] || ""}`, allDay: false };
+}
+
+function parseIcalendarEvents(text, source) {
+  const blocks = unfoldIcalendarText(text).split(/BEGIN:VEVENT/i).slice(1).map((block) => block.split(/END:VEVENT/i)[0]);
+  return blocks.slice(0, 3000).map((block, index) => {
+    const fields = {};
+    for (const line of block.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator < 0) continue;
+      const key = line.slice(0, separator).split(";")[0].toUpperCase();
+      if (!fields[key]) fields[key] = line.slice(separator + 1);
+    }
+    const start = parseIcalendarDate(fields.DTSTART);
+    if (!start) return null;
+    const end = parseIcalendarDate(fields.DTEND);
+    return calendarExternalEvent(source, {
+      remoteId: fields.UID || `${index}:${fields.SUMMARY}:${fields.DTSTART}`,
+      title: decodeIcalendarText(fields.SUMMARY) || source.name,
+      start: start.value,
+      end: end?.value,
+      allDay: start.allDay,
+      location: decodeIcalendarText(fields.LOCATION),
+      externalUrl: decodeIcalendarText(fields.URL),
+    });
+  }).filter(Boolean);
+}
+
+async function fetchCalendarResponse(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(20000) });
+  if (!response.ok) throw new Error(`Schedule source returned HTTP ${response.status}.`);
+  return response;
+}
+
+async function fetchNflCalendarEvents(source) {
+  const team = String(source.team || "").toLowerCase();
+  if (!NFL_TEAMS[team]) throw new Error("Choose a supported NFL team.");
+  const now = new Date();
+  const season = now.getUTCMonth() < 4 ? now.getUTCFullYear() - 1 : now.getUTCFullYear();
+  const response = await fetchCalendarResponse(`https://www.nfl.com/schedules/${season}/by-team/${NFL_TEAM_SLUGS[team]}`, { headers: { "User-Agent": "Mozilla/5.0 (compatible; Homestead Calendar)", Accept: "text/html" } });
+  const html = await response.text();
+  const monthNumbers = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
+  const seen = new Set();
+  const events = [];
+  const attributePattern = /data-analytics="(\{&quot;[^\"]+?&quot;gameId&quot;[^\"]+?\})"\s+href="(\/games\/[^\"]+)"/gi;
+  for (const match of html.matchAll(attributePattern)) {
+    let analytics;
+    try { analytics = JSON.parse(match[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#(?:x27|39);/gi, "'")); } catch { continue; }
+    if (!analytics?.gameId || seen.has(analytics.gameId)) continue;
+    const label = String(analytics.linkName || "");
+    const dateMatch = label.match(/,\s*(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday),\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th),\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!dateMatch) continue;
+    const month = monthNumbers[dateMatch[1].toLowerCase()];
+    if (!month) continue;
+    const eventYear = month < 5 ? season + 1 : season;
+    let hour = Number(dateMatch[3]);
+    if (dateMatch[5].toUpperCase() === "PM" && hour < 12) hour += 12;
+    if (dateMatch[5].toUpperCase() === "AM" && hour === 12) hour = 0;
+    const localDate = `${eventYear}-${String(month).padStart(2, "0")}-${String(dateMatch[2]).padStart(2, "0")}`;
+    const localTime = `${String(hour).padStart(2, "0")}:${dateMatch[4]}`;
+    const provisional = new Date(`${localDate}T${localTime}:00Z`);
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(provisional).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+    const representedUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    const kickoff = new Date(provisional.getTime() - (representedUtc - provisional.getTime()));
+    seen.add(analytics.gameId);
+    const event = calendarExternalEvent(source, { remoteId: analytics.gameId, title: label.split(",")[0] || `${NFL_TEAMS[team]} game`, start: kickoff.toISOString(), end: new Date(kickoff.getTime() + 4 * 3600000).toISOString(), externalUrl: `https://www.nfl.com${match[2]}` });
+    if (event && new Date(event.end).getTime() >= Date.now() - 86400000) events.push(event);
+  }
+  if (!events.length && !/gameId/i.test(html)) throw new Error("The NFL schedule page did not return recognizable games.");
+  return events;
+}
+
+function calendarArrSettings(service) {
+  const setup = readSetupConfig() || {};
+  const settings = setup.integrationSettings?.[service] || setup.integrations?.[service] || {};
+  return { baseUrl: String(settings.url || "").replace(/\/+$/, ""), apiKey: String(settings.apiKey || "") };
+}
+
+async function fetchArrCalendarEvents(source) {
+  const service = String(source.service || "").toLowerCase();
+  if (!CALENDAR_ARR_SERVICES.has(service)) throw new Error("Choose a supported *arr service.");
+  const { baseUrl, apiKey } = calendarArrSettings(service);
+  if (!baseUrl || !apiKey) throw new Error(`${service[0].toUpperCase()}${service.slice(1)} is not configured in Homestead.`);
+  const start = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const end = new Date(Date.now() + 400 * 86400000).toISOString().slice(0, 10);
+  const apiVersion = ["radarr", "sonarr"].includes(service) ? "v3" : "v1";
+  let sonarrSeriesById = new Map();
+  if (service === "sonarr") {
+    try {
+      const seriesResponse = await fetchCalendarResponse(`${baseUrl}/api/v3/series`, { headers: { "X-Api-Key": apiKey, Accept: "application/json" } });
+      const seriesData = await seriesResponse.json();
+      sonarrSeriesById = new Map((Array.isArray(seriesData) ? seriesData : []).flatMap((series) => {
+        const title = calendarText(series?.title, 180);
+        const ids = [series?.id, series?.tvdbId, series?.tmdbId].filter((id) => id !== undefined && id !== null && String(id) !== "");
+        return title ? ids.map((id) => [String(id), title]) : [];
+      }));
+    } catch (error) {
+      console.warn(`Sonarr series-title lookup failed; using expanded calendar data when available: ${error.message}`);
+    }
+  }
+  const response = await fetchCalendarResponse(`${baseUrl}/api/${apiVersion}/calendar?start=${start}&end=${end}&unmonitored=true`, { headers: { "X-Api-Key": apiKey, Accept: "application/json" } });
+  const data = await response.json();
+  return (Array.isArray(data) ? data : data?.records || []).map((item, index) => {
+    const date = service === "sonarr" ? (item.airDateUtc || item.airDate) : service === "radarr" ? (item.digitalRelease || item.physicalRelease || item.inCinemas) : item.releaseDate;
+    const seriesTitle = service === "sonarr" ? calendarText(item.series?.title || sonarrSeriesById.get(String(item.seriesId ?? item.series?.id ?? "")) || item.seriesTitle || "TV episode", 180) : "";
+    const episodeCode = service === "sonarr" && Number.isFinite(item.seasonNumber) && Number.isFinite(item.episodeNumber) ? `S${String(item.seasonNumber).padStart(2, "0")}E${String(item.episodeNumber).padStart(2, "0")}` : "";
+    const episodeTitle = service === "sonarr" ? calendarText(item.title, 180) : "";
+    const title = service === "sonarr"
+      ? [seriesTitle, episodeCode, episodeTitle].filter(Boolean).join(" · ")
+      : service === "lidarr" ? `${item.artist?.artistName || item.artist?.name || "Music"} · ${item.title || "Album release"}`
+        : service === "readarr" ? `${item.author?.authorName || item.author?.name || "Book"} · ${item.title || "Book release"}`
+          : item.title || item.movie?.title || "Movie release";
+    return calendarExternalEvent(source, { remoteId: `${item.id || index}:${date}`, title, start: date, allDay: !String(date || "").includes("T"), seriesTitle, episodeCode, episodeTitle });
+  }).filter(Boolean);
+}
+
+async function fetchCalendarSourceEvents(source) {
+  if (source.type === "nfl") return fetchNflCalendarEvents(source);
+  if (source.type === "arr") return fetchArrCalendarEvents(source);
+  if (source.type === "ical") {
+    const response = await fetchCalendarResponse(calendarSourceUrl(source.url), { headers: { Accept: "text/calendar,text/plain;q=0.9,*/*;q=0.5" } });
+    return parseIcalendarEvents(await response.text(), source);
+  }
+  throw new Error("Unsupported calendar source.");
+}
+
+async function refreshCalendarSource(calendar, sourceId) {
+  const index = calendar.sources.findIndex((source) => source.id === sourceId);
+  if (index < 0) throw new Error("Calendar source not found.");
+  const source = calendar.sources[index];
+  try {
+    const events = await fetchCalendarSourceEvents(source);
+    calendar.events = calendar.events.filter((event) => event.sourceId !== source.id).concat(events);
+    calendar.sources[index] = { ...source, eventCount: events.length, lastRefreshedAt: new Date().toISOString(), lastError: "", updatedAt: new Date().toISOString() };
+    return calendar.sources[index];
+  } catch (error) {
+    calendar.sources[index] = { ...source, lastError: calendarText(error.message || "Unable to refresh this source.", 300), lastAttemptedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    throw error;
+  }
+}
+
+function decodeScheduleDataUrl(value = "") {
+  const match = String(value || "").match(/^data:(image\/(?:jpeg|jpg|png|webp)|application\/pdf);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) throw new Error("Choose a JPG, PNG, WebP, or PDF schedule.");
+  const buffer = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+  if (buffer.length < 32 || buffer.length > 24 * 1024 * 1024) throw new Error("Schedule files must be smaller than 24 MB.");
+  return { buffer, mimeType: match[1].toLowerCase() };
+}
+
+function scheduleTime(hourText, minuteText, meridiemText) {
+  let hour = Number(hourText); const minute = Number(minuteText || 0); const meridiem = String(meridiemText || "").toLowerCase().slice(0, 1);
+  if (meridiem === "p" && hour < 12) hour += 12;
+  if (meridiem === "a" && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return "";
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function scheduleDateForLine(line, weekStart) {
+  const iso = line.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (iso) return `${iso[1]}-${String(iso[2]).padStart(2, "0")}-${String(iso[3]).padStart(2, "0")}`;
+  const us = line.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(20\d{2}|\d{2}))?\b/);
+  if (us) { const year = us[3] ? (us[3].length === 2 ? `20${us[3]}` : us[3]) : String(new Date(`${weekStart}T12:00:00`).getFullYear()); return `${year}-${String(us[1]).padStart(2, "0")}-${String(us[2]).padStart(2, "0")}`; }
+  const weekdays = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const dayIndex = weekdays.findIndex((day) => new RegExp(`\\b${day}(?:day)?\\b`, "i").test(line));
+  if (dayIndex >= 0 && validCalendarDate(weekStart)) { const date = new Date(`${weekStart}T12:00:00`); const offset = (dayIndex - date.getDay() + 7) % 7; date.setDate(date.getDate() + offset); return date.toISOString().slice(0, 10); }
+  return "";
+}
+
+function parseScheduleOcrText(rawText = "", options = {}) {
+  const text = String(rawText || "").replace(/\r/g, "");
+  const lines = text.split("\n").map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const weekStart = validCalendarDate(options.weekStart) ? options.weekStart : new Date().toISOString().slice(0, 10);
+  let personName = calendarText(options.personName, 120);
+  if (!personName) personName = calendarText(text.match(/(?:schedule\s+for|employee|associate|name)\s*[:\-]?\s*([A-Z][A-Za-z' -]{1,60})/i)?.[1], 120);
+  const shifts = [];
+  let rememberedDate = "";
+  for (const line of lines) {
+    const foundDate = scheduleDateForLine(line, weekStart); if (foundDate) rememberedDate = foundDate;
+    const range = line.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m?\.?|p\.?m?\.?)?\s*(?:-|–|—|to)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m?\.?|p\.?m?\.?)\b/i)
+      || line.match(/\b(\d{1,2}):(\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}):(\d{2})\b/i);
+    if (!range || !(foundDate || rememberedDate)) continue;
+    const secondMeridiem = range.length >= 7 ? range[6] : "";
+    const inferredFirst = !range[3] && /^p/i.test(secondMeridiem) && Number(range[1]) > Number(range[4]) ? "a" : secondMeridiem;
+    const firstMeridiem = range.length >= 7 ? (range[3] || inferredFirst) : "";
+    const startTime = scheduleTime(range[1], range[2], firstMeridiem);
+    const endTime = scheduleTime(range.length >= 7 ? range[4] : range[3], range.length >= 7 ? range[5] : range[4], secondMeridiem);
+    if (!startTime || !endTime) continue;
+    const location = calendarText(line.replace(range[0], "").replace(/\b(?:sun|mon|tue|wed|thu|fri|sat)(?:day)?\b/ig, "").replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, "").replace(/^[-:| ]+|[-:| ]+$/g, ""), 160);
+    const shift = { include: true, date: foundDate || rememberedDate, startTime, endTime, location };
+    if (!shifts.some((item) => item.date === shift.date && item.startTime === shift.startTime && item.endTime === shift.endTime)) shifts.push(shift);
+  }
+  return { personName, shifts: shifts.slice(0, 31), rawText: text.slice(0, 30000) };
+}
+
+async function extractScheduleText(payload, temporaryDir) {
+  const extension = payload.mimeType === "application/pdf" ? ".pdf" : ".png";
+  const sourcePath = path.join(temporaryDir, `schedule${extension}`);
+  if (payload.mimeType === "application/pdf") {
+    fs.writeFileSync(sourcePath, payload.buffer);
+    try { return { rawText: await execFilePromise("pdftotext", ["-layout", sourcePath, "-"] , { timeout: 24000, maxBuffer: 4 * 1024 * 1024 }), tsv: "", positioned: false }; }
+    catch { throw new Error("This PDF does not contain readable text. Upload a screenshot or photo of the schedule instead."); }
+  }
+  if (sharp) await sharp(payload.buffer).rotate().resize({ width: 2400, withoutEnlargement: true }).grayscale().normalize().sharpen().png().toFile(sourcePath); else fs.writeFileSync(sourcePath, payload.buffer);
+  const tsv = await runTesseractTsv(sourcePath, "11");
+  return { rawText: tsvToReadableText(parseTesseractTsv(tsv)), tsv, positioned: true, sourcePath };
+}
+
+async function recoverPositionedScheduleRow(sourcePath, parsed, temporaryDir) {
+  const geometry = parsed?._geometry;
+  if (!sharp || !sourcePath || !geometry || !Array.isArray(geometry.columnCenters) || geometry.columnCenters.length !== 7) return parsed;
+  const metadata = await sharp(sourcePath).metadata();
+  const imageWidth = Number(metadata.width || geometry.pageWidth || 0);
+  const imageHeight = Number(metadata.height || geometry.pageHeight || 0);
+  if (!(imageWidth > 0 && imageHeight > 0)) return parsed;
+  const scaleX = imageWidth / Math.max(1, geometry.pageWidth || imageWidth);
+  const scaleY = imageHeight / Math.max(1, geometry.pageHeight || imageHeight);
+  const cellWidth = Math.max(80, Number(geometry.spacing || 0) * 0.9) * scaleX;
+  const rowHeight = Math.max(54, Math.min(Number(geometry.rowTolerance || 32) * 1.55, Number(geometry.spacing || 100) * 0.42)) * scaleY;
+  const cropPaths = [];
+  for (let index = 0; index < 7; index += 1) {
+    const centerX = geometry.columnCenters[index] * scaleX;
+    const centerY = (geometry.rowCenterY + geometry.slope * (geometry.columnCenters[index] - geometry.personCenterX)) * scaleY;
+    const left = Math.max(0, Math.round(centerX - cellWidth / 2));
+    const top = Math.max(0, Math.round(centerY - rowHeight / 2));
+    const width = Math.max(1, Math.min(imageWidth - left, Math.round(cellWidth)));
+    const height = Math.max(1, Math.min(imageHeight - top, Math.round(rowHeight)));
+    const output = path.join(temporaryDir, `schedule-row-cell-${index}.png`);
+    await sharp(sourcePath).extract({ left, top, width, height }).resize({ width: 900, withoutEnlargement: false }).grayscale().normalize().sharpen().png().toFile(output);
+    cropPaths.push(output);
+  }
+  const totalLeft = 0;
+  const totalTop = Math.max(0, Math.round((geometry.rowCenterY - geometry.rowTolerance * 0.15) * scaleY));
+  const totalWidth = Math.max(1, Math.min(imageWidth, Math.round(geometry.nameAreaRight * scaleX)));
+  const totalHeight = Math.max(1, Math.min(imageHeight - totalTop, Math.round(Math.max(90, geometry.rowTolerance * 3.1) * scaleY)));
+  const totalPath = path.join(temporaryDir, "schedule-row-total.png");
+  await sharp(sourcePath).extract({ left: totalLeft, top: totalTop, width: totalWidth, height: totalHeight }).resize({ width: 1000, withoutEnlargement: false }).grayscale().normalize().sharpen().png().toFile(totalPath);
+  const [cellTexts, totalText] = await Promise.all([
+    Promise.all(cropPaths.map((cropPath) => runTesseractOcr(cropPath, "7").catch(() => ""))),
+    runTesseractOcr(totalPath, "6").catch(() => ""),
+  ]);
+  return applyCellTextRecovery(parsed, cellTexts, totalText);
+}
+
+app.get("/api/calendar", homesteadAccess.requireSession, async (req, res) => {
+  const calendar = readFamilyCalendar();
+  const currentUser = homesteadAccess.getCurrentUser(req);
+  const staleBefore = Date.now() - 6 * 3600000;
+  const staleSources = calendar.sources.filter((source) => {
+    const lastCheck = source.lastRefreshedAt || source.lastAttemptedAt;
+    return !lastCheck || new Date(lastCheck).getTime() < staleBefore;
+  });
+  for (const source of staleSources) await refreshCalendarSource(calendar, source.id).catch(() => null);
+  if (staleSources.length) writeFamilyCalendar(calendar);
+  else {
+    try { syncFamilyScheduleSidecars(calendar); }
+    catch (error) { console.warn("Unable to materialize calendar schedule sidecars:", error.message); }
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, ...calendar, events: calendar.events.filter((event) => calendarCanViewEvent(event, currentUser)) });
+});
+
+app.get("/api/calendar/audience", homesteadAccess.requireSession, (req, res) => {
+  const currentUser = homesteadAccess.getCurrentUser(req);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, currentUser: currentUser ? { id: currentUser.id, displayName: currentUser.displayName || currentUser.username, householdId: currentUser.householdId || "" } : null, users: homesteadAccess.listCalendarAudience(req) });
+});
+
+app.post("/api/calendar/events", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const calendar = readFamilyCalendar();
+    const currentUser = homesteadAccess.getCurrentUser(req);
+    const audience = normalizeCalendarAudience(req.body || {}, currentUser, "all");
+    if (req.body?.repeats === true) {
+      const recurrence = normalizeCalendarRecurrence(req.body || {});
+      const seriesId = `calendar-series-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`;
+      const proposed = buildCalendarSeriesEvents(req.body || {}, recurrence, seriesId, audience);
+      const addedEvents = [];
+      let skipped = 0;
+      for (const event of proposed) {
+        if (calendarEventDuplicate([...calendar.events, ...addedEvents], event)) { skipped += 1; continue; }
+        addedEvents.push(event);
+      }
+      if (!addedEvents.length) return res.status(409).json({ ok: false, message: "Every occurrence already exists on this calendar." });
+      const series = {
+        id: seriesId,
+        title: calendarText(req.body?.title, 180),
+        personName: calendarText(req.body?.personName, 120),
+        profileId: calendarText(req.body?.profileId, 160),
+        kind: CALENDAR_KINDS.has(req.body?.kind) ? req.body.kind : "appointment",
+        startTime: calendarText(req.body?.startTime, 5),
+        endTime: calendarText(req.body?.endTime, 5),
+        location: calendarText(req.body?.location, 240),
+        assignedDriver: calendarText(req.body?.assignedDriver, 120),
+        color: calendarColor(req.body?.color, CALENDAR_COLORS[CALENDAR_KINDS.has(req.body?.kind) ? req.body.kind : "appointment"]),
+        recurrence,
+        ...audience,
+        eventIds: addedEvents.map((event) => event.id),
+        createdAt: new Date().toISOString(),
+      };
+      calendar.events.push(...addedEvents);
+      calendar.series.push(series);
+      writeFamilyCalendar(calendar);
+      return res.status(201).json({ ok: true, event: addedEvents[0], events: addedEvents, series, added: addedEvents.length, skipped });
+    }
+    const event = { ...calendarEventFromInput(req.body || {}), ...audience };
+    if (calendarEventDuplicate(calendar.events, event)) return res.status(409).json({ ok: false, message: "That event already exists for this person, date, and time." });
+    calendar.events.push(event);
+    writeFamilyCalendar(calendar);
+    res.status(201).json({ ok: true, event, events: [event], added: 1, skipped: 0 });
+  }
+  catch (error) { res.status(400).json({ ok: false, message: error.message || "Unable to add the event." }); }
+});
+
+app.patch("/api/calendar/events/:eventId", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const calendar = readFamilyCalendar(); const index = calendar.events.findIndex((event) => event.id === req.params.eventId);
+    if (index < 0) return res.status(404).json({ ok: false, message: "Calendar event not found." });
+    if (calendar.events[index].readOnly || calendar.events[index].sourceId) return res.status(409).json({ ok: false, message: "Subscribed calendar events are read-only. Change or hide their source instead." });
+    const current = calendar.events[index]; const patch = {};
+    const currentUser = homesteadAccess.getCurrentUser(req);
+    if (!calendarCanEditEvent(current, currentUser)) return res.status(403).json({ ok: false, message: "Only the account that created this event can edit it." });
+    const formFields = ["title", "personName", "profileId", "kind", "allDay", "date", "startTime", "endTime", "location", "assignedDriver", "color", "visibility", "visibleToUserIds"];
+    const editsEventForm = formFields.some((field) => Object.prototype.hasOwnProperty.call(req.body || {}, field));
+    if (editsEventForm) {
+      const importedGroup = current.source === "schedule-import" && current.importId;
+      const updateScope = req.body?.scope === "series" && current.seriesId ? "series" : req.body?.scope === "series" && importedGroup ? "import" : "only";
+      if (updateScope !== "only") {
+        const groupedEvents = calendar.events.filter((event) => (updateScope === "series" ? event.seriesId === current.seriesId : event.source === "schedule-import" && event.importId === current.importId) && calendarCanEditEvent(event, currentUser));
+        const seriesRecord = updateScope === "series" ? calendar.series.find((series) => series.id === current.seriesId) : null;
+        const rotatingSeries = seriesRecord?.recurrence?.frequency === "rotating";
+        const outsideEvents = calendar.events.filter((event) => !groupedEvents.some((groupedEvent) => groupedEvent.id === event.id));
+        const updatedEvents = [];
+        for (const event of groupedEvents) {
+          const rebuilt = calendarEventFromInput({
+            title: rotatingSeries && event.kind === "off" ? "Off" : rotatingSeries && current.kind === "off" ? event.title : Object.prototype.hasOwnProperty.call(req.body || {}, "title") ? req.body.title : event.title,
+            personName: Object.prototype.hasOwnProperty.call(req.body || {}, "personName") ? req.body.personName : event.personName,
+            profileId: Object.prototype.hasOwnProperty.call(req.body || {}, "profileId") ? req.body.profileId : event.profileId,
+            kind: rotatingSeries ? event.kind : Object.prototype.hasOwnProperty.call(req.body || {}, "kind") ? req.body.kind : event.kind,
+            allDay: event.allDay === true,
+            date: String(event.start || "").slice(0, 10),
+            startTime: event.allDay ? "" : updateScope === "import" ? String(event.start || "").slice(11, 16) : (rotatingSeries && current.allDay) ? String(event.start || "").slice(11, 16) : req.body?.startTime || String(event.start || "").slice(11, 16),
+            endTime: event.allDay ? "" : updateScope === "import" ? String(event.end || "").slice(11, 16) : (rotatingSeries && current.allDay) ? String(event.end || "").slice(11, 16) : req.body?.endTime || String(event.end || "").slice(11, 16),
+            location: Object.prototype.hasOwnProperty.call(req.body || {}, "location") ? req.body.location : event.location,
+            assignedDriver: Object.prototype.hasOwnProperty.call(req.body || {}, "assignedDriver") ? req.body.assignedDriver : event.assignedDriver,
+            color: Object.prototype.hasOwnProperty.call(req.body || {}, "color") ? req.body.color : event.color || event.backgroundColor,
+            coverageStatus: event.coverageStatus,
+            source: event.source,
+            importId: event.importId,
+            seriesId: event.seriesId,
+            occurrenceDate: String(event.start || "").slice(0, 10),
+          }, event.id);
+          const updatedAudience = Object.prototype.hasOwnProperty.call(req.body || {}, "visibility") || Object.prototype.hasOwnProperty.call(req.body || {}, "visibleToUserIds") ? normalizeCalendarAudience({ ...event, ...req.body }, currentUser, event.visibility || "all") : normalizeCalendarAudience(event, currentUser, event.visibility || "all");
+          const updated = { ...event, ...rebuilt, ...updatedAudience, createdAt: event.createdAt, updatedAt: new Date().toISOString() };
+          if (calendarEventDuplicate([...outsideEvents, ...updatedEvents], updated)) return res.status(409).json({ ok: false, message: "One of the updated occurrences conflicts with another calendar event." });
+          updatedEvents.push(updated);
+        }
+        const updatesById = new Map(updatedEvents.map((event) => [event.id, event]));
+        calendar.events = calendar.events.map((event) => updatesById.get(event.id) || event);
+        if (updateScope === "series") calendar.series = calendar.series.map((series) => series.id === current.seriesId ? {
+          ...series,
+          title: updatedEvents.find((event) => !event.allDay)?.title || updatedEvents[0]?.title || series.title,
+          personName: updatedEvents[0]?.personName || "",
+          profileId: updatedEvents[0]?.profileId || "",
+          kind: updatedEvents.find((event) => !event.allDay)?.kind || updatedEvents[0]?.kind || series.kind,
+          startTime: String(updatedEvents.find((event) => !event.allDay)?.start || "").slice(11, 16) || series.startTime,
+          endTime: String(updatedEvents.find((event) => !event.allDay)?.end || "").slice(11, 16) || series.endTime,
+          location: updatedEvents[0]?.location || "",
+          assignedDriver: updatedEvents[0]?.assignedDriver || "",
+          color: updatedEvents[0]?.color || series.color,
+          updatedAt: new Date().toISOString(),
+        } : series);
+        writeFamilyCalendar(calendar);
+        return res.json({ ok: true, event: updatesById.get(current.id), events: updatedEvents, updated: true, updatedCount: updatedEvents.length, scope: updateScope });
+      }
+      const rebuilt = calendarEventFromInput({
+        title: Object.prototype.hasOwnProperty.call(req.body || {}, "title") ? req.body.title : current.title,
+        personName: Object.prototype.hasOwnProperty.call(req.body || {}, "personName") ? req.body.personName : current.personName,
+        profileId: Object.prototype.hasOwnProperty.call(req.body || {}, "profileId") ? req.body.profileId : current.profileId,
+        kind: Object.prototype.hasOwnProperty.call(req.body || {}, "kind") ? req.body.kind : current.kind,
+        date: req.body?.date || String(current.start || "").slice(0, 10),
+        startTime: req.body?.startTime || String(current.start || "").slice(11, 16),
+        endTime: req.body?.endTime || String(current.end || "").slice(11, 16),
+        location: Object.prototype.hasOwnProperty.call(req.body || {}, "location") ? req.body.location : current.location,
+        assignedDriver: Object.prototype.hasOwnProperty.call(req.body || {}, "assignedDriver") ? req.body.assignedDriver : current.assignedDriver,
+        color: Object.prototype.hasOwnProperty.call(req.body || {}, "color") ? req.body.color : current.color || current.backgroundColor,
+        allDay: Object.prototype.hasOwnProperty.call(req.body || {}, "allDay") ? req.body.allDay === true : current.allDay === true,
+        coverageStatus: current.coverageStatus,
+        source: current.source,
+        importId: current.importId,
+        seriesId: current.seriesId,
+        occurrenceDate: current.occurrenceDate,
+      }, current.id);
+      Object.assign(patch, {
+        title: rebuilt.title,
+        personName: rebuilt.personName,
+        profileId: rebuilt.profileId,
+        kind: rebuilt.kind,
+        start: rebuilt.start,
+        end: rebuilt.end,
+        allDay: rebuilt.allDay === true,
+        location: rebuilt.location,
+        assignedDriver: rebuilt.assignedDriver,
+        color: rebuilt.color,
+        backgroundColor: rebuilt.backgroundColor,
+        borderColor: rebuilt.borderColor,
+        occurrenceDate: current.seriesId ? rebuilt.start.slice(0, 10) : current.occurrenceDate,
+      });
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "visibility") || Object.prototype.hasOwnProperty.call(req.body || {}, "visibleToUserIds")) Object.assign(patch, normalizeCalendarAudience({ ...current, ...req.body }, currentUser, current.visibility || "all"));
+    } else {
+      if (req.body?.start && !Number.isNaN(new Date(req.body.start).getTime())) patch.start = String(req.body.start);
+      if (req.body?.end && !Number.isNaN(new Date(req.body.end).getTime())) patch.end = String(req.body.end);
+      if (typeof req.body?.assignedDriver === "string") patch.assignedDriver = calendarText(req.body.assignedDriver, 120);
+    }
+    if (["", "requested", "covered"].includes(req.body?.coverageStatus)) patch.coverageStatus = req.body.coverageStatus;
+    const candidate = { ...current, ...patch };
+    if (calendarEventDuplicate(calendar.events.filter((event) => event.id !== current.id), candidate)) return res.status(409).json({ ok: false, message: "That event already exists for this person, date, and time." });
+    calendar.events[index] = { ...candidate, updatedAt: new Date().toISOString() };
+    writeFamilyCalendar(calendar);
+    res.json({ ok: true, event: calendar.events[index], updated: true, updatedCount: 1, scope: "only" });
+  } catch (error) { res.status(400).json({ ok: false, message: error.message || "Unable to update that event." }); }
+});
+
+app.delete("/api/calendar/events/:eventId", homesteadAccess.requireSession, (req, res) => {
+  const calendar = readFamilyCalendar();
+  const current = calendar.events.find((event) => event.id === req.params.eventId);
+  if (!current) return res.status(404).json({ ok: false, message: "Calendar event not found." });
+  const currentUser = homesteadAccess.getCurrentUser(req);
+  if (!calendarCanEditEvent(current, currentUser)) return res.status(403).json({ ok: false, message: "Only the account that created this event can delete it." });
+  const scope = ["only", "following", "series"].includes(String(req.query.scope || "")) ? String(req.query.scope) : "only";
+  let removedIds = new Set([current.id]);
+  if (current.seriesId && scope === "series") removedIds = new Set(calendar.events.filter((event) => event.seriesId === current.seriesId).map((event) => event.id));
+  if (current.seriesId && scope === "following") removedIds = new Set(calendar.events.filter((event) => event.seriesId === current.seriesId && String(event.occurrenceDate || event.start || "").slice(0, 10) >= String(current.occurrenceDate || current.start || "").slice(0, 10)).map((event) => event.id));
+  calendar.events = calendar.events.filter((event) => !removedIds.has(event.id));
+  if (current.seriesId) {
+    calendar.series = calendar.series.map((series) => series.id === current.seriesId ? { ...series, eventIds: (series.eventIds || []).filter((id) => !removedIds.has(id)), updatedAt: new Date().toISOString() } : series).filter((series) => (series.eventIds || []).length > 0);
+  }
+  writeFamilyCalendar(calendar);
+  res.json({ ok: true, removed: removedIds.size, scope });
+});
+
+app.get("/api/calendar/sources", homesteadAccess.requireSession, (req, res) => {
+  const calendar = readFamilyCalendar();
+  const availableArr = [...CALENDAR_ARR_SERVICES].map((service) => ({ service, configured: Boolean(calendarArrSettings(service).baseUrl && calendarArrSettings(service).apiKey) }));
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, sources: calendar.sources, availableArr, nflTeams: NFL_TEAMS });
+});
+
+app.post("/api/calendar/sources", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const type = ["nfl", "ical", "arr"].includes(req.body?.type) ? req.body.type : "";
+    if (!type) return res.status(400).json({ ok: false, message: "Choose an online schedule type." });
+    const team = String(req.body?.team || "").trim().toLowerCase();
+    const service = String(req.body?.service || "").trim().toLowerCase();
+    const url = type === "ical" ? calendarSourceUrl(req.body?.url) : "";
+    if (type === "nfl" && !NFL_TEAMS[team]) return res.status(400).json({ ok: false, message: "Choose an NFL team." });
+    if (type === "arr" && !CALENDAR_ARR_SERVICES.has(service)) return res.status(400).json({ ok: false, message: "Choose a configured *arr service." });
+    const calendar = readFamilyCalendar();
+    const duplicate = calendar.sources.find((source) => source.type === type && (type === "nfl" ? source.team === team : type === "arr" ? source.service === service : source.url === url));
+    if (duplicate) return res.status(409).json({ ok: false, message: "That schedule source is already subscribed." });
+    const source = {
+      id: `calendar-source-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`,
+      type,
+      name: calendarText(req.body?.name, 120) || (type === "nfl" ? `${NFL_TEAMS[team]} schedule` : type === "arr" ? `${service[0].toUpperCase()}${service.slice(1)} calendar` : "Online calendar"),
+      team,
+      service,
+      url,
+      color: calendarColor(req.body?.color, type === "nfl" ? "#355dff" : type === "arr" ? "#8b63d9" : "#3e9b72"),
+      eventCount: 0,
+      lastRefreshedAt: "",
+      lastError: "",
+      createdAt: new Date().toISOString(),
+    };
+    calendar.sources.push(source);
+    let warning = "";
+    try { await refreshCalendarSource(calendar, source.id); } catch (error) { warning = error.message || "The source was saved but could not be refreshed yet."; }
+    writeFamilyCalendar(calendar);
+    res.status(201).json({ ok: true, source: calendar.sources.find((item) => item.id === source.id), warning });
+  } catch (error) { res.status(400).json({ ok: false, message: error.message || "Unable to add that schedule source." }); }
+});
+
+app.post("/api/calendar/sources/:sourceId/refresh", homesteadAccess.requireAdmin, async (req, res) => {
+  const calendar = readFamilyCalendar();
+  try {
+    const source = await refreshCalendarSource(calendar, req.params.sourceId);
+    writeFamilyCalendar(calendar);
+    res.json({ ok: true, source });
+  } catch (error) {
+    writeFamilyCalendar(calendar);
+    res.status(502).json({ ok: false, message: error.message || "Unable to refresh that schedule source.", source: calendar.sources.find((item) => item.id === req.params.sourceId) });
+  }
+});
+
+app.delete("/api/calendar/sources/:sourceId", homesteadAccess.requireAdmin, (req, res) => {
+  const calendar = readFamilyCalendar();
+  if (!calendar.sources.some((source) => source.id === req.params.sourceId)) return res.status(404).json({ ok: false, message: "Calendar source not found." });
+  calendar.sources = calendar.sources.filter((source) => source.id !== req.params.sourceId);
+  calendar.events = calendar.events.filter((event) => event.sourceId !== req.params.sourceId);
+  writeFamilyCalendar(calendar);
+  res.json({ ok: true });
+});
+
+app.post("/api/calendar/schedule-preview", homesteadAccess.requireSession, async (req, res) => {
+  const temporaryDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "homestead-schedule-"));
+  try {
+    const payload = decodeScheduleDataUrl(req.body?.dataUrl);
+    const extracted = await extractScheduleText(payload, temporaryDir);
+    const requestedPerson = calendarText(req.body?.personName, 120);
+    const personalList = parsePersonalScheduleText(extracted.rawText, { personName: requestedPerson, firstDate: req.body?.weekStart });
+    let parsed = personalList.recognition?.mode === "personal-list"
+      ? personalList
+      : extracted.positioned
+        ? parsePositionedSchedule(extracted.tsv, { personName: requestedPerson, firstDate: req.body?.weekStart, rowCenterPercent: req.body?.rowCenterPercent })
+        : parseScheduleOcrText(extracted.rawText, { personName: requestedPerson, weekStart: req.body?.weekStart });
+    if (extracted.positioned && personalList.recognition?.mode !== "personal-list" && !parsed.recognition?.rowMatched) {
+      const structuredTsv = await runTesseractTsv(extracted.sourcePath, "6").catch(() => "");
+      if (structuredTsv) {
+        const structured = parsePositionedSchedule(structuredTsv, { personName: requestedPerson, firstDate: req.body?.weekStart, rowCenterPercent: req.body?.rowCenterPercent });
+        if (structured.recognition?.rowMatched) {
+          structured.recognition.warnings = ["The requested row was recovered with structured table recognition.", ...(structured.recognition.warnings || [])];
+          parsed = structured;
+        }
+      }
+    }
+    if (extracted.positioned && parsed.recognition?.mode !== "personal-list" && parsed.recognition?.rowMatched && ((parsed.shifts || []).length < 7 || parsed.recognition?.printedHours == null)) {
+      parsed = await recoverPositionedScheduleRow(extracted.sourcePath, parsed, temporaryDir);
+    }
+    delete parsed._geometry;
+    const recognition = parsed.recognition || { mode: "text-list", rowMatched: true, printedHours: null, calculatedHours: null, hoursMatch: null, safeToApprove: parsed.shifts.length > 0, warnings: [] };
+    const message = recognition.safeToApprove
+      ? recognition.mode === "personal-list"
+        ? `${parsed.shifts.length} dated shift${parsed.shifts.length === 1 ? "" : "s"} found in this personal schedule. Verify the dates and hour check below.`
+        : `${parsed.shifts.length} shift${parsed.shifts.length === 1 ? "" : "s"} found in ${parsed.matchedPersonName || parsed.personName || "the selected"} row. Verify the dates and hour check below.`
+      : recognition.warnings?.[0] || "No shifts were confidently detected. Nothing should be approved until the review warnings are resolved.";
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, ...parsed, recognition, message });
+  }
+  catch (error) { res.status(400).json({ ok: false, message: error.message || "Unable to read that schedule." }); }
+  finally { fs.rmSync(temporaryDir, { recursive: true, force: true }); }
+});
+
+app.post("/api/calendar/bill-preview", homesteadAccess.requireSession, async (req, res) => {
+  const temporaryDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "homestead-bill-"));
+  try {
+    const payload = decodeScheduleDataUrl(req.body?.dataUrl);
+    if (payload.mimeType === "application/pdf") return res.status(400).json({ ok: false, message: "For this first version, upload a bill screenshot or photo instead of a PDF." });
+    const sourcePath = path.join(temporaryDir, "bill.png");
+    if (sharp) await sharp(payload.buffer).rotate().resize({ width: 2400, withoutEnlargement: true }).grayscale().normalize().sharpen().png().toFile(sourcePath);
+    else fs.writeFileSync(sourcePath, payload.buffer);
+    const rawText = await runTesseractOcr(sourcePath, "6");
+    const parsed = parseBillOcrText(rawText);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, ...parsed, rawText, message: parsed.confidence >= 2 ? "Bill details recognized. Review them before adding the event." : "Some bill details need review before adding the event." });
+  } catch (error) { res.status(400).json({ ok: false, message: error.message || "Unable to read that bill." }); }
+  finally { fs.rmSync(temporaryDir, { recursive: true, force: true }); }
+});
+
+app.post("/api/calendar/schedule-import", homesteadAccess.requireSession, (req, res) => {
+  let activityJob = null;
+  try {
+    const personName = calendarText(req.body?.personName, 120); if (!personName) return res.status(400).json({ ok: false, message: "Confirm the person's calendar label before importing." });
+    const shifts = Array.isArray(req.body?.shifts) ? req.body.shifts.slice(0, 62) : []; if (!shifts.length) return res.status(400).json({ ok: false, message: "Add at least one shift or off day before importing." });
+    const printedHours = req.body?.printedHours === null || req.body?.printedHours === "" ? null : Number(req.body?.printedHours);
+    const calculatedHours = Number(shifts.reduce((sum, shift) => sum + (shift?.dayType !== "off" && validCalendarTime(shift?.startTime) && validCalendarTime(shift?.endTime) ? recognizedScheduleHoursBetween(shift.startTime, shift.endTime) : 0), 0).toFixed(2));
+    if (Number.isFinite(printedHours) && Math.abs(printedHours - calculatedHours) > 0.25) return res.status(409).json({ ok: false, message: `These shifts total ${calculatedHours} hours, but the schedule prints ${printedHours}. Correct the review before importing.` });
+    activityJob = activityJobStore.create({ activityType: "calendar-schedule-import", status: "processing", title: `${personName} schedule import`, libraryId: "calendar", source: "Family Calendar", notes: `Review approved for ${shifts.length} proposed shift${shifts.length === 1 ? "" : "s"}.`, progress: { current: 0, total: shifts.length, label: "Adding reviewed shifts" }, cancellable: false });
+    const calendar = readFamilyCalendar(); const importId = `schedule-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`; let uploadName = "";
+    const audience = normalizeCalendarAudience(req.body || {}, homesteadAccess.getCurrentUser(req), "all");
+    if (req.body?.dataUrl) { const payload = decodeScheduleDataUrl(req.body.dataUrl); const extension = payload.mimeType === "application/pdf" ? ".pdf" : payload.mimeType.includes("png") ? ".png" : payload.mimeType.includes("webp") ? ".webp" : ".jpg"; fs.mkdirSync(familyScheduleUploadRoot, { recursive: true }); uploadName = `${importId}${extension}`; fs.writeFileSync(path.join(familyScheduleUploadRoot, uploadName), payload.buffer); }
+    let added = 0; let addedOff = 0; let skipped = 0;
+    for (const shift of shifts) {
+      const isOff = shift?.dayType === "off";
+      const event = { ...calendarEventFromInput({ title: isOff ? "Off" : "Work", personName, profileId: req.body?.profileId, kind: isOff ? "off" : "work", allDay: isOff, date: shift.date, startTime: shift.startTime, endTime: shift.endTime, location: isOff ? "" : shift.location, source: "schedule-import", importId }), ...audience };
+      const duplicate = calendar.events.some((item) => item.kind === event.kind && String(item.personName || "").toLowerCase() === personName.toLowerCase() && item.start === event.start && item.end === event.end);
+      if (duplicate) { skipped += 1; continue; } calendar.events.push(event); added += 1; if (isOff) addedOff += 1;
+    }
+    calendar.imports.push({ id: importId, personName, profileId: calendarText(req.body?.profileId, 160), fileName: calendarText(req.body?.fileName, 240), storedFile: uploadName, printedHours: Number.isFinite(printedHours) ? printedHours : null, calculatedHours, added, addedOff, skipped, createdAt: new Date().toISOString() }); writeFamilyCalendar(calendar);
+    activityJobStore.complete(activityJob.id, { progress: { current: shifts.length, total: shifts.length, percent: 100, label: skipped ? "Imported with duplicates skipped" : "Schedule import complete" }, calendarImportId: importId, added, addedOff, skipped }, `${added} calendar entr${added === 1 ? "y" : "ies"} added${addedOff ? `, including ${addedOff} off day${addedOff === 1 ? "" : "s"}` : ""}${skipped ? `; ${skipped} duplicate${skipped === 1 ? "" : "s"} skipped` : ""}.`);
+    res.status(201).json({ ok: true, importId, added, addedOff, skipped });
+  } catch (error) { if (activityJob?.id) activityJobStore.fail(activityJob.id, error); res.status(400).json({ ok: false, message: error.message || "Unable to import that schedule." }); }
+});
+
+app.get("/api/books/metadata/search", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const query = String(req.query.query || req.query.q || "").trim();
+    if (!query) return res.status(400).json({ ok: false, message: "Enter a title, author, or ISBN." });
+    const provider = String(req.query.provider || "all").trim();
+    const search = await searchBookMetadataDetailed(query, { provider, limit: Number(req.query.limit || 24) });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, query, provider, ...search });
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.message || "Book metadata search failed." });
+  }
+});
+
+app.post("/api/books/metadata/webpage", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const url = String(req.body?.url || "").trim();
+    if (!url) return res.status(400).json({ ok: false, message: "Enter an official publisher or reference webpage URL." });
+    const page = await fetchSafeBookMetadataPage(url);
+    const metadata = parseBookMetadataWebpage(page.html, page.url);
+    if (!(metadata.title || metadata.description || metadata.series || metadata.publisher || metadata.image)) throw new Error("No usable book metadata was advertised by that webpage.");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, metadata });
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.name === "AbortError" ? "The metadata webpage timed out." : error.message || "Unable to read that metadata webpage." });
+  }
+});
+
+app.post("/api/books/metadata/artwork-options", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const candidate = req.body?.candidate;
+    if (!candidate || typeof candidate !== "object") return res.status(400).json({ ok: false, message: "Choose a book edition first." });
+    const result = await searchBookArtwork(candidate);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.message || "Unable to load book artwork." });
+  }
+});
+
+app.post("/api/books/artwork/save", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const localId = String(req.body?.localId || "").trim();
+    if (!localId) return res.status(400).json({ ok: false, message: "The local book identity is missing." });
+    const input = await readBookArtworkPayload(req.body || {});
+    const detectedExtension = bookArtworkExtension(input);
+    if (!detectedExtension) return res.status(400).json({ ok: false, message: "The selected file is not a supported cover image." });
+
+    const folderKey = crypto.createHash("sha256").update(localId).digest("hex").slice(0, 24);
+    const folder = path.join(bookArtworkRoot, folderKey);
+    fs.mkdirSync(folder, { recursive: true });
+    const stamp = `${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    let fileName = `cover-${stamp}${detectedExtension}`;
+    let destination = path.join(folder, fileName);
+    if (sharp) {
+      fileName = `cover-${stamp}.jpg`;
+      destination = path.join(folder, fileName);
+      const temporary = `${destination}.tmp`;
+      await sharp(input).rotate().resize({ width: 1600, height: 2400, fit: "inside", withoutEnlargement: true }).jpeg({ quality: 91, mozjpeg: true }).toFile(temporary);
+      fs.renameSync(temporary, destination);
+    } else {
+      const temporary = `${destination}.tmp`;
+      fs.writeFileSync(temporary, input);
+      fs.renameSync(temporary, destination);
+    }
+    res.json({
+      ok: true,
+      publicUrl: `/api/books/artwork/${folderKey}/${fileName}`,
+      storedPath: destination,
+      sourceUrl: req.body?.url || "",
+      savedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.name === "AbortError" ? "Artwork download timed out." : error.message || "Unable to save book artwork." });
+  }
+});
+
+app.get("/api/books/artwork/:folderKey/:fileName", homesteadAccess.requireSession, (req, res) => {
+  const folderKey = String(req.params.folderKey || "");
+  const fileName = String(req.params.fileName || "");
+  if (!/^[a-f0-9]{24}$/.test(folderKey) || !/^cover-[a-z0-9-]+\.(?:jpe?g|png|webp|gif)$/i.test(fileName)) {
+    return res.status(400).json({ ok: false, message: "Invalid book artwork path." });
+  }
+  const target = path.join(bookArtworkRoot, folderKey, fileName);
+  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return res.status(404).end();
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  return res.sendFile(target);
+});
+
+registerMediaArtwork({ app, access: homesteadAccess,
+  readIndex: () => readJsonFile(path.join(dataDir, 'media-index.json'), {}),
+  readMatches: readMetadataMatches, writeMatches: writeMetadataMatches,
+  findMatch: findStoredMetadataMatch, seerr: seerrReader, sharp,
+  mediaRoot: process.env.MEDIA_ROOT || '/media',
+});
+// Also catches scans started by CLI/background integrations, not just the scan route.
+fs.watchFile(path.join(dataDir, "media-index.json"), { interval: 30000, persistent: false }, (current, previous) => {
+  if (current.mtimeMs === previous.mtimeMs || !current.size) return;
+  for (const library of ["music", "books"]) libraryAutoMatch.start(library, { automatic: true });
 });
 
 app.get("/api/integrations/seerr/debug", (req, res) => {
@@ -2079,10 +5446,17 @@ app.post("/api/integrations/tubearchivist/save-playlists", async (req, res) => {
 
         selectedPlaylists: playlists.map(
           (playlist) => ({
-            id: playlist.playlist_id,
-            name: playlist.playlist_name,
+            id: playlist.playlist_id || playlist.playlistId || playlist.id || "",
+            name: playlist.playlist_name || playlist.title || playlist.name || "Untitled Playlist",
+            description: playlist.playlist_description || playlist.description || "",
+            thumbnail:
+              playlist.playlist_thumbnail_url ||
+              playlist.playlist_thumbnail ||
+              playlist.thumbnail ||
+              playlist.thumb ||
+              "",
             videoCount:
-              playlist.playlist_entries?.length || 0,
+              playlist.playlist_entries?.length || playlist.videoCount || 0,
           })
         ),
       },
@@ -2118,7 +5492,7 @@ app.post("/api/integrations/tubearchivist/save-playlists", async (req, res) => {
   }
 });
 
-app.get("/api/integrations/seerr/status", async (req, res) => {
+async function handleSeerrStatus(req, res) {
   try {
     const { baseUrl, apiKey } = getSeerrConfig();
 
@@ -2161,6 +5535,296 @@ console.log(
       message: error.message,
     });
   }
+}
+
+app.get("/api/integrations/seerr/status", handleSeerrStatus);
+app.get("/api/integrations/jellyseerr/status", handleSeerrStatus);
+
+function requestLocalEvidence(req, row) {
+  const index = req.requestMediaIndex ||= homesteadAccess.filterMediaIndex(req, readJsonFile(path.join(dataDir, "media-index.json"), {}));
+  const matches = req.requestMetadataMatches ||= readMetadataMatches();
+  const matchCache = req.requestMatchCache ||= new Map();
+  const fileCache = req.requestFileCache ||= new Map();
+  return requestLifecycle.findOwned(row, Object.values(index?.libraries?.[row.library] || {}),
+    (item) => { if (!matchCache.has(item)) matchCache.set(item, findStoredMetadataMatch(matches, row.library, item)); return matchCache.get(item); },
+    (file) => { if (!fileCache.has(file)) { try { fileCache.set(file, fs.statSync(file).isFile()); } catch { fileCache.set(file, false); } } return fileCache.get(file); });
+}
+
+function reconcileSeerrRequest(req, row, mediaInfo = {}, requestStatus) {
+  const owned = requestLocalEvidence(req, row);
+  const scanRunning = row.library === "tv" ? tvScanRunning : movieScanRunning;
+  const downloads = [...(mediaInfo.downloadStatus || []), ...(mediaInfo.downloadStatus4k || [])];
+  const failedDownload = downloads.find((entry) => /failed|error|warning|importblocked/i.test(`${entry.status || ""} ${entry.trackedDownloadStatus || ""} ${entry.trackedDownloadState || ""}`));
+  const attemptedDownload = failedDownload || downloads[0] || {};
+  const state = requestLifecycle.lifecycle({ library: row.library, mediaInfo, requestStatus, owned,
+    downloads, scan: { running: scanRunning, error: Number(mediaInfo.status) === 5 ? requestImportScanErrors.get(row.library) : "" } });
+  if (state.imported && !owned && homesteadAccess.canAccessLibrary(req, row.library)) {
+    const key = row.library, previous = requestImportScanAttempts.get(key) || 0;
+    if (Date.now() - previous > 120000 && !scanRunning) {
+      requestImportScanAttempts.set(key, Date.now());
+      requestImportScanErrors.delete(row.library);
+      // Only the affected library, sharing the existing watcher scan lock.
+      if (row.library === "tv") { clearTimeout(tvScanTimer); runAutomaticTvScan(); }
+      else { clearTimeout(movieScanTimer); runAutomaticMovieScan(); }
+    }
+  }
+  return {
+    ...row,
+    ...state,
+    providerServiceId: mediaInfo.externalServiceId || mediaInfo.externalServiceId4k || row.providerServiceId || "",
+    attemptedDownloadId: attemptedDownload.downloadId || attemptedDownload.id || "",
+    attemptedRelease: attemptedDownload.title || attemptedDownload.sourceTitle || attemptedDownload.outputPath || attemptedDownload.path || "",
+  };
+}
+
+function buildSeerrSeasonStates(data = {}) {
+  const mediaInfo = data.mediaInfo || {};
+  const mediaSeasons = Array.isArray(mediaInfo.seasons) ? mediaInfo.seasons : [];
+  const downloads = [
+    ...(Array.isArray(mediaInfo.downloadStatus) ? mediaInfo.downloadStatus : []),
+    ...(Array.isArray(mediaInfo.downloadStatus4k) ? mediaInfo.downloadStatus4k : []),
+  ];
+  const statusName = (value) => {
+    const numeric = Number(value);
+    if (numeric === 5) return "imported";
+    if (numeric === 4) return "partial";
+    if (numeric === 3) return "processing";
+    if (numeric === 2) return "requested";
+    return "available";
+  };
+  return (Array.isArray(data.seasons) ? data.seasons : [])
+    .map((season) => {
+      const seasonNumber = Number(season.seasonNumber ?? season.season_number);
+      if (!(seasonNumber > 0)) return null;
+      const providerState = mediaSeasons.find((entry) => Number(entry.seasonNumber ?? entry.season_number) === seasonNumber) || {};
+      const seasonDownloads = downloads.filter((entry) => {
+        const direct = Number(entry.seasonNumber ?? entry.season ?? entry.episode?.seasonNumber);
+        if (direct === seasonNumber) return true;
+        const evidence = `${entry.title || ""} ${entry.outputPath || ""} ${entry.path || ""}`;
+        return new RegExp(`(?:^|[^a-z0-9])s0?${seasonNumber}(?:[^0-9]|$)`, "i").test(evidence);
+      });
+      const progressValues = seasonDownloads.map((entry) => {
+        const direct = Number(entry.progress ?? entry.percentComplete ?? entry.percentage);
+        if (Number.isFinite(direct)) return Math.max(0, Math.min(100, direct <= 1 ? direct * 100 : direct));
+        const total = Number(entry.size ?? entry.totalSize ?? entry.sizeTotal ?? 0);
+        const remaining = Number(entry.sizeleft ?? entry.sizeLeft ?? entry.remainingSize ?? 0);
+        return total > 0 ? Math.max(0, Math.min(100, ((total - remaining) / total) * 100)) : null;
+      }).filter(Number.isFinite);
+      const providerStatus = providerState.status ?? providerState.mediaStatus ?? season.status ?? mediaInfo.status;
+      const state = seasonDownloads.length
+        ? "downloading"
+        : statusName(providerStatus);
+      return {
+        seasonNumber,
+        name: season.name || `Season ${seasonNumber}`,
+        episodeCount: Number(season.episodeCount ?? season.episode_count ?? 0),
+        airDate: season.airDate || season.air_date || "",
+        posterPath: season.posterPath || season.poster_path || "",
+        status: state,
+        progress: progressValues.length ? Math.round(progressValues.reduce((sum, value) => sum + value, 0) / progressValues.length) : null,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.seasonNumber - b.seasonNumber);
+}
+
+app.get("/api/requests/status", homesteadAccess.requireSession, async (req, res) => {
+  const user = homesteadAccess.accessContext(req).user;
+  const owns = (row) => row?.requestedByUserId === user?.id || (user?.role === "owner" && !row?.requestedByUserId);
+  const allowed = (library) => homesteadAccess.canAccessLibrary(req, library);
+  const local = readRequests(), rows = [], warnings = [];
+  for (const library of requestLifecycle.LIBRARIES) {
+    if (!allowed(library)) continue;
+    rows.push(...(local[library] || []).filter(owns).map((value) => {
+      const row = typeof value === "object" ? value : { id: value, title: value };
+      return { ...row, library, status: row.status || "requested" };
+    }));
+  }
+  rows.push(...readAcquisitionJobs().filter((row) => allowed(row.library) && owns(row)));
+  try {
+    const config = getSeerrConfig();
+    if (config.baseUrl && config.apiKey && (allowed("movies") || allowed("tv"))) {
+      const remote = (await seerrReader.requests()).filter((row) => {
+        const library = (row.type || row.media?.mediaType) === "tv" ? "tv" : "movies";
+        return allowed(library) && (user?.role === "owner" || rows.some((own) => own.library === library && String(own.tmdbId) === String(row.media?.tmdbId)));
+      });
+      // Metadata warms with six workers without delaying queue/status responses.
+      for (const request of remote) {
+          const media = request.media || {};
+          const type = (request.type || media.mediaType) === "tv" ? "tv" : "movie";
+          const route = `${type}/${media.tmdbId}`;
+          const details = seerrReader.peek(route) || {};
+          seerrReader.warm(route);
+          const previous = rows.find((row) => row.library === (type === "tv" ? "tv" : "movies") && String(row.tmdbId) === String(media.tmdbId));
+          const row = { library: type === "tv" ? "tv" : "movies", mediaType: type, tmdbId: media.tmdbId,
+            title: details.title || details.name || media.title || previous?.title || `TMDB ${media.tmdbId}`,
+            poster: details.posterPath || details.poster_path ? `https://image.tmdb.org/t/p/w500${details.posterPath || details.poster_path}` : previous?.poster || "",
+            year: String(details.releaseDate || details.firstAirDate || details.release_date || details.first_air_date || '').slice(0, 4),
+            createdAt: request.createdAt, source: "seerr", requestStatus: request.status };
+          rows.push(reconcileSeerrRequest(req, row, media, request.status));
+      }
+    }
+  } catch (error) { warnings.push(error.message || "Seerr status unavailable."); }
+  const merged = requestLifecycle.mergeRequests(rows);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, rows: merged, warnings, allowedLibraries: requestLifecycle.LIBRARIES.filter(allowed), counts: Object.fromEntries(requestLifecycle.LIBRARIES.filter(allowed).map((library) => [library, merged.filter((row) => row.library === library).length])),
+    indexVersion: (() => { try { return fs.statSync(path.join(dataDir, "media-index.json")).mtimeMs; } catch { return 0; } })(), checkedAt: new Date().toISOString() });
+});
+
+function requestSearchAgainIntegration(library = "") {
+  const integrationId = library === "tv" ? "sonarr" : library === "movies" ? "radarr" : "";
+  if (!integrationId) return null;
+  const setup = readSetupConfig();
+  const settings = setup?.integrationSettings?.[integrationId] || setup?.integrations?.[integrationId] || {};
+  return {
+    id: integrationId,
+    label: integrationId === "sonarr" ? "Sonarr" : "Radarr",
+    baseUrl: String(settings.url || settings.baseUrl || "").trim().replace(/\/+$/, ""),
+    apiKey: String(settings.apiKey || settings.key || "").trim(),
+  };
+}
+
+async function requestSearchAgainArrFetch(integration, route, options = {}) {
+  if (!integration?.baseUrl || !integration?.apiKey) {
+    const error = new Error(`Configure the direct ${integration?.label || "ARR"} integration before using Search Again.`);
+    error.status = 400;
+    throw error;
+  }
+  const response = await fetch(`${integration.baseUrl}/api/v3/${String(route || "").replace(/^\/+/, "")}`, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      "X-Api-Key": integration.apiKey,
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await response.text().catch(() => "");
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    const error = new Error(data?.message || data?.error || `${integration.label} returned ${response.status}.`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+function requestSearchAgainRows(payload = {}) {
+  if (Array.isArray(payload)) return payload;
+  return Array.isArray(payload?.records) ? payload.records : [];
+}
+
+function requestSearchAgainMatchesArrRecord(record = {}, request = {}, library = "movies") {
+  const requestedServiceId = Number(request.providerServiceId || 0);
+  if (requestedServiceId && Number(record.id) === requestedServiceId) return true;
+  if (library === "movies" && request.tmdbId && String(record.tmdbId || "") === String(request.tmdbId)) return true;
+  const requestedTitle = normalizeAcquisitionText(request.title || request.name);
+  const recordTitle = normalizeAcquisitionText(record.title || record.name);
+  if (!requestedTitle || requestedTitle !== recordTitle) return false;
+  const requestedYear = String(request.year || "").slice(0, 4);
+  const recordYear = String(record.year || record.firstAired || record.inCinemas || "").slice(0, 4);
+  return !requestedYear || !recordYear || requestedYear === recordYear;
+}
+
+function requestSearchAgainQueueMatches(row = {}, arrId, library = "movies") {
+  const linkedId = library === "tv" ? row.seriesId || row.series?.id : row.movieId || row.movie?.id;
+  return String(linkedId || "") === String(arrId || "");
+}
+
+function requestSearchAgainQueueNeedsExclusion(row = {}, attemptedRelease = "") {
+  const attempted = normalizeAcquisitionText(attemptedRelease);
+  const candidate = normalizeAcquisitionText(row.title || row.sourceTitle || row.outputPath || row.downloadId || "");
+  if (attempted && candidate && (candidate.includes(attempted) || attempted.includes(candidate))) return true;
+  return /failed|error|warning|importblocked|downloadclientunavailable/i.test(`${row.status || ""} ${row.trackedDownloadStatus || ""} ${row.trackedDownloadState || ""} ${row.errorMessage || ""}`);
+}
+
+app.post("/api/requests/search-again", homesteadAccess.requireSession, async (req, res) => {
+  const request = req.body?.request || {};
+  const library = request.library === "tv" ? "tv" : request.library === "movies" ? "movies" : "";
+  if (!library) return res.status(400).json({ ok: false, message: "Search Again currently supports Movie and TV requests." });
+  if (!homesteadAccess.canAccessLibrary(req, library)) return res.status(403).json({ ok: false, message: "Library access denied." });
+
+  const user = homesteadAccess.accessContext(req).user;
+  const storedRows = readRequests()?.[library] || [];
+  const stored = storedRows.find((row) =>
+    (request.tmdbId && String(row?.tmdbId || "") === String(request.tmdbId)) ||
+    (request.id && String(row?.id || "") === String(request.id).replace(`${library}:`, ""))
+  );
+  const ownsStoredRequest = stored && (String(stored.requestedByUserId || "") === String(user?.id || "owner") || (user?.role === "owner" && !stored.requestedByUserId));
+  if (user?.role !== "owner" && !ownsStoredRequest) return res.status(403).json({ ok: false, message: "Only the requester can search again for this item." });
+
+  try {
+    const integration = requestSearchAgainIntegration(library);
+    const records = await requestSearchAgainArrFetch(integration, library === "tv" ? "series" : "movie");
+    const recordMatches = (Array.isArray(records) ? records : []).filter((record) => requestSearchAgainMatchesArrRecord(record, request, library));
+    if (recordMatches.length !== 1) {
+      const error = new Error(recordMatches.length ? `${integration.label} returned more than one matching item. Open ${integration.label} to choose it safely.` : `This request could not be matched to a ${integration.label} item.`);
+      error.status = 409;
+      throw error;
+    }
+
+    const record = recordMatches[0];
+    const queuePayload = await requestSearchAgainArrFetch(integration, "queue?page=1&pageSize=1000&includeUnknownMovieItems=true&includeUnknownSeriesItems=true");
+    const queueMatches = requestSearchAgainRows(queuePayload).filter((row) => requestSearchAgainQueueMatches(row, record.id, library));
+    let attemptedRows = queueMatches.filter((row) => requestSearchAgainQueueNeedsExclusion(row, request.attemptedRelease));
+    if (!attemptedRows.length && queueMatches.length === 1 && ["needs-attention", "failed"].includes(String(request.status || "").toLowerCase())) attemptedRows = queueMatches;
+
+    const blocklistPayload = await requestSearchAgainArrFetch(integration, "blocklist?page=1&pageSize=1000").catch(() => ({ records: [] }));
+    const alreadyExcluded = requestSearchAgainRows(blocklistPayload).filter((row) => requestSearchAgainQueueMatches(row, record.id, library));
+    if (!attemptedRows.length && !alreadyExcluded.length) {
+      const error = new Error(`No previous ${integration.label} release could be safely identified and excluded. Nothing was restarted.`);
+      error.status = 409;
+      throw error;
+    }
+
+    const excludedTitles = [];
+    for (const row of attemptedRows) {
+      if (!row.id) continue;
+      await requestSearchAgainArrFetch(integration, `queue/${encodeURIComponent(row.id)}?removeFromClient=true&blocklist=true&skipRedownload=true&changeCategory=false`, { method: "DELETE" });
+      excludedTitles.push(String(row.title || row.sourceTitle || request.attemptedRelease || "previous release").slice(0, 500));
+    }
+
+    const command = library === "tv"
+      ? { name: "SeriesSearch", seriesId: Number(record.id) }
+      : { name: "MoviesSearch", movieIds: [Number(record.id)] };
+    await requestSearchAgainArrFetch(integration, "command", { method: "POST", body: JSON.stringify(command) });
+    const excludedCount = excludedTitles.length || alreadyExcluded.length;
+    homesteadAccess.recordAudit?.("request.search-again", req, { library, tmdbId: request.tmdbId || "", provider: integration.id, providerServiceId: record.id, excludedCount, excludedTitles });
+    res.json({
+      ok: true,
+      provider: integration.id,
+      excludedCount,
+      excludedTitles,
+      message: `${integration.label} will search again. ${excludedTitles.length ? "The previous attempted file was removed and blocklisted." : "The previous failed release was already blocklisted."}`,
+    });
+  } catch (error) {
+    res.status(error.status || 502).json({ ok: false, message: error.message || "A different release could not be requested." });
+  }
+});
+
+app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/status", homesteadAccess.requireSession, async (req, res) => {
+  const type = req.params.mediaType === "tv" ? "tv" : "movie", library = type === "tv" ? "tv" : "movies";
+  if (!homesteadAccess.canAccessLibrary(req, library)) return res.status(403).json({ ok: false, message: "Library access denied." });
+  if (!/^\d+$/.test(req.params.tmdbId)) return res.status(400).json({ ok: false, message: "Invalid media ID." });
+  try {
+    const data = await seerrReader.json(`${type}/${req.params.tmdbId}`, 5000);
+    const row = { library, tmdbId: req.params.tmdbId, title: data.title || data.name, year: String(data.releaseDate || data.firstAirDate || '').slice(0, 4) };
+    const requests = data.mediaInfo?.requests || data.requests || [];
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, lifecycle: reconcileSeerrRequest(req, row, data.mediaInfo || {}, requests[0]?.status), seasons: type === "tv" ? buildSeerrSeasonStates(data) : [] });
+  } catch (error) { res.status(502).json({ ok: false, message: error.message }); }
+});
+
+app.get("/api/integrations/seerr/collection/:collectionId", homesteadAccess.requireSession, async (req, res) => {
+  if (!homesteadAccess.canAccessLibrary(req, "movies")) return res.status(403).json({ ok: false });
+  if (!/^\d+$/.test(req.params.collectionId)) return res.status(400).json({ ok: false, message: "Invalid collection ID." });
+  try {
+    const collection = await seerrReader.json(`collection/${req.params.collectionId}`, 300000);
+    const parts = (collection.parts || []).map((item) => ({ ...item, mediaType: "movie", lifecycle: reconcileSeerrRequest(req,
+      { library: "movies", tmdbId: item.id, title: item.title, year: String(item.releaseDate || item.release_date || '').slice(0, 4) }, item.mediaInfo || {}, item.mediaInfo?.requests?.[0]?.status) }));
+    res.json({ ok: true, collection: { ...collection, parts } });
+  } catch (error) { res.status(502).json({ ok: false, message: error.message }); }
 });
 
 app.get("/api/integrations/seerr/requests", async (req, res) => {
@@ -2286,8 +5950,39 @@ app.get("/api/integrations/seerr/requests", async (req, res) => {
   }
 });
 
-app.post("/api/integrations/seerr/request/movie", async (req, res) => {
+function persistSeerrSearchRequest(req, mediaType) {
+  if (req.body?.fromSearch !== true) return {};
+  const user = homesteadAccess.accessContext(req).user;
+  const userId = String(user?.id || "owner");
+  const tmdbId = Number(req.body.tmdbId);
+  const bucket = mediaType === "tv" ? "tv" : "movies";
+  const record = {
+    id: `tmdb-${tmdbId}`, tmdbId, mediaType, status: "requested", source: "jellyseerr",
+    title: String(req.body.title || `TMDB ${tmdbId}`).slice(0, 500),
+    poster: String(req.body.poster || "").slice(0, 2000),
+    requestedAt: new Date().toISOString(), requestedByUserId: userId,
+  };
   try {
+    // Merge after the provider responds, preserving other concurrent/user requests.
+    const data = readRequests();
+    const rows = Array.isArray(data[bucket]) ? data[bucket] : [];
+    const existing = rows.find((row) => (String(row?.tmdbId) === String(tmdbId) || row?.id === record.id) &&
+      (String(row?.requestedByUserId || "") === userId || (user?.role === "owner" && !row?.requestedByUserId)));
+    if (existing) return { request: existing };
+    data[bucket] = [...rows, record];
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(requestsPath, JSON.stringify(data, null, 2));
+    return { request: record };
+  } catch (error) {
+    // Seerr already accepted it. Do not turn a history-write failure into a retry.
+    console.warn("Unable to save search request history:", error.message);
+    return { request: record, warning: "Request accepted by Seerr, but local request history could not be saved." };
+  }
+}
+
+app.post("/api/integrations/seerr/request/movie", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    if (!homesteadAccess.canAccessLibrary(req, "movies")) return res.status(403).json({ ok: false, message: "Library access denied." });
     const { tmdbId } = req.body;
     const { baseUrl, apiKey } = getSeerrConfig();
 
@@ -2331,6 +6026,7 @@ app.post("/api/integrations/seerr/request/movie", async (req, res) => {
       ok: true,
       message: "Movie request sent",
       data,
+      ...persistSeerrSearchRequest(req, "movie"),
     });
   } catch (error) {
     res.status(500).json({
@@ -2340,8 +6036,9 @@ app.post("/api/integrations/seerr/request/movie", async (req, res) => {
   }
 });
 
-app.post("/api/integrations/seerr/request/tv", async (req, res) => {
+app.post("/api/integrations/seerr/request/tv", homesteadAccess.requireSession, async (req, res) => {
   try {
+    if (!homesteadAccess.canAccessLibrary(req, "tv")) return res.status(403).json({ ok: false, message: "Library access denied." });
     const { tmdbId } = req.body;
     const { baseUrl, apiKey } = getSeerrConfig();
 
@@ -2367,9 +6064,14 @@ const tvDetailsResponse = await fetch(`${baseUrl}/api/v1/tv/${tmdbId}`, {
 
 const tvDetails = await tvDetailsResponse.json().catch(() => ({}));
 
-const seasons = (tvDetails.seasons || [])
+const availableSeasons = (tvDetails.seasons || [])
   .map((season) => season.seasonNumber ?? season.season_number)
   .filter((seasonNumber) => Number(seasonNumber) > 0);
+const selectedSeasons = Array.isArray(req.body?.seasons)
+  ? req.body.seasons.map(Number).filter((seasonNumber) => availableSeasons.includes(seasonNumber))
+  : availableSeasons;
+const seasons = [...new Set(selectedSeasons)];
+if (!seasons.length) return res.status(400).json({ ok: false, message: "Choose at least one available season." });
 
 const response = await fetch(`${baseUrl}/api/v1/request`, {
   method: "POST",
@@ -2401,6 +6103,7 @@ const response = await fetch(`${baseUrl}/api/v1/request`, {
       ok: true,
       message: "TV request sent",
       data,
+      ...persistSeerrSearchRequest(req, "tv"),
     });
   } catch (error) {
     res.status(500).json({
@@ -2903,7 +6606,25 @@ app.get([
   "/manifest.json",
 ], sendHomesteadManifest);
 
-app.use("/media", express.static("/media"));
+app.use("/media", homesteadAccess.authorizeMedia);
+app.use("/media", async (req, res, next) => {
+  if (!isHeicFilePath(req.path)) return next();
+
+  const mediaRoot = path.resolve(process.env.MEDIA_ROOT || "/media");
+  let decodedRequestPath = req.path;
+  try {
+    decodedRequestPath = decodeURIComponent(req.path);
+  } catch {
+    return next();
+  }
+
+  const requestedPath = path.resolve(mediaRoot, `.${decodedRequestPath}`);
+  const insideMediaRoot = requestedPath === mediaRoot || requestedPath.startsWith(`${mediaRoot}${path.sep}`);
+
+  if (!insideMediaRoot || !fs.existsSync(requestedPath)) return next();
+  return sendHeicPreview(res, requestedPath, req.query);
+});
+app.use("/media", express.static(path.resolve(process.env.MEDIA_ROOT || "/media")));
 app.use("/assets", express.static(path.join(__dirname, "public", "assets")));
 app.use("/icons", express.static(path.join(__dirname, "public", "icons")));
 
@@ -2975,7 +6696,9 @@ function resolveProfilePosterCandidate(profileDir = "", value = "") {
 
   if (/^\/media\//i.test(raw)) {
     const resolved = resolveHomesteadFilePath(raw);
-    return resolved || raw;
+    // Do not let a stale metadata path hide a real image that can be
+    // discovered in the profile folder.
+    return resolved || "";
   }
 
   const candidates = [
@@ -3003,18 +6726,26 @@ function discoverProfilePoster(profileDir = "") {
     "poster.jpeg",
     "poster.png",
     "poster.webp",
+    "poster.heic",
+    "poster.heif",
     "cover.jpg",
     "cover.jpeg",
     "cover.png",
     "cover.webp",
+    "cover.heic",
+    "cover.heif",
     "profile.jpg",
     "profile.jpeg",
     "profile.png",
     "profile.webp",
+    "profile.heic",
+    "profile.heif",
     "headshot.jpg",
     "headshot.jpeg",
     "headshot.png",
     "headshot.webp",
+    "headshot.heic",
+    "headshot.heif",
   ];
 
   for (const name of preferredNames) {
@@ -3044,7 +6775,7 @@ function discoverProfilePoster(profileDir = "") {
     const firstImage = entries.find(
       (entry) =>
         entry.isFile() &&
-        /\.(jpe?g|png|webp|gif|avif)$/i.test(entry.name)
+        /\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(entry.name)
     );
 
     if (firstImage) return path.join(folder, firstImage.name);
@@ -3204,6 +6935,146 @@ function dedupeProfileLibrary(records = {}) {
   return output;
 }
 
+const BOOK_EBOOK_EXTENSIONS = new Set([".epub", ".pdf", ".mobi", ".azw", ".azw3", ".cbz", ".cbr"]);
+const BOOK_AUDIO_EXTENSIONS = new Set([".m4b", ".mp3", ".m4a", ".flac", ".aac", ".ogg", ".wav"]);
+let nestedBooksLibraryCache = { expiresAt: 0, library: null };
+
+function configuredBookRoots() {
+  const mappings = readSetupConfig()?.folderMappings || {};
+  return [...new Set([
+    ...normalizeFolderList(mappings.books),
+    ...normalizeFolderList(mappings.ebooks),
+    "/media/books",
+  ].map((value) => path.resolve(String(value || ""))).filter((value) => {
+    try { return fs.statSync(value).isDirectory(); } catch { return false; }
+  }))];
+}
+
+function normalizedBookPath(value = "") {
+  try { return path.resolve(String(value || "")).toLowerCase(); } catch { return ""; }
+}
+
+function bookTitleFromFile(fileName = "") {
+  return path.basename(fileName, path.extname(fileName))
+    .replace(/\s+--\s+.+$/, "")
+    .replace(/\s*\((?:ebook|audiobook)\)\s*$/i, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "Untitled";
+}
+
+function scanNestedBooksLibrary(existingLibrary = {}, { force = false } = {}) {
+  if (!force && nestedBooksLibraryCache.library && nestedBooksLibraryCache.expiresAt > Date.now()) return nestedBooksLibraryCache.library;
+  const roots = configuredBookRoots();
+  if (!roots.length) return existingLibrary || {};
+  const discoveredFiles = [];
+  for (const root of roots) {
+    const pending = [{ folder: root, depth: 0 }];
+    while (pending.length && discoveredFiles.length < 25000) {
+      const current = pending.pop();
+      let entries = [];
+      try { entries = fs.readdirSync(current.folder, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (entry.name.startsWith(".")) continue;
+        const absolutePath = path.join(current.folder, entry.name);
+        if (entry.isDirectory() && current.depth < 7) {
+          pending.push({ folder: absolutePath, depth: current.depth + 1 });
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const extension = path.extname(entry.name).toLowerCase();
+        const type = BOOK_EBOOK_EXTENSIONS.has(extension) ? "ebook" : BOOK_AUDIO_EXTENSIONS.has(extension) ? "audiobook" : "";
+        if (type) discoveredFiles.push({ root, absolutePath, name: entry.name, extension, type });
+      }
+    }
+  }
+  if (!discoveredFiles.length) return existingLibrary || {};
+
+  const existingRecords = Object.values(existingLibrary || {});
+  const existingByFile = new Map();
+  const existingByIdentity = new Map();
+  for (const record of existingRecords) {
+    for (const file of Array.isArray(record?.files) ? record.files : []) {
+      for (const candidate of [file?.sourcePath, file?.filePath, file?.path]) {
+        const normalized = normalizedBookPath(candidate);
+        if (normalized) existingByFile.set(normalized, record);
+      }
+    }
+    const identity = `${String(record?.author || record?.metadata?.author || "").toLowerCase()}|${String(record?.title || record?.name || record?.metadata?.title || "").toLowerCase()}`;
+    if (identity !== "|") existingByIdentity.set(identity, record);
+  }
+
+  const groups = new Map();
+  for (const file of discoveredFiles) {
+    const fileParent = path.dirname(file.absolutePath);
+    const audioContainer = file.type === "audiobook" && /^audio\s*books?$/i.test(path.basename(fileParent));
+    const bookFolder = audioContainer ? path.dirname(fileParent) : fileParent;
+    const segments = path.relative(file.root, bookFolder).split(path.sep).filter(Boolean);
+    const directInAuthorFolder = segments.length === 1;
+    const title = directInAuthorFolder ? bookTitleFromFile(file.name) : segments.at(-1) || bookTitleFromFile(file.name);
+    const author = segments[0] || "Unknown Author";
+    const series = segments.length >= 3 ? segments.slice(1, -1).join(" / ") : "";
+    const groupKey = directInAuthorFolder
+      ? `${normalizedBookPath(file.root)}|${author.toLowerCase()}|${title.toLowerCase()}`
+      : normalizedBookPath(bookFolder);
+    if (!groups.has(groupKey)) groups.set(groupKey, { bookFolder, title, author, series, files: [] });
+    groups.get(groupKey).files.push({
+      id: crypto.createHash("sha1").update(file.absolutePath).digest("hex").slice(0, 20),
+      name: file.name,
+      type: file.type,
+      format: file.extension.slice(1).toUpperCase(),
+      path: file.absolutePath,
+      filePath: file.absolutePath,
+      sourcePath: file.absolutePath,
+    });
+  }
+
+  const output = {};
+  for (const group of groups.values()) {
+    const fileMatch = group.files.map((file) => existingByFile.get(normalizedBookPath(file.path))).find(Boolean);
+    const identityMatch = existingByIdentity.get(`${group.author.toLowerCase()}|${group.title.toLowerCase()}`);
+    const existing = fileMatch || identityMatch || {};
+    const stableSource = group.files.find((file) => file.type === "ebook")?.path || group.bookFolder;
+    const id = existing.id || existing.localId || `book-${crypto.createHash("sha1").update(stableSource).digest("hex").slice(0, 20)}`;
+    const coverCandidate = ["cover.jpg", "cover.jpeg", "cover.png", "poster.jpg", "poster.png"]
+      .map((name) => path.join(group.bookFolder, name)).find((candidate) => fs.existsSync(candidate));
+    output[id] = {
+      ...existing,
+      id,
+      localId: existing.localId || id,
+      library: "books",
+      name: existing.name || existing.title || group.title,
+      title: existing.title || existing.name || group.title,
+      author: existing.author || existing.metadata?.author || group.author,
+      series: existing.series || existing.metadata?.series || group.series,
+      folderPath: group.bookFolder,
+      sourcePath: group.bookFolder,
+      path: group.bookFolder,
+      poster: existing.poster || existing.cover || coverCandidate || "",
+      files: group.files.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true })),
+      counts: {
+        ...(existing.counts || {}),
+        ebooks: group.files.filter((file) => file.type === "ebook").length,
+        audiobooks: group.files.filter((file) => file.type === "audiobook").length,
+      },
+    };
+  }
+  nestedBooksLibraryCache = { expiresAt: Date.now() + 30000, library: output };
+  return output;
+}
+
+function reconcileNestedBooksMediaIndex() {
+  const indexPath = path.join(dataDir, "media-index.json");
+  const index = readJsonFile(indexPath, {});
+  nestedBooksLibraryCache = { expiresAt: 0, library: null };
+  const currentBooks = index?.libraries?.books || {};
+  const books = scanNestedBooksLibrary(currentBooks, { force: true });
+  if (books === currentBooks) return index;
+  const next = { ...index, libraries: { ...(index.libraries || {}), books }, generatedAt: new Date().toISOString() };
+  writeJsonFile(indexPath, next);
+  return next;
+}
+
 function buildLiveMediaIndex() {
   const indexPath = path.join(
     __dirname,
@@ -3214,6 +7085,7 @@ function buildLiveMediaIndex() {
   const libraries = {
     ...(index.libraries || {}),
   };
+  libraries.books = scanNestedBooksLibrary(libraries.books || {});
 
   for (const libraryType of [
     "personal",
@@ -3243,8 +7115,8 @@ function buildLiveMediaIndex() {
 
       combined[id] = mergeProfileRecords(
         {
-          ...metadata,
           ...existing,
+          ...metadata,
           id,
           name:
             metadata.name ||
@@ -3300,22 +7172,103 @@ function buildLiveMediaIndex() {
   };
 }
 
-app.get("/data/media-index.json", (req, res) => {
+app.get("/data/media-index.json", homesteadAccess.requireSession, (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json(buildLiveMediaIndex());
+  res.json(homesteadAccess.filterMediaIndex(req, buildLiveMediaIndex()));
 });
 
-app.get("/data/youtube-index.json", (req, res) => {
-  res.sendFile(path.join(__dirname, "data", "youtube-index.json"));
-});
+function cleanYouTubeClientTitle(value = "") {
+  return String(value || "").replace(/\\/g, "/").split("/").pop()
+    .replace(/\.(mkv|mp4|m4v|mov|avi|webm)$/i, "")
+    .replace(/^\s*\[(?:[^\]]+)\]\s*/, "")
+    .replace(/^\s*S\d{1,3}E\d{1,4}\s*[-–:·]?\s*/i, "")
+    .replace(/^\s*(?:episode|ep)\s*\d+\s*[-–:·]?\s*/i, "")
+    .replace(/\b[a-f0-9]{12,}\b/gi, "")
+    .replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+}
 
-app.get("/media-index.json", (req, res) => {
+function cleanYouTubeFolderEpisodeTitle(video = {}, seriesName = "") {
+  let title = cleanYouTubeClientTitle(video.metadata?.title || video.displayTitle || video.title || video.name || video.filename || video.file || "");
+  const match = title.match(/(?:^|\s)(?:#\s*(\d{1,4})|(?:episode|ep)\s*[#._-]?\s*(\d{1,4})|S\d{1,3}[\s._-]*E(\d{1,4})|E\s*(\d{1,4}))\b/i);
+  if (match) {
+    const episodeNumber = Number(match[1] || match[2] || match[3] || match[4] || video.episodeNumber || 0);
+    const prefix = title.slice(0, match.index).trim().toLowerCase();
+    const seriesToken = String(seriesName || video.seriesFolder || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ")[0];
+    if (!prefix || prefix.includes("minecraft") || (seriesToken && prefix.includes(seriesToken))) {
+      title = `#${episodeNumber} ${title.slice(match.index + match[0].length).replace(/^\s*[-–:·]?\s*/, "")}`;
+    }
+  }
+  return title.replace(/\s+/g, " ").trim();
+}
+
+function parseYouTubeClientSeasonToken(value = "") {
+  const token = String(value || "").trim().toUpperCase();
+  if (/^\d{1,2}$/.test(token)) {
+    const number = Number(token);
+    return number >= 1 && number <= 99 ? number : 0;
+  }
+  if (!/^[IVXLCDM]+$/.test(token)) return 0;
+  const values = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+  let number = 0;
+  let previous = 0;
+  for (let index = token.length - 1; index >= 0; index -= 1) {
+    const current = values[token[index]] || 0;
+    number += current < previous ? -current : current;
+    previous = Math.max(previous, current);
+  }
+  return number >= 1 && number <= 99 ? number : 0;
+}
+
+function normalizeYouTubeClientSeason(video = {}, seriesName = "") {
+  const rawTitle = String(video.metadata?.title || video.displayTitle || video.title || video.name || video.filename || "").replace(/\b[a-f0-9]{12,}\b/gi, " ");
+  const escapedSeries = String(seriesName || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const seriesMatch = escapedSeries ? rawTitle.match(new RegExp(`\\b${escapedSeries}\\s+(?:season\\s*)?([ivxlcdm]+|\\d{1,2})\\b`, "i")) : null;
+  const explicitMatch = rawTitle.match(/\bseason\s+(\d{1,2})\b/i);
+  const folderMatch = String(video.folderSeason || video.seasonFolder || "").trim().match(/^(?:season|s)?[\s._-]*([ivxlcdm]+|\d{1,2})$/i);
+  const storedMatch = String(video.season || video.seasonName || video.metadata?.season || "").trim().match(/^(?:season|s)?[\s._-]*([ivxlcdm]+|\d{1,2})$/i);
+  const number = parseYouTubeClientSeasonToken(folderMatch?.[1]) || parseYouTubeClientSeasonToken(storedMatch?.[1]) || parseYouTubeClientSeasonToken(seriesMatch?.[1]) || Number(explicitMatch?.[1] || 0) || 1;
+  return `Season ${number >= 1 && number <= 99 ? number : 1}`;
+}
+
+function buildYouTubeClientIndex() {
+  const index = readJsonFile(path.join(dataDir, "youtube-index.json"), { creators: {}, series: {}, videos: [] }) || { creators: {}, series: {}, videos: [] };
+  const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {}) || {};
+  const normalizedCreators = Object.values(mediaIndex?.libraries?.youtube || {});
+  const creators = Object.fromEntries(Object.entries(index.creators || {}).map(([creatorId, creator]) => {
+    const normalizedCreator = normalizedCreators.find((candidate) => String(candidate.id || "") === String(creator.id || creatorId) || String(candidate.name || "").toLowerCase() === String(creator.name || "").toLowerCase()) || {};
+    const normalizedVideos = new Map();
+    (normalizedCreator.videos || normalizedCreator.files || []).forEach((video) => {
+      [video.id, video.youtubeId, video.videoId, video.sourcePath, video.path, video.publicPath, video.file, video.filename].filter(Boolean).forEach((key) => normalizedVideos.set(String(key), video));
+    });
+    const videos = (Array.isArray(creator.videos) ? creator.videos : []).map((video) => {
+      const normalized = [video.id, video.youtubeId, video.videoId, video.sourcePath, video.path, video.publicPath, video.file, video.filename].map((key) => normalizedVideos.get(String(key || ""))).find(Boolean) || {};
+      const metadata = video.metadata || {};
+      const seriesName = video.series || video.seriesName || video.playlistTitle || metadata.series || metadata.playlistTitle || "Other Videos";
+      const title = cleanYouTubeFolderEpisodeTitle({ ...video, ...normalized, metadata: { ...metadata, ...(normalized.metadata || {}) } }, seriesName) || "Untitled video";
+      const thumb = [normalized.thumb, normalized.thumbnail, video.thumb, video.thumbnail, video.thumbnailUrl, video.thumbnailPath, video.sidecarThumbnail, metadata.thumb, metadata.thumbnail, metadata.thumbnailUrl, metadata.vid_thumb_url].find((value) => String(value || "").trim()) || "";
+      const releaseDate = [video.releaseDate, video.publishedAt, video.uploadDate, video.date, metadata.releaseDate, metadata.publishedAt, metadata.published, metadata.uploadDate].find((value) => String(value || "").trim()) || "";
+      return { ...video, title, displayTitle: title, thumb, thumbnail: thumb, releaseDate, publishedAt: video.publishedAt || metadata.publishedAt || metadata.published || releaseDate, creatorId: video.creatorId || creator.id || creatorId, creatorName: video.creatorName || creator.displayName || creator.name || creator.title || creatorId, season: normalizeYouTubeClientSeason(video, seriesName) };
+    });
+    return [creatorId, { ...creator, poster: normalizedCreator.poster || creator.poster || "", banner: normalizedCreator.banner || creator.banner || "", id: creator.id || creatorId, videos, videoCount: Number(creator.videoCount) || videos.length }];
+  }));
+  return { ...index, creators };
+}
+
+app.get("/data/youtube-index.json", homesteadAccess.requireSession, (req, res) => {
+  if (!homesteadAccess.canAccessLibrary(req, "youtube")) return res.json({ creators: [], videos: [] });
   res.setHeader("Cache-Control", "no-store");
-  res.json(buildLiveMediaIndex());
+  res.json(buildYouTubeClientIndex());
 });
 
-app.get("/youtube-index.json", (req, res) => {
-  res.sendFile(path.join(__dirname, "data", "youtube-index.json"));
+app.get("/media-index.json", homesteadAccess.requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(homesteadAccess.filterMediaIndex(req, buildLiveMediaIndex()));
+});
+
+app.get("/youtube-index.json", homesteadAccess.requireSession, (req, res) => {
+  if (!homesteadAccess.canAccessLibrary(req, "youtube")) return res.json({ creators: [], videos: [] });
+  res.setHeader("Cache-Control", "no-store");
+  res.json(buildYouTubeClientIndex());
 });
 
 function hashSetupPassword(password = "") {
@@ -3345,11 +7298,38 @@ function sanitizeSetupConfigForClient(config = {}) {
     ...(safeConfig.branding || {}),
     ...getBrandingIconState(),
   };
+  const subscription = subscriptionService.status();
+  const configuredEnabledLibraries = { ...(safeConfig.enabledLibraries || {}) };
+  const enabledLibraries = { ...configuredEnabledLibraries };
+  const gatedLibraries = {
+    photos: "photos",
+    family: "familyLibrary",
+    inventory: "inventory",
+    cloud: "cloud",
+    liveTV: "liveTV",
+    adult: "adult",
+    ai: "ai",
+  };
+  Object.entries(gatedLibraries).forEach(([libraryId, feature]) => {
+    if (!subscription.features[feature]) enabledLibraries[libraryId] = false;
+  });
+  if (!subscription.features.externalIntegrations) {
+    safeConfig.integrations = Object.fromEntries(
+      Object.keys(safeConfig.integrations || {}).map((integrationId) => [integrationId, false])
+    );
+    safeConfig.integrationSettings = {};
+  }
+  safeConfig.configuredEnabledLibraries = configuredEnabledLibraries;
+  safeConfig.enabledLibraries = enabledLibraries;
+  safeConfig.subscription = subscription;
   return safeConfig;
 }
 
 function prepareSetupConfigForStorage(incomingConfig = {}) {
   const existingConfig = readSetupConfig();
+  const configuredEnabledLibraries = incomingConfig.configuredEnabledLibraries && typeof incomingConfig.configuredEnabledLibraries === "object"
+    ? incomingConfig.configuredEnabledLibraries
+    : incomingConfig.enabledLibraries;
   const incomingAdmin = incomingConfig.adminAccount || {};
   const existingAdmin = existingConfig.adminAccount || {};
   const passwordHash = incomingAdmin.password
@@ -3359,6 +7339,10 @@ function prepareSetupConfigForStorage(incomingConfig = {}) {
   const storedConfig = {
     ...existingConfig,
     ...incomingConfig,
+    enabledLibraries: {
+      ...(existingConfig.enabledLibraries || {}),
+      ...(configuredEnabledLibraries || {}),
+    },
     branding: {
       ...(existingConfig.branding || {}),
       ...(incomingConfig.branding || {}),
@@ -3373,7 +7357,16 @@ function prepareSetupConfigForStorage(incomingConfig = {}) {
     },
   };
 
+  if (!subscriptionService.has("externalIntegrations")) {
+    storedConfig.integrations = Object.fromEntries(
+      Object.keys(storedConfig.integrations || {}).map((integrationId) => [integrationId, false])
+    );
+    storedConfig.integrationSettings = {};
+  }
+
   delete storedConfig.adminAccount.password;
+  delete storedConfig.configuredEnabledLibraries;
+  delete storedConfig.subscription;
   delete storedConfig.adminAccount.confirmPassword;
   return storedConfig;
 }
@@ -3508,7 +7501,7 @@ app.post("/api/setup/create-folders", (req, res) => {
   });
 });
 
-app.post("/api/setup/initial-scan", async (req, res) => {
+app.post("/api/setup/initial-scan", homesteadAccess.requireAdmin, async (req, res) => {
   const enabledLibraries = req.body?.enabledLibraries || {};
   const folderMappings = req.body?.folderMappings || {};
   const scanLibraryMap = {
@@ -3522,6 +7515,11 @@ app.post("/api/setup/initial-scan", async (req, res) => {
   };
   const results = [];
   const skipped = [];
+  const indexedCount = (libraryId) => {
+    const index = readJsonFile(path.join(dataDir, "media-index.json"), {});
+    const bucket = index?.libraries?.[libraryId] || index?.[libraryId] || {};
+    return Array.isArray(bucket) ? bucket.length : bucket && typeof bucket === "object" ? Object.keys(bucket).length : 0;
+  };
 
   for (const [setupLibraryId, enabled] of Object.entries(enabledLibraries)) {
     if (!enabled) continue;
@@ -3536,14 +7534,18 @@ app.post("/api/setup/initial-scan", async (req, res) => {
 
     const folders = normalizeSetupFolderPaths(folderMappings[setupLibraryId]);
     const commands = buildScanCommands({ libraryId: scannerLibraryId, folders });
+    const beforeCount = indexedCount(scannerLibraryId);
 
     try {
       const commandResults = await runScannerCommandsAsync(commands);
+      const afterCount = indexedCount(scannerLibraryId);
       results.push({
         setupLibraryId,
         libraryId: scannerLibraryId,
         status: "success",
-        message: `${commandResults.length} scanner command${commandResults.length === 1 ? "" : "s"} completed.`,
+        message: `${afterCount} indexed item${afterCount === 1 ? "" : "s"}${afterCount > beforeCount ? ` · ${afterCount - beforeCount} new` : ""} · ${commandResults.length} scan task${commandResults.length === 1 ? "" : "s"} completed.`,
+        indexedItems: afterCount,
+        newlyIndexed: Math.max(0, afterCount - beforeCount),
         commandResults,
       });
     } catch (error) {
@@ -3607,13 +7609,181 @@ app.delete("/api/branding/icon", (req, res) => {
   }
 });
 
+const appearanceBackgroundDir = path.join(dataDir, "appearance-backgrounds");
+const appearanceConfigDir = path.join(dataDir, "appearance-config", "users");
+function appearanceUserId(req) {
+  const user = homesteadAccess.accessContext(req).user;
+  return String(user?.id || "owner").replace(/[^a-z0-9_-]+/gi, "-");
+}
+function appearanceConfigPath(req) {
+  return path.join(appearanceConfigDir, `${appearanceUserId(req)}.json`);
+}
+function defaultAppearanceConfig() {
+  return { schemaVersion: 2, userDefaults: {}, libraries: {}, pages: {}, plugins: {}, devices: {}, updatedAt: "" };
+}
+function readAppearanceConfig(req) {
+  const stored = readJsonFile(appearanceConfigPath(req), {});
+  return {
+    ...defaultAppearanceConfig(),
+    ...(stored && typeof stored === "object" ? stored : {}),
+    userDefaults: stored?.userDefaults && typeof stored.userDefaults === "object" ? stored.userDefaults : {},
+    libraries: stored?.libraries && typeof stored.libraries === "object" ? stored.libraries : {},
+    pages: stored?.pages && typeof stored.pages === "object" ? stored.pages : {},
+    plugins: stored?.plugins && typeof stored.plugins === "object" ? stored.plugins : {},
+    devices: stored?.devices && typeof stored.devices === "object" ? stored.devices : {},
+  };
+}
+function safeAppearanceScopeId(value = "") {
+  return String(value || "").trim().replace(/[^a-z0-9_.:-]+/gi, "-").slice(0, 180);
+}
+function appearanceDeviceId(req) {
+  return safeAppearanceScopeId(req.get("x-homestead-device-id") || req.body?.deviceId || req.query?.deviceId || "default-device") || "default-device";
+}
+const APPEARANCE_DEVICE_FIELDS = new Set([
+  "posterWidth", "posterHeight", "posterScale", "posterImageScale", "posterAspectRatio", "gridGap", "gridColumns",
+  "detailPosterWidth", "detailPosterHeight", "detailPosterScale", "detailPosterOffsetX", "detailPosterOffsetY",
+  "cardWidth", "cardHeight", "cardScale", "rowHeight", "columnWidth", "contentWidth", "sidebarWidth",
+]);
+function splitAppearanceValues(values = {}) {
+  const shared = {};
+  const device = {};
+  for (const [key, value] of Object.entries(values)) (APPEARANCE_DEVICE_FIELDS.has(key) ? device : shared)[key] = value;
+  return { shared, device };
+}
+function writeAppearanceConfig(req, config = {}) {
+  const serialized = `${JSON.stringify(config, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > 2 * 1024 * 1024) throw new Error("Appearance configuration is too large.");
+  const destination = appearanceConfigPath(req);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(temporary, serialized, "utf8");
+  fs.renameSync(temporary, destination);
+  return config;
+}
+
+app.get("/api/appearance/config", homesteadAccess.requireSession, (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.json({ ok: true, userId: appearanceUserId(req), deviceId: appearanceDeviceId(req), config: readAppearanceConfig(req) });
+});
+
+app.patch("/api/appearance/config", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const bucket = ["userDefaults", "libraries", "pages", "plugins"].includes(String(req.body?.bucket || ""))
+      ? String(req.body.bucket)
+      : "libraries";
+    const scopeId = safeAppearanceScopeId(req.body?.scopeId || req.body?.id);
+    if (!scopeId && bucket !== "userDefaults") throw new Error("Choose an appearance scope before saving.");
+    const values = req.body?.values && typeof req.body.values === "object" && !Array.isArray(req.body.values)
+      ? req.body.values
+      : {};
+    const current = readAppearanceConfig(req);
+    const deviceId = appearanceDeviceId(req);
+    const split = splitAppearanceValues(values);
+    const currentDevice = current.devices?.[deviceId] && typeof current.devices[deviceId] === "object"
+      ? current.devices[deviceId]
+      : { userDefaults: {}, libraries: {}, pages: {}, plugins: {} };
+    const nextDeviceBucket = bucket === "userDefaults"
+      ? { ...(currentDevice.userDefaults || {}), ...split.device }
+      : { ...(currentDevice[bucket] || {}), [scopeId]: { ...(currentDevice[bucket]?.[scopeId] || {}), ...split.device } };
+    const next = {
+      ...current,
+      [bucket]: bucket === "userDefaults"
+        ? { ...current.userDefaults, ...split.shared }
+        : { ...current[bucket], [scopeId]: { ...(current[bucket]?.[scopeId] || {}), ...split.shared } },
+      devices: { ...(current.devices || {}), [deviceId]: { ...currentDevice, [bucket]: nextDeviceBucket } },
+      schemaVersion: 2,
+      updatedAt: new Date().toISOString(),
+    };
+    writeAppearanceConfig(req, next);
+    res.json({ ok: true, userId: appearanceUserId(req), deviceId, config: next });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not save appearance settings." });
+  }
+});
+
+app.delete("/api/appearance/config", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const bucket = ["userDefaults", "libraries", "pages", "plugins"].includes(String(req.query?.bucket || ""))
+      ? String(req.query.bucket)
+      : "libraries";
+    const scopeId = safeAppearanceScopeId(req.query?.scopeId || req.query?.id);
+    const current = readAppearanceConfig(req);
+    const deviceId = appearanceDeviceId(req);
+    const nextSharedBucket = bucket === "userDefaults" ? {} : { ...(current[bucket] || {}) };
+    if (bucket !== "userDefaults" && scopeId) delete nextSharedBucket[scopeId];
+    const currentDevice = current.devices?.[deviceId] && typeof current.devices[deviceId] === "object" ? current.devices[deviceId] : {};
+    const nextDeviceBucket = bucket === "userDefaults" ? {} : { ...(currentDevice[bucket] || {}) };
+    if (bucket !== "userDefaults" && scopeId) delete nextDeviceBucket[scopeId];
+    const next = {
+      ...current,
+      [bucket]: nextSharedBucket,
+      devices: { ...(current.devices || {}), [deviceId]: { ...currentDevice, [bucket]: nextDeviceBucket } },
+      schemaVersion: 2,
+      updatedAt: new Date().toISOString(),
+    };
+    writeAppearanceConfig(req, next);
+    res.json({ ok: true, userId: appearanceUserId(req), deviceId, config: next });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not reset appearance settings." });
+  }
+});
+function appearanceBackgroundIdentity(req) {
+  const user = homesteadAccess.accessContext(req).user;
+  const userId = String(user?.id || "owner").replace(/[^a-z0-9_-]+/gi, "-");
+  const library = String(req.query?.library || req.get("x-homestead-library") || "movies").replace(/[^a-z0-9_-]+/gi, "-");
+  const requestedTarget = String(req.query?.target || req.get("x-homestead-background-target") || "library").toLowerCase();
+  const target = ["sidebar", "header", "ribbon", "banner", "library", "poster"].includes(requestedTarget) ? requestedTarget : "library";
+  const requestedScope = String(req.query?.scope || req.get("x-homestead-appearance-scope") || "");
+  const scope = library === "photos" && requestedScope.startsWith("album:") ? requestedScope : "";
+  return { userId, library, target, scope };
+}
+function appearanceBackgroundStem(identity) {
+  const scopeKey = identity.scope ? `-album-${crypto.createHash("sha256").update(identity.scope).digest("hex")}` : "";
+  return `${identity.library}${scopeKey}-${identity.target}`;
+}
+function findAppearanceBackgroundFile(identity) {
+  const base = path.join(appearanceBackgroundDir, identity.userId, appearanceBackgroundStem(identity));
+  return [".jpg", ".png", ".webp", ".gif"].map((extension) => `${base}${extension}`).find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+app.get("/api/appearance/background", homesteadAccess.requireSession, (req, res) => {
+  const filePath = findAppearanceBackgroundFile(appearanceBackgroundIdentity(req));
+  if (!filePath) return res.status(404).send("Background image not found.");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  return res.sendFile(filePath);
+});
+
+app.post("/api/appearance/background", homesteadAccess.requireSession, express.raw({ type: "application/octet-stream", limit: "32mb" }), async (req, res) => {
+  try {
+    const identity = appearanceBackgroundIdentity(req);
+    const contentType = String(req.get("x-homestead-content-type") || "").toLowerCase();
+    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : contentType.includes("gif") ? ".gif" : contentType.includes("jpeg") || contentType.includes("jpg") ? ".jpg" : "";
+    if (!extension || !Buffer.isBuffer(req.body) || req.body.length < 32) throw new Error("Choose a JPG, PNG, WebP, or GIF image.");
+    if (sharp) await sharp(req.body, { animated: false }).metadata();
+    const userDir = path.join(appearanceBackgroundDir, identity.userId);
+    fs.mkdirSync(userDir, { recursive: true });
+    for (const existingExtension of [".jpg", ".png", ".webp", ".gif"]) {
+      const previous = path.join(userDir, `${appearanceBackgroundStem(identity)}${existingExtension}`);
+      if (fs.existsSync(previous)) fs.unlinkSync(previous);
+    }
+    const destination = path.join(userDir, `${appearanceBackgroundStem(identity)}${extension}`);
+    fs.writeFileSync(destination, req.body);
+    const version = String(Math.floor(fs.statSync(destination).mtimeMs));
+    const url = `/api/appearance/background?library=${encodeURIComponent(identity.library)}&target=${encodeURIComponent(identity.target)}${identity.scope ? `&scope=${encodeURIComponent(identity.scope)}` : ""}&v=${version}`;
+    res.json({ ok: true, url, library: identity.library, target: identity.target, scope: identity.scope });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not save the background image." });
+  }
+});
+
 app.get("/api/branding/manifest.webmanifest", sendHomesteadManifest);
 
-app.post("/api/setup-config", (req, res) => {
+app.post("/api/setup-config", homesteadAccess.requireOwner, (req, res) => {
   try {
     const storedConfig = prepareSetupConfigForStorage(req.body || {});
     fs.mkdirSync(path.dirname(setupConfigPath), { recursive: true });
     fs.writeFileSync(setupConfigPath, JSON.stringify(storedConfig, null, 2));
+    setTimeout(configureLibraryWatchWorker, 250).unref();
     res.json({ ok: true, config: sanitizeSetupConfigForClient(storedConfig) });
   } catch (error) {
     console.error("Failed to save setup config:", error);
@@ -3623,6 +7793,150 @@ app.post("/api/setup-config", (req, res) => {
 
 app.get("/api/setup-config", (req, res) => {
   res.json(sanitizeSetupConfigForClient(readSetupConfig()));
+});
+
+async function testConfiguredIntegration(id = "", rawSettings = {}) {
+  const settings = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+  const name = String(id || "service").replace(/[^a-z0-9_-]/gi, "");
+  const baseUrl = String(settings.url || settings.baseUrl || settings.serverUrl || "").trim().replace(/\/+$/, "");
+  if (name === "upcmdb") {
+    if (!String(settings.apiKey || "").trim()) throw new Error("Enter the UPCMDB API key first.");
+    return { ok: true, connected: true, message: "UPCMDB credentials are present." };
+  }
+  if (!baseUrl) throw new Error("Enter the service URL first.");
+
+  const headers = { Accept: "application/json,text/plain,*/*", "User-Agent": "Homestead/0.6.8.52" };
+  const apiKey = String(settings.apiKey || settings.token || "").trim();
+  if (apiKey) headers["X-Api-Key"] = apiKey;
+  let url = baseUrl;
+  let method = "GET";
+  let body;
+
+  if (["radarr", "sonarr", "lidarr"].includes(name)) url += "/api/v3/system/status";
+  else if (name === "readarr") url += "/api/v1/system/status";
+  else if (name === "prowlarr") url += "/api/v1/system/status";
+  else if (name === "jellyseerr") url += "/api/v1/status";
+  else if (name === "frigate") url += "/api/version";
+  else if (name === "immich") url += "/api/server/ping";
+  else if (name === "nextcloud") url += "/status.php";
+  else if (name === "homeassistant") { url += "/api/"; headers.Authorization = `Bearer ${String(settings.token || "")}`; }
+  else if (name === "tubearchivist") { url += "/api/health"; if (apiKey) headers.Authorization = `Token ${apiKey}`; }
+  else if (name === "sabnzbd") url += `/api?mode=version&output=json${apiKey ? `&apikey=${encodeURIComponent(apiKey)}` : ""}`;
+  else if (name === "iptvprovider") {
+    const username = String(settings.username || "").trim();
+    const password = String(settings.password || "").trim();
+    if (!username || !password) throw new Error("Enter the IPTV username and password first.");
+    url += `/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+  } else if (name === "qbittorrent") {
+    const username = String(settings.username || "").trim();
+    const password = String(settings.password || "").trim();
+    if (!username || !password) throw new Error("Enter the qBittorrent username and password first.");
+    url += "/api/v2/auth/login";
+    method = "POST";
+    headers["Content-Type"] = "application/x-www-form-urlencoded";
+    body = new URLSearchParams({ username, password }).toString();
+  } else if (name === "deluge") {
+    const password = String(settings.password || "").trim();
+    if (!password) throw new Error("Enter the Deluge Web password first.");
+    url += "/json";
+    method = "POST";
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify({ method: "auth.login", params: [password], id: 1 });
+  }
+
+  const response = await fetch(url, { method, headers, body, redirect: "follow", signal: AbortSignal.timeout(9000) });
+  const responseText = await response.text().catch(() => "");
+  if (!response.ok) throw new Error(`${name} returned ${response.status}. Check the URL and credentials.`);
+  if (name === "qbittorrent" && !/^ok\.?$/i.test(responseText.trim())) throw new Error("qBittorrent rejected the login.");
+  if (name === "deluge") {
+    const data = JSON.parse(responseText || "{}");
+    if (data.result !== true) throw new Error("Deluge rejected the Web password.");
+  }
+  if (name === "iptvprovider") {
+    const data = JSON.parse(responseText || "{}");
+    if (data?.user_info?.auth === 0) throw new Error("The IPTV provider rejected those credentials.");
+  }
+  return { ok: true, connected: true, message: `${name} connection successful.`, checkedAt: new Date().toISOString() };
+}
+
+app.post("/api/setup/test-integration", homesteadAccess.requireOwner, subscriptionService.requireFeature("externalIntegrations"), async (req, res) => {
+  try {
+    const result = await testConfiguredIntegration(req.body?.id, req.body?.settings || {});
+    res.json(result);
+  } catch (error) {
+    res.status(error?.name === "TimeoutError" || error?.name === "AbortError" ? 504 : 400).json({ ok: false, connected: false, message: error.message || "Connection test failed." });
+  }
+});
+
+app.get("/api/integrations/readarr/status", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const config = readSetupConfig();
+    const settings = config?.integrationSettings?.readarr || {};
+    if (!String(settings.url || settings.baseUrl || settings.serverUrl || "").trim()) {
+      return res.status(400).json({ ok: false, connected: false, status: "not-configured", message: "Readarr is not configured. Add its URL and API key in Integrations." });
+    }
+    const result = await testConfiguredIntegration("readarr", settings);
+    return res.json({ ...result, status: "connected", service: "readarr" });
+  } catch (error) {
+    return res.status(error?.name === "TimeoutError" || error?.name === "AbortError" ? 504 : 400).json({
+      ok: false,
+      connected: false,
+      status: "needs-attention",
+      service: "readarr",
+      message: error.message || "Readarr connection test failed.",
+    });
+  }
+});
+
+app.get("/api/admin/integration-health", homesteadAccess.requireAdmin, subscriptionService.requireFeature("externalIntegrations"), async (req, res) => {
+  const config = readSetupConfig();
+  const enabled = Object.entries(config.integrations || {}).filter(([, value]) => value === true).map(([id]) => id);
+  const futureOnly = new Set(["audiobookshelf", "tdarr", "handbrake"]);
+  const services = await Promise.all(enabled.map(async (id) => {
+    if (futureOnly.has(id)) return { id, enabled: true, state: "coming-soon", message: "Saved for a future integration release." };
+    try {
+      const result = await testConfiguredIntegration(id, config.integrationSettings?.[id] || {});
+      return { id, enabled: true, state: "connected", message: result.message, checkedAt: result.checkedAt };
+    } catch (error) {
+      return { id, enabled: true, state: "needs-attention", message: error.message || "Connection check failed." };
+    }
+  }));
+  res.json({ ok: true, checkedAt: new Date().toISOString(), services });
+});
+
+app.post("/api/stations/heartbeat", homesteadAccess.requireSession, (req, res) => {
+  const context = homesteadAccess.accessContext(req);
+  const incoming = req.body && typeof req.body === "object" ? req.body : {};
+  const deviceId = String(incoming.deviceId || "").replace(/[^a-z0-9_-]/gi, "").slice(0, 100);
+  if (!deviceId) return res.status(400).json({ ok: false, message: "Device ID is required." });
+  const now = new Date().toISOString();
+  const stored = readJsonFile(stationRegistryPath, { version: 1, stations: [] });
+  const stations = (Array.isArray(stored.stations) ? stored.stations : []).filter((station) => station?.deviceId !== deviceId && Date.now() - new Date(station?.lastSeen || 0).getTime() < 30 * 86400000);
+  const record = {
+    deviceId,
+    deviceName: String(incoming.deviceName || "Homestead Device").slice(0, 120),
+    room: String(incoming.room || "").slice(0, 120),
+    stationType: String(incoming.stationType || "standard-desktop").slice(0, 80),
+    currentView: String(incoming.currentView || "home").slice(0, 100),
+    defaultLandingPage: String(incoming.defaultLandingPage || "home").slice(0, 100),
+    defaultProfileName: String(incoming.defaultProfileName || "").slice(0, 120),
+    allowedLibraries: Array.isArray(incoming.allowedLibraries) ? incoming.allowedLibraries.map(String).slice(0, 50) : [],
+    userId: context.user?.id || "",
+    userName: context.user?.name || context.user?.username || "",
+    lastSeen: now,
+  };
+  writeJsonFile(stationRegistryPath, { version: 1, updatedAt: now, stations: [record, ...stations].slice(0, 100) });
+  res.json({ ok: true, station: record });
+});
+
+app.get("/api/stations", homesteadAccess.requireAdmin, (req, res) => {
+  const stored = readJsonFile(stationRegistryPath, { version: 1, stations: [] });
+  const now = Date.now();
+  const stations = (Array.isArray(stored.stations) ? stored.stations : []).map((station) => ({
+    ...station,
+    online: now - new Date(station?.lastSeen || 0).getTime() < 90000,
+  }));
+  res.json({ ok: true, stations });
 });
 
 async function discoverIntegrationIcon(baseUrl) {
@@ -4007,6 +8321,7 @@ function getAdultProfileRootCandidates(libraryType = "personal") {
 }
 
 function findAdultProfileDir({ libraryType = "personal", profileId = "", profileName = "", profileDir = "", folderPath = "", sourcePath = "", filePath = "" }) {
+  const roots = getAdultProfileRootCandidates(libraryType);
   const explicitCandidates = [profileDir, folderPath, sourcePath, filePath]
     .filter(Boolean)
     .map((value) => String(value));
@@ -4017,11 +8332,16 @@ function findAdultProfileDir({ libraryType = "personal", profileId = "", profile
       ? normalized
       : path.dirname(normalized);
     if (asDir && fs.existsSync(asDir) && fs.statSync(asDir).isDirectory()) {
-      return asDir;
+      const resolved = fs.realpathSync(asDir);
+      const withinConfiguredRoot = roots.some((root) => {
+        if (!fs.existsSync(root)) return false;
+        const resolvedRoot = fs.realpathSync(root);
+        return resolved === resolvedRoot || resolved.startsWith(`${resolvedRoot}${path.sep}`);
+      });
+      if (withinConfiguredRoot) return resolved;
     }
   }
 
-  const roots = getAdultProfileRootCandidates(libraryType);
   const ids = [profileId, slugifyAdultProfileName(profileName), profileName]
     .filter(Boolean)
     .map((value) => String(value));
@@ -4093,22 +8413,32 @@ function findAdultProfileHeadshotFile(profileDir) {
     "headshot.jpeg",
     "headshot.png",
     "headshot.webp",
+    "headshot.heic",
+    "headshot.heif",
     "profile.jpg",
     "profile.jpeg",
     "profile.png",
     "profile.webp",
+    "profile.heic",
+    "profile.heif",
     "avatar.jpg",
     "avatar.jpeg",
     "avatar.png",
     "avatar.webp",
+    "avatar.heic",
+    "avatar.heif",
     "poster.jpg",
     "poster.jpeg",
     "poster.png",
     "poster.webp",
+    "poster.heic",
+    "poster.heif",
     "folder.jpg",
     "folder.jpeg",
     "folder.png",
     "folder.webp",
+    "folder.heic",
+    "folder.heif",
   ];
 
   for (const fileName of preferredNames) {
@@ -4209,6 +8539,8 @@ const ADULT_PROFILE_METADATA_MIRROR_KEYS = [
   "bust",
   "waist",
   "hips",
+  "braBand",
+  "cupSize",
   "braSize",
   "pantySize",
   "pantySizeSystem",
@@ -4222,6 +8554,9 @@ const ADULT_PROFILE_METADATA_MIRROR_KEYS = [
   "clothingSizes",
   "manualMetadataEditedAt",
   "manualMetadataFields",
+  "metadataLocks",
+  "metadataFieldSources",
+  "metadataChangeHistory",
 ];
 
 function mirrorAdultProfileMetadataFields(target = {}, source = {}) {
@@ -4231,6 +8566,22 @@ function mirrorAdultProfileMetadataFields(target = {}, source = {}) {
     }
   }
   return target;
+}
+
+function sanitizeAdultHeightMetadata(metadata = {}) {
+  const next = { ...(metadata || {}) };
+  const sanitize = (target) => {
+    if (!target || typeof target !== "object" || !Object.prototype.hasOwnProperty.call(target, "height")) return target;
+    const height = validatedAdultHeight(target.height);
+    const output = { ...target };
+    if (height) output.height = height;
+    else delete output.height;
+    return output;
+  };
+  const top = sanitize(next);
+  if (top.body) top.body = sanitize(top.body);
+  if (top.bodyDetails) top.bodyDetails = sanitize(top.bodyDetails);
+  return top;
 }
 
 function writeAdultProfileMetadataFile(profileDir, patch = {}, sourceCandidate = null, options = {}) {
@@ -4244,16 +8595,19 @@ function writeAdultProfileMetadataFile(profileDir, patch = {}, sourceCandidate =
   const existingMetadata = { ...topLevelMetadata, ...(existing.metadata || {}) };
   const overwrite = options.overwrite !== false;
   const match = patch.metadataMatch || getAdultMetadataMatchFromCandidate(sourceCandidate) || existingMetadata.metadataMatch || null;
-  const cleanPatch = Object.fromEntries(
-    Object.entries(patch || {}).filter(([, value]) => !isEmptyAdultMetadataValue(value))
-  );
-  const nextMetadata = overwrite
+  const cleanPatch = options.allowEmpty
+    ? { ...(patch || {}) }
+    : Object.fromEntries(
+        Object.entries(patch || {}).filter(([, value]) => !isEmptyAdultMetadataValue(value))
+      );
+  let nextMetadata = overwrite
     ? { ...existingMetadata, ...cleanPatch }
     : { ...cleanPatch, ...existingMetadata };
+  nextMetadata = sanitizeAdultHeightMetadata(nextMetadata);
 
   if (match) nextMetadata.metadataMatch = match;
 
-  const next = mirrorAdultProfileMetadataFields({
+  let next = mirrorAdultProfileMetadataFields({
     ...existing,
     metadata: nextMetadata,
     metadataCandidates: {
@@ -4262,10 +8616,96 @@ function writeAdultProfileMetadataFile(profileDir, patch = {}, sourceCandidate =
     },
     updatedAt: new Date().toISOString(),
   }, nextMetadata);
+  next = sanitizeAdultHeightMetadata(next);
+  next.metadata = sanitizeAdultHeightMetadata(next.metadata || {});
 
-  fs.writeFileSync(metadataPath, JSON.stringify(next, null, 2));
+  atomicWriteJson(metadataPath, next);
   return { metadataPath, metadata: next.metadata, file: next };
 }
+
+const ADULT_FAMILY_RELATIONSHIP_TYPES = new Set([
+  "mother", "father", "parent", "daughter", "son", "child",
+  "sister", "brother", "sibling", "half-sister", "half-brother", "half-sibling",
+  "step-sister", "step-brother", "step-sibling", "adopted-sister", "adopted-brother", "adopted-sibling",
+  "grandmother", "grandfather", "grandparent", "granddaughter", "grandson", "grandchild",
+  "aunt", "uncle", "niece", "nephew", "cousin", "spouse", "partner", "relative",
+]);
+
+function adultFamilyGender(metadata = {}) {
+  const value = String(metadata.gender || metadata.sex || metadata.metadata?.gender || metadata.metadata?.sex || "").trim().toLowerCase();
+  if (["female", "woman", "girl", "f"].includes(value)) return "female";
+  if (["male", "man", "boy", "m"].includes(value)) return "male";
+  return "";
+}
+
+function reciprocalAdultFamilyRelationship(relationshipType, sourceMetadata = {}) {
+  const gender = adultFamilyGender(sourceMetadata);
+  const gendered = (female, male, neutral) => gender === "female" ? female : gender === "male" ? male : neutral;
+  const type = ADULT_FAMILY_RELATIONSHIP_TYPES.has(String(relationshipType || "")) ? String(relationshipType) : "sibling";
+  if (["mother", "father", "parent"].includes(type)) return gendered("daughter", "son", "child");
+  if (["daughter", "son", "child"].includes(type)) return gendered("mother", "father", "parent");
+  if (["sister", "brother", "sibling"].includes(type)) return gendered("sister", "brother", "sibling");
+  if (["half-sister", "half-brother", "half-sibling"].includes(type)) return gendered("half-sister", "half-brother", "half-sibling");
+  if (["step-sister", "step-brother", "step-sibling"].includes(type)) return gendered("step-sister", "step-brother", "step-sibling");
+  if (["adopted-sister", "adopted-brother", "adopted-sibling"].includes(type)) return gendered("adopted-sister", "adopted-brother", "adopted-sibling");
+  if (["grandmother", "grandfather", "grandparent"].includes(type)) return gendered("granddaughter", "grandson", "grandchild");
+  if (["granddaughter", "grandson", "grandchild"].includes(type)) return gendered("grandmother", "grandfather", "grandparent");
+  if (["aunt", "uncle"].includes(type)) return gendered("niece", "nephew", "relative");
+  if (["niece", "nephew"].includes(type)) return gendered("aunt", "uncle", "relative");
+  if (type === "spouse") return "spouse";
+  if (type === "partner") return "partner";
+  if (type === "cousin") return "cousin";
+  return "relative";
+}
+
+app.post("/api/adult/profiles/relationships", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const action = req.body?.action === "unlink" ? "unlink" : "link";
+    const relationshipType = ADULT_FAMILY_RELATIONSHIP_TYPES.has(String(req.body?.relationshipType || "")) ? String(req.body.relationshipType) : "sibling";
+    const profile = req.body?.profile || {};
+    const relatedProfile = req.body?.relatedProfile || {};
+    const normalizeLibrary = (value) => {
+      const library = String(value || "personal").toLowerCase();
+      if (["celebrity", "celebrities"].includes(library)) return "celebrities";
+      if (["performer", "performers"].includes(library)) return "performers";
+      return "personal";
+    };
+    if ((!profile.id && !profile.name) || (!relatedProfile.id && !relatedProfile.name)) return res.status(400).json({ ok: false, message: "Choose two existing profiles to link." });
+    const profileLibrary = normalizeLibrary(profile.library);
+    const relatedLibrary = normalizeLibrary(relatedProfile.library);
+    const profileDir = findAdultProfileDir({ libraryType: profileLibrary, profileId: profile.id, profileName: profile.name });
+    const relatedDir = findAdultProfileDir({ libraryType: relatedLibrary, profileId: relatedProfile.id, profileName: relatedProfile.name });
+    if (!profileDir || !relatedDir) return res.status(404).json({ ok: false, message: "One of those profile folders could not be found." });
+    if (path.resolve(profileDir) === path.resolve(relatedDir)) return res.status(400).json({ ok: false, message: "A profile cannot be linked to itself." });
+    const profileFile = readAdultProfileMetadataFile(profileDir);
+    const relatedFile = readAdultProfileMetadataFile(relatedDir);
+    const profileMetadata = { ...profileFile, ...(profileFile.metadata || {}) };
+    const relatedMetadata = { ...relatedFile, ...(relatedFile.metadata || {}) };
+    const profileId = String(profile.id || path.basename(profileDir));
+    const relatedId = String(relatedProfile.id || path.basename(relatedDir));
+    const withoutTarget = (items, targetId, targetLibrary) => (Array.isArray(items) ? items : []).filter((item) => !(String(item.profileId || item.id) === targetId && normalizeLibrary(item.library) === targetLibrary));
+    const now = new Date().toISOString();
+    let profileRelationships = withoutTarget(profileMetadata.relationships, relatedId, relatedLibrary);
+    let relatedRelationships = withoutTarget(relatedMetadata.relationships, profileId, profileLibrary);
+    if (action === "link") {
+      const reciprocalRelationshipType = reciprocalAdultFamilyRelationship(relationshipType, profileMetadata);
+      profileRelationships.push({ profileId: relatedId, name: relatedProfile.name || relatedMetadata.name || path.basename(relatedDir), library: relatedLibrary, relationshipType, linkedAt: now });
+      relatedRelationships.push({ profileId, name: profile.name || profileMetadata.name || path.basename(profileDir), library: profileLibrary, relationshipType: reciprocalRelationshipType, linkedAt: now });
+    }
+    const first = writeAdultProfileMetadataFile(profileDir, { relationships: profileRelationships, relationshipsUpdatedAt: now }, null, { overwrite: true, allowEmpty: true });
+    try {
+      writeAdultProfileMetadataFile(relatedDir, { relationships: relatedRelationships, relationshipsUpdatedAt: now }, null, { overwrite: true, allowEmpty: true });
+    } catch (error) {
+      atomicWriteJson(path.join(profileDir, "metadata.json"), profileFile);
+      throw error;
+    }
+    runMediaScan();
+    res.json({ ok: true, action, relationshipType, metadata: first.metadata, relationships: profileRelationships, message: action === "link" ? "Family profiles linked with reciprocal relationships." : "Family link removed from both profiles." });
+  } catch (error) {
+    console.error("Adult profile relationship update failed:", error);
+    res.status(500).json({ ok: false, message: error.message || "Unable to update family links." });
+  }
+});
 
 
 function normalizeAdultPersonProfileType(value = "") {
@@ -4371,6 +8811,7 @@ function isAdultOnlyPersonProvider(candidate = {}) {
     "freeones-search",
     "iafd",
     "boobpedia",
+    "thenude",
     "whisparr",
     "tpdb-stashbox",
     "stashbox",
@@ -4399,6 +8840,7 @@ function isLowConfidenceAdultPersonFallback(candidate = {}) {
     "freeones-search",
     "iafd",
     "boobpedia",
+    "thenude",
     "celebrity-body-details",
     "models-com",
     "fashion-model-directory",
@@ -4514,6 +8956,8 @@ function normalizeAdultPersonCandidateForUi(candidate = {}, fallbackQuery = "", 
 
 async function searchAdultPersonCandidates(query, options = {}) {
   const setupConfig = options.setupConfig || readSetupConfig();
+  const configuredSources = getConfiguredAdultSources(setupConfig);
+  const sourceEnabled = (wantedId) => !configuredSources.some((source) => String(source.id || source.name || "").replace(/[^a-z0-9]/gi, "").toLowerCase() === String(wantedId).replace(/[^a-z0-9]/gi, "").toLowerCase() && source.enabled === false);
   const wantedType = normalizeAdultPersonProfileType(options.profileType || options.libraryType || "both");
   const targetLibraries = wantedType === "celebrity"
     ? ["celebrities"]
@@ -4529,6 +8973,11 @@ async function searchAdultPersonCandidates(query, options = {}) {
       libraryType,
       whisparr: libraryType === "performers" ? getWhisparrConfig() : {},
       customSourceUrls: getCustomMetadataSourceUrls(setupConfig, libraryType),
+      modelsEnabled: sourceEnabled("models-com"),
+      teenIdolsEnabled: sourceEnabled("teenidols4you"),
+      celebrityTallEnabled: sourceEnabled("celebritytall"),
+      celebrityInsideEnabled: sourceEnabled("celebrityinside"),
+      theNudeEnabled: sourceEnabled("thenude"),
       limit: options.limit || 8,
     });
 
@@ -4537,7 +8986,41 @@ async function searchAdultPersonCandidates(query, options = {}) {
     }
   }
 
-  return finalizeAdultPersonCandidates(query, combined, options).slice(0, options.limit || 12);
+  const finalized = finalizeAdultPersonCandidates(query, combined, options);
+  const sourceRegistry = buildAdultSourceRegistry(
+    mergeHomesteadAdultBrowseSources(getConfiguredAdultSources(setupConfig)),
+    readAdultRecommendationProviders(),
+  );
+  const aggregated = aggregateAdultPersonCandidates(query, finalized, sourceRegistry);
+
+  for (const identity of aggregated) {
+    const matchingSources = sourceRegistry.filter((source) => {
+      if (source.enabled === false) return false;
+      const types = Array.isArray(source.profileTypes) ? source.profileTypes.map((value) => String(value).toLowerCase().replace(/s$/, "")) : [];
+      return !types.length || types.includes(identity.profileType) || source.role === "both";
+    });
+    const existingSourceIds = new Set((identity.sources || []).map((source) => source.id));
+    const searchableSources = [];
+    for (const source of matchingSources) {
+      if (existingSourceIds.has(source.id)) continue;
+      let url = "";
+      try { url = buildSourceSearchUrl(source, query, {}); } catch { url = source.baseUrl || source.endpoint || ""; }
+      if (!url) continue;
+      searchableSources.push({
+        id: source.id,
+        name: source.name,
+        packId: source.packId,
+        packName: source.packName,
+        url,
+        status: "searchable",
+        capabilities: source.capabilities || source.supports || [],
+      });
+    }
+    identity.searchableSources = searchableSources;
+    identity.availableSourceCount = (identity.sources?.length || 0) + searchableSources.length;
+  }
+
+  return aggregated.slice(0, options.limit || 12);
 }
 
 function getAdultPersonCandidateImageUrl(candidate = {}) {
@@ -4622,9 +9105,15 @@ function getProfileImageCandidates(profileDir = "") {
   const candidates = [
     "poster.jpg",
     "poster.png",
+    "poster.heic",
+    "poster.heif",
     "headshot.jpg",
     "headshot.png",
+    "headshot.heic",
+    "headshot.heif",
     "banner.jpg",
+    "banner.heic",
+    "banner.heif",
     "artwork/poster.jpg",
     "photos/profile.jpg",
     "nudes/profile.jpg",
@@ -4641,7 +9130,7 @@ function getProfileImageCandidates(profileDir = "") {
     if (!fs.existsSync(folderDir)) continue;
     for (const entry of fs.readdirSync(folderDir, { withFileTypes: true }).slice(0, 12)) {
       if (!entry.isFile()) continue;
-      if (!/\.(jpe?g|png|webp)$/i.test(entry.name)) continue;
+      if (!/\.(jpe?g|png|webp|heic|heif)$/i.test(entry.name)) continue;
       found.push({ relativePath: `${folderName}/${entry.name}`, fullPath: path.join(folderDir, entry.name) });
       if (found.length >= 16) break;
     }
@@ -4942,9 +9431,9 @@ app.post("/api/discovery/adult/face-search", async (req, res) => {
 
 
 
-app.post("/api/adult/profiles/create", async (req, res) => {
+app.post("/api/adult/profiles/create", homesteadAccess.requireAdmin, async (req, res) => {
   try {
-    const { name: rawName = "", profileType = "performer", libraryType: rawLibraryType = "", metadata = {}, candidate = null, sourceUrls = [], overwrite = false } = req.body || {};
+    const { name: rawName = "", profileType = "performer", libraryType: rawLibraryType = "", folderPath: requestedFolderPath = "", metadata = {}, candidate = null, sourceUrls = [], overwrite = false } = req.body || {};
     const name = cleanMetadataQuery(rawName || candidate?.name || candidate?.title || "");
     const libraryType = rawLibraryType || adultPersonLibraryFromProfileType(profileType || candidate?.profileType);
 
@@ -4959,7 +9448,24 @@ app.post("/api/adult/profiles/create", async (req, res) => {
     }
 
     const folderName = slugifyAdultProfileName(name);
-    const profileDir = path.join(root, folderName);
+    const requestedProfileDir = String(requestedFolderPath || metadata.folderPath || "").trim();
+    let profileDir = path.join(root, folderName);
+    if (requestedProfileDir) {
+      const resolvedRequested = path.resolve(requestedProfileDir);
+      const allowedRoot = roots.find((candidateRoot) => {
+        const resolvedRoot = path.resolve(candidateRoot);
+        return resolvedRequested.startsWith(`${resolvedRoot}${path.sep}`);
+      });
+      if (!allowedRoot) return res.status(400).json({ ok: false, message: "Profile folders must stay inside the configured Adult library root." });
+      if (fs.existsSync(resolvedRequested) && fs.existsSync(allowedRoot)) {
+        const realRequested = fs.realpathSync(resolvedRequested);
+        const realRoot = fs.realpathSync(allowedRoot);
+        if (!realRequested.startsWith(`${realRoot}${path.sep}`)) return res.status(400).json({ ok: false, message: "The linked folder resolves outside the configured Adult library root." });
+        profileDir = realRequested;
+      } else {
+        profileDir = resolvedRequested;
+      }
+    }
     const metadataPath = path.join(
       profileDir,
       "metadata.json"
@@ -4987,6 +9493,10 @@ app.post("/api/adult/profiles/create", async (req, res) => {
     let document = buildAdultProfileMetadataDocument({ name, profileType, libraryType, metadata, candidate, sourceUrls });
 
     fs.writeFileSync(metadataPath, JSON.stringify(document, null, 2));
+    setImmediate(() => {
+      try { runMediaScan(adultLibraryIdFromProfileLibrary(libraryType), { profileDir }); }
+      catch (scanError) { console.warn("Targeted post-create scan failed:", scanError.message); }
+    });
 
     const candidateImageUrl = getAdultPersonCandidateImageUrl(candidate);
     let downloadedPoster = false;
@@ -5018,6 +9528,7 @@ app.post("/api/adult/profiles/create", async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.json({
       ok: true,
+      folderPath: profileDir,
       profileDir,
       metadataPath,
       createdFolders,
@@ -5046,7 +9557,7 @@ function isEmptyAdultMetadataValue(value) {
 
 function normalizeAdultMetadataCompareValue(value) {
   if (Array.isArray(value)) {
-    return value.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean).sort().join("|");
+    return value.map((entry) => normalizeAdultMetadataCompareValue(entry)).filter(Boolean).sort().join("|");
   }
   if (typeof value === "object" && value !== null) {
     return JSON.stringify(value);
@@ -5054,10 +9565,32 @@ function normalizeAdultMetadataCompareValue(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function adultMetadataValuePreview(value) {
+  if (Array.isArray(value)) {
+    const items = value.map(adultMetadataValuePreview).filter(Boolean);
+    return `${items.slice(0, 8).join(", ")}${items.length > 8 ? ` +${items.length - 8} more` : ""}`;
+  }
+  if (value && typeof value === "object") {
+    const scalar = value.description || value.name || value.title || value.label || value.url || value.href;
+    if (scalar) return String(scalar);
+    return Object.entries(value).map(([key, entry]) => `${key}: ${adultMetadataValuePreview(entry)}`).filter((entry) => !entry.endsWith(": ")).join(" · ");
+  }
+  return String(value ?? "").trim();
+}
+
+function adultMetadataCandidateDedupeKey(candidate = {}, index = 0) {
+  const provider = String(candidate.provider || candidate.source || "source").toLowerCase();
+  const url = String(candidate.url || candidate.sourceUrl || candidate.profileUrl || "");
+  const iafdId = candidate.providerIds?.iafd || candidate.externalIds?.iafd || url.match(/[?&]perfid=([^&#]+)/i)?.[1] || "";
+  if (/iafd/.test(provider)) return `iafd:${decodeURIComponent(iafdId || candidate.name || candidate.title || index).toLowerCase()}`;
+  const canonicalUrl = url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+  return `${provider}:${candidate.id || canonicalUrl || candidate.name || index}`.toLowerCase();
+}
+
 function isWeakAdultMetadataText(value = "") {
   const text = String(value || "").trim().toLowerCase();
   if (!text) return true;
-  return /open source search|custom metadata source|provider search|search for aliases|source search|not found|invalid/.test(text);
+  return /open source search|custom metadata source|provider search|search for aliases|source search|not found|invalid|known .{0,80} mapping saved in homestead/.test(text);
 }
 
 function adultMetadataSourceLabel(candidate = {}, index = 0) {
@@ -5087,6 +9620,7 @@ const ADULT_FULL_FETCH_FIELD_GROUPS = [
     label: "Identity",
     fields: [
       ["name", "Name"],
+      ["birthName", "Birth / legal name"],
       ["aliases", "Aliases"],
       ["alsoKnownAs", "Also known as"],
       ["birthday", "Birthday"],
@@ -5094,6 +9628,9 @@ const ADULT_FULL_FETCH_FIELD_GROUPS = [
       ["birthPlace", "Birthplace"],
       ["placeOfBirth", "Place of birth"],
       ["nationality", "Nationality"],
+      ["ethnicity", "Ethnicity"],
+      ["gender", "Gender"],
+      ["sexualOrientation", "Sexual orientation"],
       ["occupation", "Occupation"],
       ["occupations", "Occupations"],
     ],
@@ -5120,8 +9657,11 @@ const ADULT_FULL_FETCH_FIELD_GROUPS = [
       ["bust", "Bust"],
       ["waist", "Waist"],
       ["hips", "Hips"],
+      ["braBand", "Bra band"],
       ["braSize", "Bra size"],
       ["cupSize", "Cup size"],
+      ["pantySize", "Panty size"],
+      ["pantySizeSystem", "Panty size system"],
       ["shoeSize", "Shoe size"],
       ["dressSize", "Dress size"],
       ["clothingSize", "Clothing size"],
@@ -5137,6 +9677,10 @@ const ADULT_FULL_FETCH_FIELD_GROUPS = [
       ["piercings", "Piercings"],
     ],
   },
+  { id: "career", label: "Career / relationships", fields: [["careerStart", "Career start"], ["careerEnd", "Career end"], ["yearsActive", "Years active"], ["studios", "Studios"], ["awards", "Awards"], ["careerMilestones", "Career milestones"], ["relationships", "Relationships"]] },
+  { id: "professional", label: "Professional profile", fields: [["agencies", "Agencies"], ["clients", "Clients"], ["work", "Work"], ["relatedPeople", "Related people"]] },
+  { id: "social", label: "Social links", fields: [["socials", "Social accounts"], ["socialLinks", "Social links"]] },
+  { id: "media", label: "Available media", fields: [["photos", "Photos"], ["videos", "Videos"], ["scenes", "Scenes"], ["artwork", "Artwork"]] },
   {
     id: "links",
     label: "External IDs / links",
@@ -5155,6 +9699,8 @@ const ADULT_FULL_FETCH_FIELD_GROUPS = [
 const ADULT_FULL_FETCH_FIELDS = ADULT_FULL_FETCH_FIELD_GROUPS.flatMap((group) =>
   group.fields.map(([key, label]) => ({ key, label, group: group.id, groupLabel: group.label }))
 );
+const ADULT_FULL_FETCH_COVERAGE_EXCLUDED_KEYS = new Set(["alsoKnownAs", "birthDate", "placeOfBirth", "description", "measurementsRaw", "socialLinks", "providerIds", "providerLinks", "externalIds", "externalLinks", "imdbId", "wikidataId", "wikipediaTitle", "photos", "videos", "scenes", "artwork"]);
+const ADULT_SOURCE_NON_MEANINGFUL_KEYS = new Set(["name", "providerIds", "providerLinks", "externalIds", "externalLinks", "imdbId", "wikidataId", "wikipediaTitle"]);
 
 function normalizeAdultIdentityName(value = "") {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -5193,6 +9739,33 @@ function sanitizeAdultMetadataObject(input = {}) {
   return output;
 }
 
+function mergeMissingAdultMetadata(current = {}, incoming = {}) {
+  const output = { ...(current || {}) };
+  for (const [key, value] of Object.entries(incoming || {})) {
+    if (isEmptyAdultMetadataValue(value)) continue;
+    const existing = output[key];
+    const replacesIncompleteBra = key === "braSize" && !isCompleteAdultBraSize(existing) && isCompleteAdultBraSize(value);
+    if (isEmptyAdultMetadataValue(existing) || replacesIncompleteBra) {
+      output[key] = value;
+      continue;
+    }
+    if (value && existing && typeof value === "object" && typeof existing === "object" && !Array.isArray(value) && !Array.isArray(existing)) {
+      output[key] = mergeMissingAdultMetadata(existing, value);
+    }
+  }
+  return output;
+}
+
+function listNewAdultMetadataFields(current = {}, incoming = {}) {
+  return ADULT_FULL_FETCH_FIELDS
+    .map((field) => field.key)
+    .filter((key) => {
+      const existing = current?.[key] ?? current?.body?.[key] ?? current?.bodyDetails?.[key];
+      const next = incoming?.[key] ?? incoming?.body?.[key] ?? incoming?.bodyDetails?.[key];
+      return (isEmptyAdultMetadataValue(existing) || (key === "braSize" && !isCompleteAdultBraSize(existing) && isCompleteAdultBraSize(next))) && !isEmptyAdultMetadataValue(next);
+    });
+}
+
 function candidateMatchesAdultIdentityAnchor(candidate = {}, anchor = {}, profileType = "performer") {
   if (!candidate) return false;
   const wantedLane = String(profileType || anchor.profileType || "performer").toLowerCase();
@@ -5210,7 +9783,23 @@ function normalizeAdultMetadataCandidateForAggregation(candidate = {}, existingM
   return sanitizeAdultMetadataObject({ ...normalized, ...(candidate.metadata || {}) });
 }
 
-function buildAdultFullMetadataAggregation({ query = "", libraryType = "performers", profileType = "performer", person = {}, candidates = [], seedCandidate = null }) {
+function normalizeAdultMetadataProviderKey(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function findConfiguredAdultMetadataSource(candidate = {}, sourceSettings = []) {
+  const keys = [candidate.provider, candidate.source, candidate.sourceLabel, candidate.metadataSource]
+    .map(normalizeAdultMetadataProviderKey)
+    .filter(Boolean);
+  return (Array.isArray(sourceSettings) ? sourceSettings : []).find((source) => {
+    const sourceKeys = [source.id, source.name, source.providerIdKey]
+      .map(normalizeAdultMetadataProviderKey)
+      .filter(Boolean);
+    return sourceKeys.some((key) => keys.includes(key));
+  }) || null;
+}
+
+function buildAdultFullMetadataAggregation({ query = "", libraryType = "performers", profileType = "performer", person = {}, candidates = [], seedCandidate = null, sourceSettings = [] }) {
   const existingMetadata = person.metadata || person || {};
   const rows = [];
   if (existingMetadata && Object.keys(existingMetadata).length) {
@@ -5224,18 +9813,27 @@ function buildAdultFullMetadataAggregation({ query = "", libraryType = "performe
       matchScore: 100,
       metadata: existingMetadata,
       candidate: { provider: "existing", source: "Existing Homestead metadata", name: person.name || person.title || query },
-      weight: 58,
+      // Existing/local metadata is authoritative. External values remain visible
+      // as alternatives and conflicts until an administrator explicitly applies
+      // them through the review/editor workflow.
+      weight: 500,
       existing: true,
+      fieldPriority: {},
     });
   }
 
   const allCandidates = [seedCandidate, ...(candidates || [])].filter(Boolean);
   const seenCandidateKeys = new Set();
   allCandidates.forEach((candidate, index) => {
-    const key = `${candidate.provider || candidate.source || "source"}:${candidate.id || candidate.url || candidate.name || index}`.toLowerCase();
+    const key = adultMetadataCandidateDedupeKey(candidate, index);
     if (seenCandidateKeys.has(key)) return;
     seenCandidateKeys.add(key);
     const metadata = normalizeAdultMetadataCandidateForAggregation(candidate, existingMetadata);
+    const sourceConfig = findConfiguredAdultMetadataSource(candidate, sourceSettings);
+    const configuredPriority = Number.isFinite(Number(sourceConfig?.priority))
+      ? Number(sourceConfig.priority)
+      : candidate.sourcePriority;
+    const weightedCandidate = { ...candidate, sourcePriority: configuredPriority };
     rows.push({
       id: key,
       provider: candidate.provider || candidate.source || "provider",
@@ -5243,13 +9841,15 @@ function buildAdultFullMetadataAggregation({ query = "", libraryType = "performe
       sourceLabel: adultMetadataSourceLabel(candidate, index),
       sourceUrl: adultMetadataSourceUrl(candidate),
       confidence: candidate.confidence || 0,
-      sourcePriority: candidate.sourcePriority,
+      sourcePriority: configuredPriority,
+      fieldPriority: sourceConfig?.fieldPriority && typeof sourceConfig.fieldPriority === "object" ? sourceConfig.fieldPriority : {},
       matchScore: candidate.matchScore,
       lowConfidenceFallback: Boolean(candidate.lowConfidenceFallback),
       metadata,
       candidate,
-      weight: adultMetadataCandidateWeight(candidate, index),
+      weight: adultMetadataCandidateWeight(weightedCandidate, index),
       existing: false,
+      externalOnly: candidate.externalOnly === true || candidate.metadataCapability === "search-only" || candidate.fetchStatus === "external-only",
     });
   });
 
@@ -5263,14 +9863,30 @@ function buildAdultFullMetadataAggregation({ query = "", libraryType = "performe
     for (const row of rows) {
       const value = row.metadata?.[spec.key];
       if (isEmptyAdultMetadataValue(value)) continue;
+      if (["measurements", "measurementsRaw"].includes(spec.key) && /\?|unknown|n\/?a/i.test(String(value))) continue;
+      if ((spec.key === "biography" || spec.key === "description") && isWeakAdultMetadataText(value)) continue;
+      if (row.externalOnly && !["providerIds", "providerLinks", "externalIds", "externalLinks"].includes(spec.key)) continue;
+      if (row.provider === "models-com" && (!isEmptyAdultMetadataValue(existingMetadata[spec.key]) || existingMetadata.metadataLocks?.[spec.key] || existingMetadata.manualMetadataFields?.includes(spec.key))) continue;
       let fieldWeight = row.weight;
+      const configuredFieldPriority = Number(row.fieldPriority?.[spec.key]);
+      if (Number.isFinite(configuredFieldPriority) && configuredFieldPriority > 0) {
+        fieldWeight += Math.max(-30, 72 - configuredFieldPriority * 8);
+      }
+      const manualFields = Array.isArray(existingMetadata.manualMetadataFields) ? existingMetadata.manualMetadataFields : [];
+      const lockedFields = existingMetadata.metadataLocks && typeof existingMetadata.metadataLocks === "object" ? existingMetadata.metadataLocks : {};
+      if (row.existing && (manualFields.includes(spec.key) || lockedFields[spec.key])) fieldWeight = 10000;
+      if (spec.key === "braSize" && !isCompleteAdultBraSize(value) && fieldWeight < 10000) {
+        fieldWeight = row.existing ? -100 : fieldWeight - 70;
+      } else if (spec.key === "braSize" && isCompleteAdultBraSize(value)) {
+        fieldWeight += 18;
+      }
       if (typeof value === "string" && isWeakAdultMetadataText(value)) fieldWeight -= 28;
       if (spec.key === "description" && row.metadata?.biography && row.metadata.biography === value) fieldWeight -= 4;
       if (row.existing && typeof value === "string" && isWeakAdultMetadataText(value)) fieldWeight -= 36;
       options.push({
         value,
-        valuePreview: Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value),
-        source: row.sourceLabel,
+        valuePreview: adultMetadataValuePreview(value),
+        source: spec.key === "pantySize" && row.metadata?.pantySizeInferred ? `${row.sourceLabel} (inferred from hips)` : row.sourceLabel,
         sourceUrl: row.sourceUrl || "",
         provider: row.provider,
         confidence: row.confidence,
@@ -5331,26 +9947,19 @@ function buildAdultFullMetadataAggregation({ query = "", libraryType = "performe
 
   const sourceSummary = rows
     .filter((row) => !row.existing)
-    .map((row) => ({
-      provider: row.provider,
-      source: row.sourceLabel,
-      url: row.sourceUrl || "",
-      confidence: row.confidence,
-      priority: row.sourcePriority,
-      score: row.matchScore,
-      weight: row.weight,
-      lowConfidenceFallback: row.lowConfidenceFallback,
-      fields: ADULT_FULL_FETCH_FIELDS.filter((spec) => !isEmptyAdultMetadataValue(row.metadata?.[spec.key])).map((spec) => spec.key),
-    }))
+    .map((row) => {
+      const fields = ADULT_FULL_FETCH_FIELDS.filter((spec) => !isEmptyAdultMetadataValue(row.metadata?.[spec.key])).filter((spec) => !((spec.key === "biography" || spec.key === "description") && isWeakAdultMetadataText(row.metadata?.[spec.key]))).map((spec) => spec.key);
+      const meaningfulFields = fields.filter((key) => !ADULT_SOURCE_NON_MEANINGFUL_KEYS.has(key) && !ADULT_FULL_FETCH_COVERAGE_EXCLUDED_KEYS.has(key));
+      const status = row.externalOnly ? "external-only" : meaningfulFields.length >= 2 ? "complete" : meaningfulFields.length === 1 ? "limited" : "identity-only";
+      return { provider: row.provider, source: row.sourceLabel, url: row.sourceUrl || "", confidence: row.confidence, priority: row.sourcePriority, score: row.matchScore, weight: row.weight, lowConfidenceFallback: row.lowConfidenceFallback, status, externalOnly: row.externalOnly, fields, meaningfulFields };
+    })
     .sort((a, b) => b.weight - a.weight);
 
-  const coverage = {
-    totalFields: ADULT_FULL_FETCH_FIELDS.length,
-    filledFields: filledFields.length,
-    percent: Math.round((filledFields.length / Math.max(1, ADULT_FULL_FETCH_FIELDS.length)) * 100),
-    conflicts: conflicts.length,
-    sources: sourceSummary.length,
-  };
+  const coverageFields = filledFields.filter((key) => !ADULT_FULL_FETCH_COVERAGE_EXCLUDED_KEYS.has(key));
+  const totalCoverageFields = ADULT_FULL_FETCH_FIELDS.filter((spec) => !ADULT_FULL_FETCH_COVERAGE_EXCLUDED_KEYS.has(spec.key)).length;
+  const contributingSources = sourceSummary.filter((source) => ["complete", "limited"].includes(source.status));
+  const reviewConflicts = conflicts.filter((conflict) => !ADULT_FULL_FETCH_COVERAGE_EXCLUDED_KEYS.has(conflict.field));
+  const coverage = { totalFields: totalCoverageFields, filledFields: coverageFields.length, percent: Math.round((coverageFields.length / Math.max(1, totalCoverageFields)) * 100), conflicts: reviewConflicts.length, sources: contributingSources.length, availableSources: sourceSummary.length, externalOnlySources: sourceSummary.filter((source) => source.status === "external-only").length, identityOnlySources: sourceSummary.filter((source) => source.status === "identity-only").length };
 
   const fieldGroups = ADULT_FULL_FETCH_FIELD_GROUPS.map((group) => ({
     ...group,
@@ -5361,21 +9970,58 @@ function buildAdultFullMetadataAggregation({ query = "", libraryType = "performe
 
   const reviewNotes = [];
   if (!sourceSummary.length) reviewNotes.push("No external metadata sources returned a usable candidate yet.");
-  if (conflicts.length) reviewNotes.push(`${conflicts.length} field${conflicts.length === 1 ? " has" : "s have"} conflicting values and should be reviewed before saving.`);
+  if (coverage.externalOnlySources) reviewNotes.push(`${coverage.externalOnlySources} source${coverage.externalOnlySources === 1 ? " is" : "s are"} available for external browsing but did not contribute profile metadata.`);
+  if (coverage.identityOnlySources) reviewNotes.push(`${coverage.identityOnlySources} source${coverage.identityOnlySources === 1 ? " returned" : "s returned"} only an identity match and did not increase metadata coverage.`);
+  if (reviewConflicts.length) reviewNotes.push(`${reviewConflicts.length} field${reviewConflicts.length === 1 ? " has" : "s have"} conflicting values and should be reviewed before saving.`);
   if (sourceSummary.some((source) => source.lowConfidenceFallback)) reviewNotes.push("Some values came from low-confidence fallback sources; they are source-tagged for review.");
 
   return {
     metadata: Object.fromEntries(Object.entries(mergedMetadata).filter(([, value]) => !isEmptyAdultMetadataValue(value))),
     fieldSources,
     fieldGroups,
-    conflicts,
+    conflicts: reviewConflicts,
     coverage,
     sourceSummary,
     reviewNotes,
   };
 }
 
-app.post("/api/metadata/adult/person/full-fetch", async (req, res) => {
+function collectAdultPersonMediaCandidates(candidates = []) {
+  const output = [];
+  const seen = new Set();
+  const add = (value, source = "External source", kind = "photo") => {
+    const url = typeof value === "string" ? value : value?.url || value?.src || value?.image || value?.sourceUrl || "";
+    if (!/^https?:\/\//i.test(String(url || "")) || seen.has(url)) return;
+    seen.add(url);
+    output.push({
+      id: `media-${output.length + 1}`,
+      url,
+      source,
+      kind: value?.kind || kind,
+      title: value?.title || value?.label || `Photo ${output.length + 1}`,
+      suspectedSynthetic: value?.suspectedSynthetic === true || value?.aiGenerated === true || /(?:deepfake|ai[-_ ]?generated|synthetic)/i.test(`${value?.label || ""} ${value?.title || ""}`),
+      ageStatus: value?.ageStatus || "",
+      requiresAgeReview: value?.requiresAgeReview === true,
+      selected: value?.selected !== undefined ? value.selected !== false : !(value?.requiresAgeReview || value?.requiresReview),
+      reviewReason: value?.reviewReason || "",
+      sourcePageUrl: value?.sourcePageUrl || value?.sourceUrl || "",
+    });
+  };
+  for (const candidate of candidates) {
+    const source = candidate?.source || candidate?.provider || "External source";
+    [candidate?.profileImage, candidate?.image, candidate?.poster, candidate?.thumbnail].forEach((value) => add(value, source));
+    [candidate?.images, candidate?.photos, candidate?.promoPhotos, candidate?.moviePhotos, candidate?.mediaCandidates].forEach((collection) => {
+      if (Array.isArray(collection)) collection.forEach((value) => add(value, source));
+    });
+    [candidate?.galleryUrls, candidate?.galleries].forEach((collection) => {
+      if (Array.isArray(collection)) collection.forEach((value) => add(value, source, "gallery"));
+    });
+  }
+  return output.slice(0, 120);
+}
+
+app.post("/api/metadata/adult/person/full-fetch", homesteadAccess.requireAdmin, async (req, res) => {
+  let activityJob = null;
   try {
     const { person = {}, query = "", profileType = "", libraryType = "", candidate = null, identityAnchor = null, saveToProfile = false } = req.body || {};
     const searchQuery = cleanMetadataQuery(query || person.name || person.title || candidate?.name || candidate?.title || "");
@@ -5386,14 +10032,47 @@ app.post("/api/metadata/adult/person/full-fetch", async (req, res) => {
       return res.status(400).json({ ok: false, message: "Missing person name/query" });
     }
 
-    const setupConfig = readSetupConfig();
-    const searchedCandidates = await searchAdultMetadata(searchQuery, {
-      libraryType: normalizedLibrary,
-      whisparr: normalizedLibrary === "performers" ? getWhisparrConfig() : {},
-      customSourceUrls: getCustomMetadataSourceUrls(setupConfig, normalizedLibrary),
-      limit: 20,
-      wikidataLimit: normalizedLibrary === "celebrities" ? 8 : 0,
+    activityJob = activityJobStore.create({
+      activityType: "metadata-search",
+      status: "processing",
+      title: `Metadata search — ${searchQuery}`,
+      libraryId: normalizedLibrary,
+      source: "Adult source packs",
+      notes: "Searching enabled person sources and comparing field-level provenance.",
+      progress: { current: 0, total: 3, label: "Searching providers" },
+      initiatedBy: { id: req.homesteadUser?.id || "", name: req.homesteadUser?.displayName || req.homesteadUser?.username || "" },
     });
+
+    const setupConfig = readSetupConfig();
+    let searchedCandidates = [];
+    let metadataSearchTimedOut = false;
+    const providerWarnings = [];
+    try {
+      const configuredSources = getConfiguredAdultSources(setupConfig);
+      const sourceEnabled = (wantedId) => !configuredSources.some((source) => String(source.id || source.name || "").replace(/[^a-z0-9]/gi, "").toLowerCase() === String(wantedId).replace(/[^a-z0-9]/gi, "").toLowerCase() && source.enabled === false);
+      searchedCandidates = await runWithTimeout(() => searchAdultMetadata(searchQuery, {
+        libraryType: normalizedLibrary,
+        whisparr: normalizedLibrary === "performers" ? getWhisparrConfig() : {},
+        customSourceUrls: getCustomMetadataSourceUrls(setupConfig, normalizedLibrary),
+        modelsEnabled: sourceEnabled("models-com"),
+        teenIdolsEnabled: sourceEnabled("teenidols4you"),
+        celebrityTallEnabled: sourceEnabled("celebritytall"),
+        celebrityInsideEnabled: sourceEnabled("celebrityinside"),
+        theNudeEnabled: sourceEnabled("thenude"),
+        limit: 36,
+        wikidataLimit: ["celebrities", "performers"].includes(normalizedLibrary) ? 8 : 0,
+      }), {
+        timeoutMs: ADULT_PERSON_FULL_FETCH_TIMEOUT_MS,
+        label: "External adult metadata providers",
+      });
+    } catch (error) {
+      metadataSearchTimedOut = error?.code === "ASYNC_OPERATION_TIMEOUT";
+      const warning = metadataSearchTimedOut
+        ? `${error.message} The selected result remains available so you can review or create the profile without waiting.`
+        : `External metadata expansion failed: ${error.message || "Unknown provider error"}. The selected result remains available.`;
+      providerWarnings.push(warning);
+      console.warn("Adult person provider expansion did not complete:", error.message || error);
+    }
     const anchor = identityAnchor || candidate || { name: searchQuery, profileType: normalizedProfileType, libraryType: normalizedLibrary };
     const compatibleCandidates = searchedCandidates.filter((entry) => candidateMatchesAdultIdentityAnchor(entry, anchor, normalizedProfileType));
     const candidates = [candidate, ...compatibleCandidates].filter(Boolean).filter((entry, index, list) => {
@@ -5409,8 +10088,21 @@ app.post("/api/metadata/adult/person/full-fetch", async (req, res) => {
       person,
       candidates,
       seedCandidate: candidate,
+      sourceSettings: getConfiguredAdultSources(setupConfig),
+    });
+    if (providerWarnings.length) {
+      aggregation.reviewNotes = [...(aggregation.reviewNotes || []), ...providerWarnings];
+    }
+    activityJobStore.update(activityJob.id, {
+      progress: { current: 2, total: 3, label: "Comparing source values", detail: `${aggregation.coverage.sources} contributing · ${aggregation.coverage.availableSources} available` },
+      sources: aggregation.sourceSummary.map((source) => ({ name: source.source, provider: source.provider, status: source.status, fields: source.fields, meaningfulFields: source.meaningfulFields, url: source.url })),
     });
 
+    const canonicalMetadata = augmentAdultBodyMetadata({}, {
+      ...aggregation.metadata,
+      metadataFieldSources: aggregation.fieldSources,
+    });
+    aggregation.metadata = canonicalMetadata;
     let saveResult = null;
     if (saveToProfile) {
       const profileDir = findAdultProfileDir({
@@ -5419,22 +10111,26 @@ app.post("/api/metadata/adult/person/full-fetch", async (req, res) => {
         profileName: person.name || person.title || searchQuery,
       });
       if (profileDir) {
-        saveResult = writeAdultProfileMetadataFile(profileDir, aggregation.metadata, best, { overwrite: true });
+        saveResult = writeAdultProfileMetadataFile(profileDir, canonicalMetadata, best, { overwrite: true });
       }
     }
 
-    res.json({
+    const responsePayload = {
       ok: true,
       phase: 3,
       query: searchQuery,
       libraryType: normalizedLibrary,
       profileType: normalizedProfileType,
+      partial: providerWarnings.length > 0,
+      metadataSearchTimedOut,
+      providerWarnings,
       best,
       candidate: best,
       anchorCandidate: candidate || best,
       candidates: candidates.map((entry) => normalizeAdultPersonCandidateForUi(entry, searchQuery, normalizedProfileType)),
-      metadata: aggregation.metadata,
-      mergedMetadata: aggregation.metadata,
+      mediaCandidates: collectAdultPersonMediaCandidates(candidates),
+      metadata: saveResult?.metadata || canonicalMetadata,
+      mergedMetadata: saveResult?.metadata || canonicalMetadata,
       aggregation,
       fieldSources: aggregation.fieldSources,
       fieldGroups: aggregation.fieldGroups,
@@ -5443,11 +10139,29 @@ app.post("/api/metadata/adult/person/full-fetch", async (req, res) => {
       sourceSummary: aggregation.sourceSummary,
       reviewNotes: aggregation.reviewNotes,
       saveResult,
-      message: aggregation.sourceSummary.length
-        ? `Aggregated ${aggregation.coverage.filledFields} metadata fields from ${aggregation.sourceSummary.length} source${aggregation.sourceSummary.length === 1 ? "" : "s"}.`
-        : "No metadata candidates found yet; saved source links remain available for manual review.",
-    });
+      message: saveResult
+        ? `Saved ${aggregation.coverage.filledFields} combined profile fields from ${aggregation.coverage.sources} contributing source${aggregation.coverage.sources === 1 ? "" : "s"}. Existing, manual, and locked values were preserved.`
+        : metadataSearchTimedOut
+        ? `Provider expansion stopped after ${Math.ceil(ADULT_PERSON_FULL_FETCH_TIMEOUT_MS / 1000)} seconds. Loaded the metadata already attached to the selected result; review it, retry, or create the profile.`
+        : providerWarnings.length
+          ? providerWarnings[0]
+          : aggregation.sourceSummary.length
+            ? `Aggregated ${aggregation.coverage.filledFields} profile fields from ${aggregation.coverage.sources} contributing source${aggregation.coverage.sources === 1 ? "" : "s"}; ${aggregation.coverage.availableSources} source${aggregation.coverage.availableSources === 1 ? " was" : "s were"} available overall.`
+            : "No metadata candidates found yet; saved source links remain available for manual review.",
+    };
+    activityJobStore.complete(activityJob.id, {
+      progress: { current: 3, total: 3, label: "Metadata search complete" },
+      query: searchQuery,
+      sourceCount: aggregation.coverage.sources,
+      availableSourceCount: aggregation.coverage.availableSources,
+      externalOnlySourceCount: aggregation.coverage.externalOnlySources,
+      fieldCount: aggregation.coverage.filledFields,
+      conflictCount: aggregation.conflicts.length,
+      partial: providerWarnings.length > 0,
+    }, responsePayload.message);
+    res.json(responsePayload);
   } catch (error) {
+    if (activityJob?.id) activityJobStore.fail(activityJob.id, error);
     console.error("Adult person full fetch failed:", error);
     res.status(500).json({ ok: false, message: error.message || "Adult person full fetch failed" });
   }
@@ -5518,7 +10232,7 @@ function appendAdultMediaImportRecords(profileDir, records = []) {
   return { metadataPath, count: cleanRecords.length };
 }
 
-app.post("/api/metadata/adult/person/import-photos", async (req, res) => {
+app.post("/api/metadata/adult/person/import-photos", homesteadAccess.requireAdmin, async (req, res) => {
   try {
     const {
       person = {},
@@ -5637,7 +10351,7 @@ app.get("/api/metadata/adult/search", async (req, res) => {
   }
 });
 
-app.post("/api/metadata/adult/fetch", async (req, res) => {
+app.post("/api/metadata/adult/fetch", homesteadAccess.requireAdmin, async (req, res) => {
   try {
     const { person = {}, query = "", libraryType = "" } = req.body || {};
     const searchQuery = cleanMetadataQuery(query || person.name || person.title || person.id || "");
@@ -6006,9 +10720,334 @@ app.post("/api/metadata/social/fetch", async (req, res) => {
 
 
 
-app.post("/api/metadata/adult/apply", async (req, res) => {
+const ADULT_MANUAL_EDIT_FIELDS = [
+  "name", "sortName", "birthday", "birthDate", "birthPlace", "placeOfBirth",
+  "nationality", "biography", "description", "aliases", "alsoKnownAs",
+  "relationshipStatus", "status", "height", "weight", "weightUnit",
+  "measurements", "measurementsRaw", "bust", "waist", "hips", "braBand",
+  "cupSize", "braSize", "pantySize", "pantySizeSystem", "shoeSize",
+  "dressSize", "clothingSize", "hairColor", "eyeColor", "tattoos",
+  "piercings", "studios", "agencies", "careerStart", "careerEnd",
+  "officialWebsite", "notes",
+];
+
+const ADULT_METADATA_FIELD_LABELS = {
+  name: "Name", sortName: "Sort name", birthday: "Birthday", birthDate: "Birth date",
+  birthPlace: "Birthplace", placeOfBirth: "Place of birth", nationality: "Nationality",
+  biography: "Biography", description: "Description", aliases: "Aliases",
+  alsoKnownAs: "Also known as", relationshipStatus: "Relationship status",
+  status: "Status", height: "Height", weight: "Weight", measurements: "Measurements",
+  measurementsRaw: "Measurements", bust: "Bust", waist: "Waist", hips: "Hips",
+  braBand: "Bra band", cupSize: "Cup size", braSize: "Bra size",
+  pantySize: "Panty size", pantySizeSystem: "Panty size system",
+  shoeSize: "Shoe size", dressSize: "Dress size", clothingSize: "Clothing size",
+  hairColor: "Hair color", eyeColor: "Eye color", tattoos: "Tattoos",
+  piercings: "Piercings", studios: "Studios", agencies: "Agencies",
+  careerStart: "Career start", careerEnd: "Career end", officialWebsite: "Official website",
+  notes: "Notes",
+};
+
+const ADULT_BODY_TIMELINE_FIELDS = new Set([
+  "height", "weight", "measurements", "measurementsRaw", "bust", "waist", "hips",
+  "braBand", "cupSize", "braSize", "pantySize", "pantySizeSystem", "shoeSize",
+  "dressSize", "clothingSize", "hairColor", "eyeColor", "tattoos", "piercings",
+]);
+
+const ADULT_SIZING_TIMELINE_FIELDS = new Set([
+  "height", "weight", "measurements", "measurementsRaw", "bust", "waist", "hips",
+  "braBand", "cupSize", "braSize", "pantySize", "pantySizeSystem", "shoeSize",
+  "dressSize", "clothingSize",
+]);
+
+function normalizeAdultManualEditValue(field, value) {
+  if (["aliases", "alsoKnownAs", "tattoos", "piercings", "studios", "agencies"].includes(field)) {
+    if (Array.isArray(value)) return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+    return String(value || "").split(/[,\n]+/).map((entry) => entry.trim()).filter(Boolean);
+  }
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function validateAdultManualEditPatch(patch = {}) {
+  if (patch.braBand !== undefined && patch.braBand !== "") {
+    const band = Number(patch.braBand);
+    if (!Number.isFinite(band) || band < 24 || band > 80 || band % 2 !== 0) throw new Error("Bra band must be an even number from 24 through 80.");
+  }
+  if (patch.cupSize !== undefined && patch.cupSize !== "" && !/^[A-Z]{1,3}(?:\/[A-Z]{1,3})?$/i.test(patch.cupSize)) throw new Error("Cup size must use letters, such as B, DD, or D/DD.");
+  if (patch.pantySize !== undefined && patch.pantySize !== "" && !/^[A-Z0-9][A-Z0-9 .+\/-]{0,19}$/i.test(patch.pantySize)) throw new Error("Panty size must be a recognized number or size label up to 20 characters.");
+  if (patch.birthday && Number.isNaN(new Date(`${patch.birthday}T12:00:00Z`).getTime())) throw new Error("Birthday must be a valid date.");
+  for (const field of ["height", "weight", "bust", "waist", "hips", "shoeSize", "dressSize"]) {
+    if (patch[field] !== undefined && String(patch[field]).length > 40) throw new Error(`${ADULT_METADATA_FIELD_LABELS[field] || field} is too long.`);
+  }
+}
+
+function normalizeAdultEffectiveDate(value = "") {
+  return normalizeAdultMetadataEffectiveAt(value, "day").effectiveAt;
+}
+
+function adultMetadataTimelinePreview(value) {
+  if (Array.isArray(value)) return value.join(", ") || "—";
+  if (value && typeof value === "object") return JSON.stringify(value);
+  const text = String(value ?? "").trim();
+  return text || "—";
+}
+
+function applyAdultMetadataUpdate(request = {}, actor = {}) {
+    const {
+      person = {}, patch: rawPatch = {}, effectiveAt = "", effectivePrecision = "day",
+      addToTimeline = true, correction = false, lockFields = true, note = "",
+      source = "Manual update", sourceType = "manual", combineChanges = true,
+      showRecordedAt = true, revertsEventId = "",
+    } = request;
+    const libraryType = person.library || person.libraryType || "personal";
+    const profileDir = findAdultProfileDir({
+      libraryType,
+      profileId: person.id || "",
+      profileName: person.name || person.title || "",
+      profileDir: person.profileDir || person.folderPath || person.sourcePath || "",
+    });
+    if (!profileDir) {
+      const error = new Error("Could not find the profile folder. Check the profile folder mapping.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const currentFile = readAdultProfileMetadataFile(profileDir);
+    const currentMetadata = { ...currentFile, ...(currentFile.metadata || {}) };
+    const requestedPatch = {};
+    for (const field of ADULT_MANUAL_EDIT_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(rawPatch || {}, field)) continue;
+      requestedPatch[field] = normalizeAdultManualEditValue(field, rawPatch[field]);
+    }
+    validateAdultManualEditPatch(requestedPatch);
+
+    const explicitlyChangedFields = new Set(Object.keys(requestedPatch));
+    if (Object.prototype.hasOwnProperty.call(requestedPatch, "braSize")) {
+      const match = String(requestedPatch.braSize || "").match(/^(\d{2,3})\s*([A-Za-z]+(?:\/[A-Za-z]+)?)?$/);
+      if (match) {
+        if (!Object.prototype.hasOwnProperty.call(requestedPatch, "braBand")) requestedPatch.braBand = match[1] || "";
+        if (!Object.prototype.hasOwnProperty.call(requestedPatch, "cupSize") && match[2]) requestedPatch.cupSize = match[2].toUpperCase();
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(requestedPatch, "braBand") || Object.prototype.hasOwnProperty.call(requestedPatch, "cupSize")) {
+      const band = requestedPatch.braBand ?? currentMetadata.braBand ?? currentMetadata.body?.braBand ?? "";
+      const cup = requestedPatch.cupSize ?? currentMetadata.cupSize ?? currentMetadata.body?.cupSize ?? "";
+      requestedPatch.braSize = `${String(band || "").trim()}${String(cup || "").trim()}`;
+    }
+
+    const hiddenTimelineFields = !explicitlyChangedFields.has("braSize") && (explicitlyChangedFields.has("braBand") || explicitlyChangedFields.has("cupSize")) ? ["braSize"] : [];
+    const changes = buildAdultMetadataChanges(currentMetadata, requestedPatch, ADULT_METADATA_FIELD_LABELS, hiddenTimelineFields)
+      .map((change) => ({ ...change, timelineType: ADULT_SIZING_TIMELINE_FIELDS.has(change.field) ? "body" : "metadata" }));
+    if (!changes.length) return { ok: true, unchanged: true, metadata: currentMetadata, message: "No metadata values changed." };
+
+    const recordedAt = new Date().toISOString();
+    const normalizedEffective = normalizeAdultMetadataEffectiveAt(effectiveAt, effectivePrecision);
+    const normalizedEffectiveAt = normalizedEffective.effectiveAt;
+    const changedFields = changes.map((change) => change.field);
+    const manualMetadataFieldSet = new Set(Array.isArray(currentMetadata.manualMetadataFields) ? currentMetadata.manualMetadataFields : []);
+    const metadataLocks = { ...(currentMetadata.metadataLocks || {}) };
+    const metadataFieldSources = { ...(currentMetadata.metadataFieldSources || {}) };
+    for (const field of changedFields) {
+      if (lockFields) {
+        metadataLocks[field] = true;
+        manualMetadataFieldSet.add(field);
+      } else {
+        delete metadataLocks[field];
+        manualMetadataFieldSet.delete(field);
+      }
+      metadataFieldSources[field] = { source: String(source || "Manual update"), sourceType: String(sourceType || "manual"), manual: sourceType === "manual", effectiveAt: normalizedEffectiveAt, effectivePrecision: normalizedEffective.effectivePrecision, fetchedAt: recordedAt, updatedAt: recordedAt };
+    }
+
+    const bodyPatch = {};
+    for (const field of changedFields.filter((field) => ADULT_BODY_TIMELINE_FIELDS.has(field))) bodyPatch[field] = requestedPatch[field];
+    const timeline = Array.isArray(currentMetadata.timeline) ? [...currentMetadata.timeline] : [];
+    const timelineEntries = addToTimeline ? buildAdultMetadataTimelineEntries({
+      changes,
+      effectiveAt: normalizedEffectiveAt,
+      effectivePrecision: normalizedEffective.effectivePrecision,
+      recordedAt,
+      source,
+      note,
+      correction,
+      combineChanges,
+      showRecordedAt,
+      actor,
+    }).map((entry) => ({ ...entry, revertsEventId: String(revertsEventId || "") })) : [];
+    timeline.unshift(...timelineEntries);
+
+    const historyId = `metadata-history-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    const metadataChangeHistory = Array.isArray(currentMetadata.metadataChangeHistory) ? [...currentMetadata.metadataChangeHistory] : [];
+    metadataChangeHistory.unshift({
+      id: historyId,
+      recordedAt,
+      effectiveAt: normalizedEffectiveAt,
+      effectivePrecision: normalizedEffective.effectivePrecision,
+      source: String(source || "Manual update"),
+      sourceType: String(sourceType || "manual"),
+      correction: Boolean(correction),
+      revertsEventId: String(revertsEventId || ""),
+      actor: { id: actor.id || "", name: actor.displayName || actor.username || "" },
+      changes: changes.map(({ hiddenFromTimeline, timelineType, ...change }) => change),
+    });
+
+    const metadataPatch = {
+      ...requestedPatch,
+      body: { ...(currentMetadata.body || currentMetadata.bodyDetails || {}), ...bodyPatch, sourceName: String(source || "Manual update"), confidence: "manual", lastFetchedAt: recordedAt },
+      bodyDetails: { ...(currentMetadata.bodyDetails || currentMetadata.body || {}), ...bodyPatch, sourceName: String(source || "Manual update"), confidence: "manual", lastFetchedAt: recordedAt },
+      manualMetadataFields: Array.from(manualMetadataFieldSet),
+      metadataLocks,
+      metadataFieldSources,
+      manualMetadataEditedAt: recordedAt,
+      timeline: timeline.slice(0, 500),
+      metadataChangeHistory: metadataChangeHistory.slice(0, 500),
+      timelineUpdatedAt: addToTimeline ? recordedAt : currentMetadata.timelineUpdatedAt,
+    };
+    const result = writeAdultProfileMetadataFile(profileDir, metadataPatch, null, { overwrite: true, allowEmpty: true });
+    return { ok: true, profileDir, metadataPath: result.metadataPath, metadata: result.metadata, file: result.file, changes, timelineEntry: timelineEntries[0] || null, timelineEntries, historyId, scanRequested: false, message: `${changes.filter((change) => !change.hiddenFromTimeline).length} metadata field${changes.filter((change) => !change.hiddenFromTimeline).length === 1 ? "" : "s"} updated${addToTimeline ? " and added to the timeline" : ""}.` };
+}
+
+app.post("/api/metadata/adult/edit", homesteadAccess.requireAdmin, (req, res) => {
   try {
-    const { person = {}, metadata = {}, candidate = null, libraryType: bodyLibraryType = "" } = req.body || {};
+    const result = applyAdultMetadataUpdate(req.body || {}, req.homesteadUser || {});
+    homesteadAccess.recordAudit?.("adult.metadata.updated", req, { libraryType: req.body?.person?.library || "personal", profileId: req.body?.person?.id || "", fields: (result.changes || []).map((change) => change.field), effectiveAt: result.timelineEntry?.effectiveAt || "", historyId: result.historyId || "" });
+    res.json(result);
+  } catch (error) {
+    console.error("Adult manual metadata edit failed:", error);
+    res.status(error.statusCode || 500).json({ ok: false, message: error.message || "Adult metadata edit failed" });
+  }
+});
+
+app.get("/api/metadata/adult/approvals", homesteadAccess.requireAdmin, (req, res) => {
+  const items = activityJobStore.read()
+    .filter((item) => item.activityType === "metadata-approval")
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, count: items.length, pending: items.filter((item) => item.status === "needs-attention").length, items });
+});
+
+app.post("/api/metadata/adult/approvals/:approvalId/decision", homesteadAccess.requireAdmin, (req, res) => {
+  try {
+    const approval = activityJobStore.read().find((item) => item.id === req.params.approvalId && item.activityType === "metadata-approval");
+    if (!approval) return res.status(404).json({ ok: false, message: "Metadata approval was not found." });
+    if (approval.status !== "needs-attention") return res.status(409).json({ ok: false, message: "This metadata proposal has already been reviewed." });
+    const decision = String(req.body?.decision || "").trim().toLowerCase();
+    if (!["accept", "reject", "keep-lock"].includes(decision)) return res.status(400).json({ ok: false, message: "Choose Accept, Reject, or Keep current and lock." });
+
+    const proposal = approval.proposal || {};
+    const availablePatch = proposal.patch && typeof proposal.patch === "object" ? proposal.patch : {};
+    const selectedFields = Array.isArray(req.body?.fields) && req.body.fields.length
+      ? new Set(req.body.fields.map((field) => String(field)))
+      : new Set(Object.keys(availablePatch));
+    const patch = Object.fromEntries(Object.entries(availablePatch).filter(([field]) => selectedFields.has(field)));
+    if (!Object.keys(patch).length) return res.status(400).json({ ok: false, message: "Select at least one proposed field." });
+
+    let updateResult = null;
+    if (decision === "accept") {
+      updateResult = applyAdultMetadataUpdate({
+        person: proposal.person || {},
+        patch,
+        effectiveAt: String(req.body?.effectiveAt || ""),
+        effectivePrecision: req.body?.effectivePrecision || proposal.effectivePrecision || "unknown",
+        addToTimeline: req.body?.addToTimeline !== false,
+        correction: false,
+        lockFields: false,
+        source: proposal.source || approval.source || "External provider",
+        sourceType: proposal.sourceType || "external-provider",
+        combineChanges: req.body?.combineChanges !== false,
+        showRecordedAt: req.body?.showRecordedAt !== false,
+        note: String(req.body?.note || "").trim(),
+      }, req.homesteadUser || {});
+    } else if (decision === "keep-lock") {
+      const person = proposal.person || {};
+      const profileDir = findAdultProfileDir({
+        libraryType: person.library || person.libraryType || "personal",
+        profileId: person.id || "",
+        profileName: person.name || "",
+        profileDir: person.profileDir || "",
+      });
+      if (!profileDir) return res.status(404).json({ ok: false, message: "The profile folder could not be found." });
+      const currentFile = readAdultProfileMetadataFile(profileDir);
+      const currentMetadata = { ...currentFile, ...(currentFile.metadata || {}) };
+      const metadataLocks = { ...(currentMetadata.metadataLocks || {}) };
+      const manualFields = new Set(Array.isArray(currentMetadata.manualMetadataFields) ? currentMetadata.manualMetadataFields : []);
+      Object.keys(patch).forEach((field) => { metadataLocks[field] = true; manualFields.add(field); });
+      const saved = writeAdultProfileMetadataFile(profileDir, {
+        metadataLocks,
+        manualMetadataFields: Array.from(manualFields),
+        manualMetadataEditedAt: new Date().toISOString(),
+      }, null, { overwrite: true, allowEmpty: true });
+      updateResult = { ok: true, metadata: saved.metadata, lockedFields: Object.keys(patch), message: `Kept current values and locked ${Object.keys(patch).length} field${Object.keys(patch).length === 1 ? "" : "s"}.` };
+    } else {
+      updateResult = { ok: true, rejectedFields: Object.keys(patch), message: `Rejected ${Object.keys(patch).length} proposed field change${Object.keys(patch).length === 1 ? "" : "s"}.` };
+    }
+
+    const remainingPatch = Object.fromEntries(Object.entries(availablePatch).filter(([field]) => !selectedFields.has(field)));
+    const remainingChanges = (Array.isArray(proposal.changes) ? proposal.changes : []).filter((change) => Object.prototype.hasOwnProperty.call(remainingPatch, change.field));
+    const decisionRecord = { decision, fields: Object.keys(patch), reviewedAt: new Date().toISOString(), historyId: updateResult.historyId || "", timelineEventId: updateResult.timelineEntry?.id || "" };
+    const previousDecisions = Array.isArray(approval.result?.decisions) ? approval.result.decisions : [];
+    const item = activityJobStore.update(approval.id, {
+      status: remainingChanges.length ? "needs-attention" : "completed",
+      title: remainingChanges.length ? `${proposal.person?.name || "Profile"} — ${remainingChanges.length} proposed metadata change${remainingChanges.length === 1 ? "" : "s"}` : approval.title,
+      completedAt: remainingChanges.length ? "" : new Date().toISOString(),
+      notes: remainingChanges.length ? `${updateResult.message} ${remainingChanges.length} proposed field${remainingChanges.length === 1 ? " remains" : "s remain"} to review.` : updateResult.message,
+      proposal: remainingChanges.length ? { ...proposal, patch: remainingPatch, changes: remainingChanges } : proposal,
+      progress: remainingChanges.length ? { current: remainingChanges.length, total: remainingChanges.length, percent: 100, label: "Awaiting approval" } : approval.progress,
+      result: { decisions: [...previousDecisions, decisionRecord], lastDecision: decisionRecord },
+      error: "",
+    });
+    homesteadAccess.recordAudit?.("adult.metadata.approval-reviewed", req, {
+      approvalId: approval.id,
+      decision,
+      libraryType: proposal.person?.library || "personal",
+      profileId: proposal.person?.id || "",
+      fields: Object.keys(patch),
+    });
+    res.json({ ok: true, decision, item, updateResult, ...activityJobStore.summary() });
+  } catch (error) {
+    console.error("Adult metadata approval failed:", error);
+    res.status(error.statusCode || 500).json({ ok: false, message: error.message || "Unable to review metadata proposal." });
+  }
+});
+
+app.post("/api/metadata/adult/revert", homesteadAccess.requireAdmin, (req, res) => {
+  try {
+    const person = req.body?.person || {};
+    const profileDir = findAdultProfileDir({ libraryType: person.library || "personal", profileId: person.id || "", profileName: person.name || person.title || "", profileDir: person.profileDir || person.folderPath || person.sourcePath || "" });
+    if (!profileDir) return res.status(404).json({ ok: false, message: "Could not find the profile folder." });
+    const currentFile = readAdultProfileMetadataFile(profileDir);
+    const currentMetadata = { ...currentFile, ...(currentFile.metadata || {}) };
+    const eventId = String(req.body?.eventId || "");
+    const entry = [...(currentMetadata.timeline || []), ...(currentMetadata.metadataChangeHistory || [])].find((item) => item.id === eventId);
+    if (!entry) return res.status(404).json({ ok: false, message: "The saved metadata change was not found." });
+    const revert = createAdultMetadataRevertPatch(entry, currentMetadata);
+    if (revert.conflicts.length && req.body?.confirmConflicts !== true) {
+      return res.status(409).json({ ok: false, code: "CURRENT_VALUE_CHANGED", conflicts: revert.conflicts, message: "Some fields changed after this event. Confirm before replacing those newer values." });
+    }
+    const result = applyAdultMetadataUpdate({
+      person,
+      patch: revert.patch,
+      effectiveAt: req.body?.effectiveAt || new Date().toISOString(),
+      effectivePrecision: req.body?.effectivePrecision || "time",
+      addToTimeline: true,
+      correction: true,
+      lockFields: req.body?.lockFields !== false,
+      source: "Undo/revert",
+      sourceType: "manual",
+      note: req.body?.note || `Reverted ${entry.title || "metadata change"}.`,
+      combineChanges: true,
+      showRecordedAt: true,
+      revertsEventId: eventId,
+    }, req.homesteadUser || {});
+    homesteadAccess.recordAudit?.("adult.metadata.reverted", req, { profileId: person.id || "", eventId, fields: Object.keys(revert.patch) });
+    res.json({ ...result, revertedEventId: eventId });
+  } catch (error) {
+    console.error("Adult metadata revert failed:", error);
+    res.status(error.statusCode || 500).json({ ok: false, message: error.message || "Adult metadata revert failed" });
+  }
+});
+
+app.post("/api/metadata/adult/apply", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const { person = {}, metadata = {}, candidate = null, libraryType: bodyLibraryType = "", fillMissingOnly = false } = req.body || {};
     const libraryType = bodyLibraryType || person.library || "personal";
     const profileDir = findAdultProfileDir({
       libraryType,
@@ -6023,17 +11062,36 @@ app.post("/api/metadata/adult/apply", async (req, res) => {
       });
     }
 
-    const result = writeAdultProfileMetadataFile(profileDir, augmentAdultBodyMetadata(candidate || {}, metadata), candidate);
-    runMediaScan(adultLibraryIdFromProfileLibrary(libraryType));
+    const currentFile = readAdultProfileMetadataFile(profileDir);
+    const currentMetadata = { ...currentFile, ...(currentFile.metadata || {}) };
+    let incomingMetadata = augmentAdultBodyMetadata(candidate || {}, metadata);
+    const addedFields = listNewAdultMetadataFields(currentMetadata, incomingMetadata);
+    if (candidate) {
+      const protectedFields = new Set([
+        ...(Array.isArray(currentMetadata.manualMetadataFields) ? currentMetadata.manualMetadataFields : []),
+        ...Object.entries(currentMetadata.metadataLocks || {}).filter(([, locked]) => locked === true).map(([field]) => field),
+      ]);
+      incomingMetadata = { ...incomingMetadata };
+      for (const field of protectedFields) {
+        if (Object.prototype.hasOwnProperty.call(currentMetadata, field)) incomingMetadata[field] = currentMetadata[field];
+        if (incomingMetadata.body && Object.prototype.hasOwnProperty.call(currentMetadata.body || {}, field)) incomingMetadata.body = { ...incomingMetadata.body, [field]: currentMetadata.body[field] };
+        if (incomingMetadata.bodyDetails && Object.prototype.hasOwnProperty.call(currentMetadata.bodyDetails || {}, field)) incomingMetadata.bodyDetails = { ...incomingMetadata.bodyDetails, [field]: currentMetadata.bodyDetails[field] };
+      }
+    }
+    if (fillMissingOnly) incomingMetadata = mergeMissingAdultMetadata(currentMetadata, incomingMetadata);
+    const result = writeAdultProfileMetadataFile(profileDir, incomingMetadata, candidate);
     res.json({
       ok: true,
       profileDir,
       metadataPath: result.metadataPath,
       metadata: result.metadata,
       file: result.file,
-      scanRequested: true,
-      scanLibrary: adultLibraryIdFromProfileLibrary(libraryType),
-      message: "Metadata saved and this profile was queued for immediate reindexing.",
+      fillMissingOnly: Boolean(fillMissingOnly),
+      addedFields: fillMissingOnly ? addedFields : [],
+      scanRequested: false,
+      message: fillMissingOnly
+        ? `${addedFields.length} missing metadata field${addedFields.length === 1 ? " was" : "s were"} added. Existing, manual, and locked values were preserved.`
+        : "Metadata saved. The canonical profile view will use it immediately without a library rescan.",
     });
   } catch (error) {
     console.error("Adult metadata apply failed:", error);
@@ -6042,7 +11100,7 @@ app.post("/api/metadata/adult/apply", async (req, res) => {
 });
 
 
-app.post("/api/metadata/adult/match", async (req, res) => {
+app.post("/api/metadata/adult/match", homesteadAccess.requireAdmin, async (req, res) => {
   try {
     const { person = {}, metadata = {}, candidate = null } = req.body || {};
     const libraryType = person.library || "personal";
@@ -6085,18 +11143,75 @@ function adultMetadataNeedsUpdate(metadata = {}, overwrite = false) {
   return !(metadata.birthday || metadata.birthDate) || !(metadata.biography || metadata.description) || !metadata.metadataMatch || !hasBody;
 }
 
-app.post("/api/metadata/adult/bulk-fetch", async (req, res) => {
-  try {
-    const { libraryType = "personal", overwrite = false, limit = 500 } = req.body || {};
-    const profiles = listAdultProfileDirs(libraryType).slice(0, Number(limit) || 500);
-    const report = [];
-    let checked = 0;
-    let updated = 0;
-    let skipped = 0;
-    let failed = 0;
+function buildAdultMetadataProposalPatch(currentMetadata = {}, importedMetadata = {}) {
+  const lockedFields = currentMetadata.metadataLocks && typeof currentMetadata.metadataLocks === "object" ? currentMetadata.metadataLocks : {};
+  const manualFields = new Set(Array.isArray(currentMetadata.manualMetadataFields) ? currentMetadata.manualMetadataFields : []);
+  const importedBody = importedMetadata.body || importedMetadata.bodyDetails || {};
+  const patch = {};
+  for (const field of ADULT_MANUAL_EDIT_FIELDS) {
+    if (lockedFields[field] || manualFields.has(field)) continue;
+    const value = !isEmptyAdultMetadataValue(importedMetadata[field]) ? importedMetadata[field] : importedBody[field];
+    if (isEmptyAdultMetadataValue(value)) continue;
+    const currentValue = !isEmptyAdultMetadataValue(currentMetadata[field]) ? currentMetadata[field] : (currentMetadata.body || currentMetadata.bodyDetails || {})[field];
+    if (normalizeAdultMetadataCompareValue(currentValue) === normalizeAdultMetadataCompareValue(value)) continue;
+    patch[field] = value;
+  }
+  return patch;
+}
 
+function createAdultMetadataApproval({ profile, patch, candidate, changes }) {
+  const source = candidate?.source || candidate?.provider || "External provider";
+  return activityJobStore.create({
+    activityType: "metadata-approval",
+    status: "needs-attention",
+    title: `${profile.name} — ${changes.length} proposed metadata change${changes.length === 1 ? "" : "s"}`,
+    libraryId: profile.libraryType,
+    source,
+    provider: candidate?.provider || candidate?.source || "external",
+    notes: "Review provider changes before Homestead updates the current profile.",
+    proposal: {
+      person: {
+        id: profile.folderName || slugifyAdultProfileName(profile.name),
+        name: profile.name,
+        library: profile.libraryType,
+        profileDir: profile.profileDir,
+      },
+      patch,
+      changes: changes.map((change) => ({
+        ...change,
+        previousLabel: adultMetadataTimelinePreview(change.previous),
+        valueLabel: adultMetadataTimelinePreview(change.value),
+      })),
+      source,
+      sourceType: "external-provider",
+      sourceUrl: candidate?.url || candidate?.sourceUrl || "",
+      providerId: candidate?.sourceCandidateId || candidate?.id || "",
+      effectivePrecision: "unknown",
+      detectedAt: new Date().toISOString(),
+    },
+    progress: { current: changes.length, total: changes.length, percent: 100, label: "Awaiting approval" },
+    retryable: false,
+  });
+}
+
+async function runAdultMetadataRefreshJob({ jobId, libraryType, overwrite = false, limit = 500 }) {
+  const profiles = listAdultProfileDirs(libraryType).slice(0, Number(limit) || 500);
+  const report = [];
+  let checked = 0;
+  let proposed = 0;
+  let skipped = 0;
+  let failed = 0;
+  try {
     for (const profile of profiles) {
+      const storedJob = activityJobStore.read().find((item) => item.id === jobId);
+      if (!storedJob || storedJob.status === "cancelled") {
+        activityJobStore.update(jobId, { status: "cancelled", notes: "Metadata refresh cancelled.", completedAt: new Date().toISOString() });
+        return;
+      }
       checked += 1;
+      activityJobStore.update(jobId, {
+        progress: { current: checked - 1, total: profiles.length, label: `Checking ${profile.name}`, detail: `${proposed} approval${proposed === 1 ? "" : "s"} ready` },
+      });
       try {
         if (!adultMetadataNeedsUpdate(profile.metadata || {}, overwrite)) {
           skipped += 1;
@@ -6105,31 +11220,66 @@ app.post("/api/metadata/adult/bulk-fetch", async (req, res) => {
         }
 
         const setupConfig = readSetupConfig();
-        const candidates = await searchAdultMetadata(profile.name, {
+        const candidates = await runWithTimeout(() => searchAdultMetadata(profile.name, {
           libraryType,
           whisparr: getWhisparrConfig(),
           customSourceUrls: getCustomMetadataSourceUrls(setupConfig, libraryType),
-          limit: 4,
-        });
+          limit: 8,
+        }), { timeoutMs: ADULT_PERSON_FULL_FETCH_TIMEOUT_MS, label: `${profile.name} metadata providers` });
         const best = candidates[0] || null;
-
         if (!best) {
           skipped += 1;
           report.push({ name: profile.name, status: "no-match" });
           continue;
         }
 
-        const patch = augmentAdultBodyMetadata(best, normalizeAdultCandidateForMetadata(best, overwrite ? {} : (profile.metadata || {})));
-        writeAdultProfileMetadataFile(profile.profileDir, patch, best, { overwrite });
-        updated += 1;
-        report.push({ name: profile.name, status: "updated", provider: best.provider, matchedName: best.name || best.title });
+        const imported = augmentAdultBodyMetadata(best, normalizeAdultCandidateForMetadata(best, {}));
+        const patch = buildAdultMetadataProposalPatch(profile.metadata || {}, imported);
+        const changes = buildAdultMetadataChanges(profile.metadata || {}, patch, ADULT_METADATA_FIELD_LABELS)
+          .map((change) => ({ ...change, timelineType: ADULT_SIZING_TIMELINE_FIELDS.has(change.field) ? "body" : "metadata" }));
+        if (!changes.length) {
+          skipped += 1;
+          report.push({ name: profile.name, status: "unchanged", provider: best.provider || best.source });
+          continue;
+        }
+        createAdultMetadataApproval({ profile, patch, candidate: best, changes });
+        proposed += 1;
+        report.push({ name: profile.name, status: "approval-needed", changes: changes.length, provider: best.provider || best.source });
       } catch (error) {
         failed += 1;
         report.push({ name: profile.name, status: "failed", message: error.message });
       }
     }
+    activityJobStore.complete(jobId, {
+      progress: { current: profiles.length, total: profiles.length, label: "Metadata refresh complete" },
+      checked,
+      proposed,
+      skipped,
+      failed,
+      report: report.slice(-500),
+    }, `Checked ${checked}; ${proposed} profile${proposed === 1 ? " has" : "s have"} changes awaiting approval; skipped ${skipped}; failed ${failed}.`);
+  } catch (error) {
+    activityJobStore.fail(jobId, error, { checked, proposed, skipped, failed, report: report.slice(-500) });
+  }
+}
 
-    res.json({ ok: true, libraryType, checked, updated, skipped, failed, report });
+app.post("/api/metadata/adult/bulk-fetch", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const { libraryType = "personal", overwrite = false, limit = 500 } = req.body || {};
+    const profileCount = listAdultProfileDirs(libraryType).slice(0, Number(limit) || 500).length;
+    const job = activityJobStore.create({
+      activityType: "metadata-refresh",
+      status: "processing",
+      title: `Adult metadata refresh — ${libraryType}`,
+      libraryId: libraryType,
+      source: "Adult source packs",
+      notes: "Provider changes will be staged in Needs Review and will not overwrite profiles automatically.",
+      progress: { current: 0, total: profileCount, label: "Starting metadata refresh" },
+      cancellable: true,
+      initiatedBy: { id: req.homesteadUser?.id || "", name: req.homesteadUser?.displayName || req.homesteadUser?.username || "" },
+    });
+    setImmediate(() => runAdultMetadataRefreshJob({ jobId: job.id, libraryType, overwrite, limit }));
+    res.status(202).json({ ok: true, queued: true, libraryType, job, message: "Metadata refresh started in Activity Center. Proposed changes require approval before profiles are updated." });
   } catch (error) {
     console.error("Adult metadata bulk fetch failed:", error);
     res.status(500).json({ ok: false, message: error.message || "Adult metadata bulk fetch failed" });
@@ -6237,6 +11387,26 @@ app.get("/api/adult/sources", (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Could not load adult sources" });
+  }
+});
+
+app.get("/api/adult/source-packs", homesteadAccess.requireSession, (req, res) => {
+  try {
+    const setupConfig = setupConfigWithHomesteadAdultBrowseSources(readSetupConfig());
+    const providers = buildAdultSourceRegistry(
+      getConfiguredAdultSources(setupConfig),
+      readAdultRecommendationProviders(),
+    );
+    const packs = ADULT_SOURCE_PACKS.map((pack) => ({
+      ...pack,
+      providers: providers.filter((provider) => provider.packId === pack.id),
+    }));
+    const customProviders = providers.filter((provider) => !ADULT_SOURCE_PACKS.some((pack) => pack.id === provider.packId));
+    if (customProviders.length) packs.push({ id: "custom-sources", name: "Custom Sources", category: "custom", providers: customProviders });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, packs, providers });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Could not load Adult source packs." });
   }
 });
 
@@ -6465,6 +11635,280 @@ async function probeAdultBrowseProvider(source = {}, { force = false } = {}) {
   return result;
 }
 
+function normalizeAdultRecommendationPreferences(value = {}) {
+  const normalized = normalizeStructuredAdultRecommendationPreferences(value);
+  return {
+    ...normalized,
+    ethnicityInclude: Array.isArray(value?.ethnicityInclude) ? value.ethnicityInclude.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 16) : [],
+    ethnicityExclude: Array.isArray(value?.ethnicityExclude) ? value.ethnicityExclude.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 16) : [],
+    includeUnknownEthnicity: value?.includeUnknownEthnicity !== false,
+  };
+}
+
+function adultRecommendationEthnicityValues(candidate = {}) {
+  const values = [
+    candidate.ethnicity, candidate.race, candidate.origin, candidate.ethnicBackground,
+    candidate.metadata?.ethnicity, candidate.metadata?.race, candidate.body?.ethnicity,
+  ].flatMap((value) => Array.isArray(value) ? value : [value]);
+  return values.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+}
+
+function adultRecommendationMatchesEthnicity(candidate = {}, preferences = {}) {
+  const values = adultRecommendationEthnicityValues(candidate);
+  const includes = (preferences.ethnicityInclude || []).map((value) => String(value).toLowerCase());
+  const excludes = (preferences.ethnicityExclude || []).map((value) => String(value).toLowerCase());
+  if (!values.length) return preferences.includeUnknownEthnicity !== false;
+  const contains = (wanted) => values.some((actual) => actual.includes(wanted) || wanted.includes(actual));
+  if (excludes.some(contains)) return false;
+  return includes.length === 0 || includes.some(contains);
+}
+
+function adultRecommendationIdentityTokens(candidate = {}) {
+  const tokens = new Set();
+  const add = (provider, value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized) tokens.add(`${String(provider || "id").toLowerCase()}:${normalized}`);
+  };
+  for (const [provider, value] of Object.entries({ ...(candidate.externalIds || {}), ...(candidate.providerIds || {}) })) {
+    if (Array.isArray(value)) value.forEach((entry) => add(provider, entry));
+    else add(provider, value);
+  }
+  if (/^Q\d+$/i.test(String(candidate.id || ""))) add("wikidata", candidate.id);
+  return tokens;
+}
+
+function adultRecommendationCandidatesMatch(left = {}, right = {}) {
+  const leftTokens = adultRecommendationIdentityTokens(left);
+  const rightTokens = adultRecommendationIdentityTokens(right);
+  if ([...leftTokens].some((token) => rightTokens.has(token))) return true;
+  if (normalizeAdultIdentityName(left.name) !== normalizeAdultIdentityName(right.name)) return false;
+  const leftDate = String(left.birthDate || left.birthday || "").slice(0, 10);
+  const rightDate = String(right.birthDate || right.birthday || "").slice(0, 10);
+  return !leftDate || !rightDate || leftDate === rightDate;
+}
+
+function mergeAdultRecommendationCandidates(candidates = [], preferences = {}) {
+  const groups = [];
+  for (const candidate of candidates.filter(Boolean)) {
+    const group = groups.find((entries) => entries.some((entry) => adultRecommendationCandidatesMatch(entry, candidate)));
+    if (group) group.push(candidate);
+    else groups.push([candidate]);
+  }
+  const listFields = ["aliases", "images", "bodyTypes", "breastShapes", "tattoos", "piercings", "bodyMetadataSources"];
+  const scalarFields = [
+    "name", "title", "profileType", "gender", "birthDate", "age", "heightCm", "height", "heightCategory", "weightLb", "weight", "measurements", "bust",
+    "braBand", "cupSize", "pantySize", "pantySizeInferred", "breastType", "waist", "hips", "hairColor", "eyeColor", "ethnicity",
+    "nationality", "birthplace", "biography", "careerStartYear", "careerEndYear", "imageUrl", "url", "sourceUrl", "bodyMetadataEnriched", "bodyMetadataStatus",
+  ];
+  return groups.map((entries) => {
+    const merged = {};
+    for (const field of scalarFields) {
+      const value = entries.map((entry) => entry[field]).find((entry) => entry !== undefined && entry !== null && String(entry).trim() !== "");
+      if (value !== undefined) merged[field] = value;
+    }
+    for (const field of listFields) merged[field] = [...new Set(entries.flatMap((entry) => Array.isArray(entry[field]) ? entry[field] : entry[field] ? [entry[field]] : []).map((value) => typeof value === "string" ? value : JSON.stringify(value)))].map((value) => {
+      try { return value.startsWith?.("{") ? JSON.parse(value) : value; } catch { return value; }
+    });
+    merged.providerIds = Object.assign({}, ...entries.map((entry) => entry.providerIds || entry.externalIds || {}));
+    merged.externalIds = { ...merged.providerIds };
+    merged.providerLinks = Object.assign({}, ...entries.map((entry) => entry.providerLinks || entry.externalLinks || {}));
+    merged.externalLinks = { ...merged.providerLinks };
+    merged.sourceCandidates = entries.flatMap((entry) => entry.sourceCandidates?.length ? entry.sourceCandidates : [entry]);
+    merged.matchedSources = [...new Set(entries.map((entry) => entry.sourceName || entry.sourceId).filter(Boolean))];
+    merged.sourceName = merged.matchedSources.join(" + ") || entries[0]?.sourceName || "Matched sources";
+    merged.sourceId = entries[0]?.sourceId || "merged";
+    merged.id = merged.providerIds.theporndb || merged.providerIds.wikidata || entries[0]?.id || crypto.createHash("sha1").update(`${merged.sourceName}:${merged.name}`).digest("hex").slice(0, 18);
+    const evaluation = evaluateStructuredAdultRecommendationCandidate(merged, preferences);
+    return {
+      ...evaluation.candidate,
+      providerIds: merged.providerIds,
+      externalIds: merged.externalIds,
+      providerLinks: merged.providerLinks,
+      externalLinks: merged.externalLinks,
+      sourceCandidates: merged.sourceCandidates,
+      matchedSources: merged.matchedSources,
+      sourceName: merged.sourceName,
+      exactMatch: evaluation.exact,
+      matchScore: evaluation.matchScore,
+      matchedFields: evaluation.matchedFields,
+      missingFields: evaluation.missingFields,
+      failedFields: evaluation.failedFields,
+      accepted: evaluation.accepted,
+      reason: evaluation.exact ? `Matches every selected preference across ${merged.matchedSources.length || 1} source${merged.matchedSources.length === 1 ? "" : "s"}` : `Compatible on ${evaluation.matchedFields.length} supplied fields`,
+    };
+  });
+}
+
+const adultRecommendationBodyEnrichmentCache = new Map();
+const ADULT_RECOMMENDATION_BODY_CACHE_MS = 12 * 60 * 60 * 1000;
+
+function adultRecommendationIafdLinks(candidate = {}) {
+  const ids = { ...(candidate.externalIds || {}), ...(candidate.providerIds || {}) };
+  const suppliedLinks = { ...(candidate.externalLinks || {}), ...(candidate.providerLinks || {}) };
+  const links = {};
+  for (const key of ["iafd", "iafdFemale", "iafdMale"]) {
+    try {
+      const url = new URL(String(suppliedLinks[key] || ""));
+      if (/(^|\.)iafd\.com$/i.test(url.hostname)) links[key] = url.toString();
+    } catch {}
+  }
+  const iafdId = ids.iafd || ids.iafdFemale || ids.iafdMale || "";
+  if (iafdId && !links.iafd) links.iafd = `https://www.iafd.com/person.rme/perfid=${encodeURIComponent(String(iafdId))}/gender=female`;
+  return links;
+}
+
+function adultRecommendationBodyPatch(metadata = {}, sourceNames = []) {
+  const body = metadata.body || metadata.bodyDetails || {};
+  const pick = (...values) => values.find((value) => value !== undefined && value !== null && String(value).trim() !== "") ?? "";
+  const breastDetails = String(pick(metadata.breastDetails, body.breastDetails)).toLowerCase();
+  const breastType = pick(
+    metadata.breastType,
+    body.breastType,
+    /\b(?:real|natural)\b/.test(breastDetails) ? "natural" : "",
+    /\b(?:fake|augmented|implants?)\b/.test(breastDetails) ? "augmented" : "",
+  );
+  const bodyType = pick(metadata.bodyType, body.bodyType);
+  return {
+    height: pick(metadata.height, body.height),
+    weight: pick(metadata.weight, body.weight),
+    measurements: pick(metadata.measurementsRaw, metadata.measurements, body.measurementsRaw, body.measurements),
+    bust: pick(metadata.bust, body.bust),
+    waist: pick(metadata.waist, body.waist),
+    hips: pick(metadata.hips, body.hips),
+    braBand: pick(metadata.braBand, body.braBand),
+    cupSize: pick(metadata.cupSize, body.cupSize),
+    pantySize: pick(metadata.pantySize, body.pantySize),
+    pantySizeInferred: metadata.pantySizeInferred === true || body.pantySizeInferred === true,
+    breastType,
+    bodyTypes: bodyType ? [bodyType] : [],
+    hairColor: pick(metadata.hairColor, body.hairColor),
+    eyeColor: pick(metadata.eyeColor, body.eyeColor),
+    ethnicity: pick(metadata.ethnicity, body.ethnicity),
+    bodyMetadataSources: sourceNames,
+  };
+}
+
+function adultRecommendationBodyFieldCount(candidate = {}) {
+  return [
+    candidate.height, candidate.heightCm, candidate.weight, candidate.weightLb, candidate.measurements,
+    candidate.bust, candidate.waist, candidate.hips, candidate.braBand, candidate.cupSize,
+    candidate.pantySize, candidate.breastType, candidate.bodyTypes?.length,
+  ].filter((value) => value !== undefined && value !== null && value !== "" && value !== 0).length;
+}
+
+async function enrichAdultRecommendationBodyCandidate(candidate = {}, preferences = {}) {
+  const name = cleanMetadataQuery(candidate.name || candidate.title || "");
+  if (!name) return { ...candidate, bodyMetadataEnriched: true, bodyMetadataStatus: "unavailable" };
+  const identityKey = [...adultRecommendationIdentityTokens(candidate)].sort().join("|") || normalizeAdultIdentityName(name);
+  const cached = adultRecommendationBodyEnrichmentCache.get(identityKey);
+  if (cached && Date.now() - cached.cachedAt < ADULT_RECOMMENDATION_BODY_CACHE_MS) return { ...candidate, ...cached.patch };
+
+  const anchor = { ...candidate, name, title: name, profileType: "performer", libraryType: "performers" };
+  const linkedAnchor = { ...anchor, providerLinks: adultRecommendationIafdLinks(anchor), externalLinks: adultRecommendationIafdLinks(anchor) };
+  let sourceCandidates = [];
+  try {
+    const settled = await runWithTimeout(() => Promise.allSettled([
+      searchTheNudeMetadata(name),
+      fetchLinkedAdultMetadataCandidates(name, [linkedAnchor]),
+    ]), { timeoutMs: 11000, label: `${name} recommendation body metadata` });
+    sourceCandidates = settled.flatMap((result) => result.status === "fulfilled" ? (Array.isArray(result.value) ? result.value : []) : [])
+      .filter((entry) => candidateMatchesAdultIdentityAnchor(entry, anchor, "performer"));
+  } catch (error) {
+    console.warn(`Recommendation body enrichment did not complete for ${name}:`, error.message || error);
+  }
+
+  let patch = {};
+  if (sourceCandidates.length) {
+    const setupConfig = readSetupConfig();
+    const aggregation = buildAdultFullMetadataAggregation({
+      query: name,
+      libraryType: "performers",
+      profileType: "performer",
+      person: anchor,
+      candidates: sourceCandidates,
+      seedCandidate: anchor,
+      sourceSettings: getConfiguredAdultSources(setupConfig),
+    });
+    const metadata = augmentAdultBodyMetadata({}, aggregation.metadata || {});
+    const sourceNames = aggregation.sourceSummary
+      .filter((source) => Number(source.meaningfulFields || source.fields || 0) > 0)
+      .map((source) => source.source || source.provider)
+      .filter(Boolean);
+    patch = adultRecommendationBodyPatch(metadata, sourceNames);
+  }
+
+  const combined = { ...candidate };
+  for (const [field, value] of Object.entries(patch)) {
+    const useful = Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null && String(value).trim() !== "";
+    if (useful) combined[field] = value;
+  }
+  combined.bodyMetadataEnriched = true;
+  combined.bodyMetadataStatus = adultRecommendationBodyFieldCount(combined) > 0 ? "available" : "unavailable";
+  const normalized = normalizeStructuredAdultRecommendationCandidate(combined, {
+    id: combined.sourceId,
+    name: combined.sourceName,
+    profileType: "performer",
+  });
+  const evaluation = evaluateStructuredAdultRecommendationCandidate(normalized, { ...preferences, matchMode: "compatible" });
+  const result = {
+    ...normalized,
+    providerIds: candidate.providerIds || candidate.externalIds || {},
+    externalIds: candidate.externalIds || candidate.providerIds || {},
+    providerLinks: candidate.providerLinks || candidate.externalLinks || {},
+    externalLinks: candidate.externalLinks || candidate.providerLinks || {},
+    sourceCandidates: [...(candidate.sourceCandidates || []), ...sourceCandidates],
+    matchedSources: [...new Set([...(candidate.matchedSources || []), ...(normalized.bodyMetadataSources || [])])],
+    exactMatch: evaluation.exact,
+    matchScore: evaluation.matchScore,
+    matchedFields: evaluation.matchedFields,
+    missingFields: evaluation.missingFields,
+    failedFields: evaluation.failedFields,
+    accepted: evaluation.accepted,
+    reason: evaluation.exact
+      ? "Matches every selected preference with enriched body metadata"
+      : `Body metadata checked: ${evaluation.matchedFields.length} verified match${evaluation.matchedFields.length === 1 ? "" : "es"}`,
+  };
+  adultRecommendationBodyEnrichmentCache.set(identityKey, { cachedAt: Date.now(), patch: result });
+  if (adultRecommendationBodyEnrichmentCache.size > 250) adultRecommendationBodyEnrichmentCache.delete(adultRecommendationBodyEnrichmentCache.keys().next().value);
+  return result;
+}
+
+async function enrichAdultRecommendationBodies(items = [], preferences = {}) {
+  const candidates = (Array.isArray(items) ? items : []).slice(0, 18);
+  const output = [];
+  const concurrency = 4;
+  for (let index = 0; index < candidates.length; index += concurrency) {
+    const batch = candidates.slice(index, index + concurrency);
+    const settled = await Promise.allSettled(batch.map((candidate) => enrichAdultRecommendationBodyCandidate(candidate, preferences)));
+    settled.forEach((result, batchIndex) => output.push(result.status === "fulfilled" ? result.value : {
+      ...batch[batchIndex], bodyMetadataEnriched: true, bodyMetadataStatus: "unavailable",
+    }));
+  }
+  return output.sort((a, b) => Number(b.bodyMetadataStatus === "available") - Number(a.bodyMetadataStatus === "available") || Number(b.exactMatch) - Number(a.exactMatch) || Number(b.matchScore || 0) - Number(a.matchScore || 0));
+}
+
+async function discoverExternalAdultProfileRecommendations({ profileType = "performer", signals = [], existingNames = [], activities = [], preferences = {} } = {}) {
+  const normalizedPreferences = normalizeAdultRecommendationPreferences(preferences);
+  if (!normalizedPreferences.enabled) return { ok: true, profileType, preferences: normalizedPreferences, items: [], diagnostics: [] };
+  const results = await Promise.allSettled([
+    discoverStructuredRecommendations({ providers: readAdultRecommendationProviders(), profileType, preferences: normalizedPreferences, existingNames: Array.isArray(existingNames) ? existingNames : [] }),
+    discoverWikidataAdultRecommendations({ profileType, preferences: normalizedPreferences, existingNames }),
+  ]);
+  const parts = results.map((result, index) => result.status === "fulfilled" ? result.value : {
+    items: [], diagnostics: [{ providerName: index ? "Built-in public discovery" : "Configured providers", ok: false, message: "This source is temporarily unavailable. Other sources are unaffected." }],
+  });
+  const seen = new Set();
+  const items = mergeAdultRecommendationCandidates(parts.flatMap((part) => part.items || []), normalizedPreferences)
+    .filter((candidate) => candidate.accepted)
+    .filter((candidate) => adultRecommendationMatchesEthnicity(candidate, normalizedPreferences)).filter((candidate) => {
+    const key = normalizeAdultIdentityName(candidate.name);
+    if (!key || seen.has(key)) return false;
+    seen.add(key); return true;
+  }).sort((a, b) => Number(b.exactMatch) - Number(a.exactMatch) || b.matchScore - a.matchScore || String(a.name).localeCompare(String(b.name))).slice(0, 24);
+  return { ok: true, profileType, preferences: normalizedPreferences, items, diagnostics: parts.flatMap((part) => part.diagnostics || []) };
+}
+const { createPublicPersonDiscovery } = require("./src/server/public-person-discovery.cjs");
+const discoverWikidataAdultRecommendations = createPublicPersonDiscovery({ cacheDir: path.join(dataDir, "public-person-discovery-cache") });
 
 
 
@@ -6601,6 +12045,98 @@ app.post("/api/discovery/adult/browse-collection", async (req, res) => {
       ok: false,
       message: error.message || "Unable to build Adult Browse collection.",
     });
+  }
+});
+
+app.get("/api/discovery/adult/providers", homesteadAccess.requireOwner, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, providers: readAdultRecommendationProviders().map(publicAdultRecommendationProvider) });
+});
+
+app.patch("/api/discovery/adult/providers", homesteadAccess.requireOwner, (req, res) => {
+  try {
+    const providers = saveAdultRecommendationProviders(req.body?.providers || []);
+    homesteadAccess.recordAudit?.("adult.recommendation-providers.updated", req, { providers: providers.map((provider) => ({ id: provider.id, enabled: provider.enabled })) });
+    res.json({ ok: true, providers: providers.map(publicAdultRecommendationProvider) });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Unable to save recommendation providers." });
+  }
+});
+
+app.post("/api/discovery/adult/providers/:providerId/test", homesteadAccess.requireOwner, async (req, res) => {
+  try {
+    const providerId = String(req.params.providerId || "").trim();
+    const saved = readAdultRecommendationProviders().find((provider) => provider.id === providerId);
+    if (!saved) return res.status(404).json({ ok: false, message: "Unknown recommendation provider." });
+    const draft = req.body?.provider && req.body.provider.id === providerId ? req.body.provider : {};
+    const endpointInput = String(draft.endpoint || saved.endpoint || "").trim();
+    if (!/^https?:\/\//i.test(endpointInput)) return res.status(400).json({ ok: false, message: "Enter an HTTP or HTTPS endpoint first." });
+    const provider = {
+      ...saved,
+      endpoint: providerId === "theporndb" ? currentThePornDbEndpoint(endpointInput) : endpointInput,
+      apiKey: draft.clearApiKey === true ? "" : String(draft.apiKey || saved.apiKey || "").trim(),
+      perPage: 10,
+      pages: 1,
+    };
+    if (provider.requiresApiKey !== false && !provider.apiKey) return res.status(400).json({ ok: false, message: `${provider.name} needs an API token first.` });
+    const items = await fetchStructuredAdultRecommendationProvider(provider, "performer", {
+      gender: "any",
+      bodyTypes: [],
+      breastShapes: [],
+      heightCategories: [],
+      maxWeight: 0,
+      pantySizeMax: "",
+      braBandMax: 0,
+      cupSizeMax: "",
+      minAge: 18,
+      maxAge: 100,
+      requirePoster: false,
+      matchMode: "compatible",
+    });
+    res.json({ ok: true, received: items.length, message: `Connected to ${provider.name}. ${items.length} sample performer${items.length === 1 ? "" : "s"} received.` });
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.message || "Provider connection test failed." });
+  }
+});
+
+app.post("/api/discovery/adult/recommendations", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const profileType = String(req.body?.profileType || "performer").toLowerCase();
+    if (!new Set(["performer", "performers", "celebrity", "celebrities"]).has(profileType)) {
+      return res.status(400).json({ ok: false, message: "Unknown Adult recommendation profile type." });
+    }
+
+    const access = homesteadAccess.accessContext(req);
+    if (access.user?.role === "child" || !access.fullAdultAccess && !access.adultSublibraryAccess?.performers && !access.adultSublibraryAccess?.celebrities) {
+      return res.status(403).json({ ok: false, message: "This account cannot use Adult recommendations." });
+    }
+    const savedPreferences = access.user?.preferences?.adultRecommendations || {};
+    const discovery = await discoverExternalAdultProfileRecommendations({
+      profileType,
+      existingNames: req.body?.existingNames,
+      preferences: savedPreferences,
+    });
+    res.json(discovery);
+  } catch (error) {
+    console.error("Adult recommendation discovery failed:", error);
+    res.status(500).json({ ok: false, message: error.message || "Adult recommendation discovery failed." });
+  }
+});
+
+app.post("/api/discovery/adult/recommendations/enrich-bodies", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const access = homesteadAccess.accessContext(req);
+    if (access.user?.role === "child" || (!access.fullAdultAccess && !access.adultSublibraryAccess?.performers)) {
+      return res.status(403).json({ ok: false, message: "This account cannot enrich Performer recommendations." });
+    }
+    const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 18) : [];
+    if (!items.length) return res.json({ ok: true, items: [] });
+    const preferences = normalizeAdultRecommendationPreferences(access.user?.preferences?.adultRecommendations || {});
+    const enriched = await enrichAdultRecommendationBodies(items, preferences);
+    res.json({ ok: true, items: enriched });
+  } catch (error) {
+    console.error("Adult recommendation body enrichment failed:", error);
+    res.status(500).json({ ok: false, message: error.message || "Body metadata enrichment failed." });
   }
 });
 
@@ -6952,7 +12488,7 @@ function getAdultPersonCandidateReliability(candidate = {}) {
   const provider = getAdultPersonCandidateProviderKey(candidate);
   const hasStableId = Boolean(candidate.wikidataId || candidate.tmdbId || candidate.imdbId || candidate.providerIds || candidate.externalIds);
   const hasDirectProfileUrl = Boolean(candidate.url || candidate.externalUrl || candidate.sourceUrl) && !isSearchOnlyAdultPersonCandidate(candidate);
-  const adultKnownDirect = ["nubiles", "pics-x", "picsx", "definebabe", "freeones", "babewiki"].includes(provider);
+  const adultKnownDirect = ["nubiles", "pics-x", "picsx", "definebabe", "freeones", "babewiki", "thenude"].includes(provider);
 
   if (hasStableId && confidence >= 0.82) {
     return { tier: "verified", label: "Verified identity", sortRank: 0, description: "Stable external ID and strong name match." };
@@ -6986,6 +12522,7 @@ function buildProvisionalAdultPersonCandidateFromProviderSearches({ query = "", 
     "babewiki",
     "xxxbios",
     "iafd",
+    "thenude",
     "eporner",
     "pics-x",
     "xhamster",
@@ -7093,6 +12630,7 @@ app.post("/api/discovery/adult/advanced-search", async (req, res) => {
           libraryType: metadataLibraryType,
           whisparr: {},
           customSourceUrls: getCustomMetadataSourceUrls(readSetupConfig(), metadataLibraryType),
+      modelsEnabled: !getConfiguredAdultSources(readSetupConfig()).some((source) => String(source.id || source.name || "").replace(/[^a-z0-9]/gi, "").toLowerCase() === "modelscom" && source.enabled === false),
         });
         wikidataCandidate = metadataCandidates.find((candidate) => candidate.provider === "wikidata") || metadataCandidates[0] || null;
         providerIds = wikidataCandidate?.providerIds || wikidataCandidate?.externalIds || {};
@@ -7289,7 +12827,61 @@ app.get("/api/metadata/matches", (req, res) => {
   }
 });
 
-app.delete("/api/metadata/match", (req, res) => {
+app.post("/api/metadata/matches/merge", homesteadAccess.requireAdmin, (req, res) => {
+  try {
+    const incoming = compactMetadataMatches(req.body?.matches || {});
+    const stored = readMetadataMatches();
+    let imported = 0;
+    let filled = 0;
+    const isBlankMetadataValue = (value) => value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
+
+    for (const [key, record] of Object.entries(incoming)) {
+      if (!record || record.aliasOf) continue;
+      if (!stored[key] || stored[key]?.aliasOf) {
+        stored[key] = compactMetadataMatchRecord(record);
+        imported += 1;
+        continue;
+      }
+
+      // The server record remains authoritative. Migration only fills fields
+      // that are genuinely absent so a browser-only poster can become shared
+      // without replacing a manual or newer server match.
+      const existing = { ...stored[key] };
+      for (const [field, value] of Object.entries(record)) {
+        if (field === "aliases") continue;
+        if (field === "metadata" && value && typeof value === "object") {
+          const nested = { ...(existing.metadata || {}) };
+          for (const [nestedField, nestedValue] of Object.entries(value)) {
+            if (isBlankMetadataValue(nested[nestedField]) && !isBlankMetadataValue(nestedValue)) {
+              nested[nestedField] = nestedValue;
+              filled += 1;
+            }
+          }
+          existing.metadata = nested;
+          continue;
+        }
+        if (isBlankMetadataValue(existing[field]) && !isBlankMetadataValue(value)) {
+          existing[field] = value;
+          filled += 1;
+        }
+      }
+      existing.aliases = uniqueMetadataMatchAliases([...(existing.aliases || []), ...(record.aliases || [])]);
+      stored[key] = compactMetadataMatchRecord(existing);
+    }
+    for (const [key, record] of Object.entries(incoming)) {
+      if (!record?.aliasOf || stored[key] || !stored[record.aliasOf]) continue;
+      stored[key] = { aliasOf: record.aliasOf };
+    }
+
+    writeMetadataMatches(stored);
+    const matches = readMetadataMatches();
+    res.json({ ok: true, imported, filled, matches, stats: getMetadataMatchStats(matches) });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Failed to merge browser metadata matches." });
+  }
+});
+
+app.delete("/api/metadata/match", homesteadAccess.requireAdmin, (req, res) => {
   try {
     const libraryType = String(req.query.libraryType || req.body?.libraryType || "").trim();
     const localId = String(req.query.localId || req.body?.localId || "").trim();
@@ -7300,6 +12892,16 @@ app.delete("/api/metadata/match", (req, res) => {
     const matches = readMetadataMatches();
     const key = `${libraryType}:${localId}`;
     const target = matches[key];
+    const pointedRecord = target?.aliasOf ? matches[target.aliasOf] : target;
+    const aliasBelongsToDifferentTvShow = libraryType === "tv"
+      && target?.aliasOf
+      && pointedRecord?.localId
+      && String(pointedRecord.localId) !== localId;
+    if (aliasBelongsToDifferentTvShow) {
+      delete matches[key];
+      writeMetadataMatches(matches);
+      return res.json({ ok: true, removed: key, detachedAmbiguousAlias: true, stats: getMetadataMatchStats(matches), file: METADATA_MATCHES_FILE });
+    }
     const canonicalKey = target?.aliasOf || key;
 
     for (const matchKey of Object.keys(matches)) {
@@ -7408,8 +13010,8 @@ app.get("/api/metadata/search", async (req, res) => {
     }
 
     if (libraryType === "books") {
-      const provider = String(req.query.provider || "openlibrary").trim();
-      const results = await searchBookMetadata(query, {
+      const provider = String(req.query.provider || "all").trim();
+      const search = await searchBookMetadataDetailed(query, {
         provider,
         limit: Number(req.query.limit || 12),
       });
@@ -7419,7 +13021,7 @@ app.get("/api/metadata/search", async (req, res) => {
         libraryType,
         provider,
         query,
-        results,
+        ...search,
       });
     }
 
@@ -7497,9 +13099,10 @@ app.get("/api/metadata/search", async (req, res) => {
   }
 });
 
-app.post("/api/metadata/match", (req, res) => {
+app.post("/api/metadata/match", homesteadAccess.requireAdmin, async (req, res) => {
   try {
-    const { libraryType, localId, metadata, localItem = null } = req.body || {};
+    const { libraryType, localId, metadata: submittedMetadata, localItem = null } = req.body || {};
+    let metadata = submittedMetadata;
 
     if (!libraryType) {
       return res.status(400).json({
@@ -7522,40 +13125,135 @@ app.post("/api/metadata/match", (req, res) => {
       });
     }
 
+    if (libraryType === "books") {
+      const reviewedBookFields = req.body?.manualOverride !== false ? {
+        title: String(metadata?.title || "").trim(),
+        sortTitle: String(metadata?.sortTitle || metadata?.title || "").trim(),
+        authors: Array.isArray(metadata?.authors)
+          ? metadata.authors.map((author) => String(author || "").trim()).filter(Boolean)
+          : String(metadata?.author || "").trim() ? [String(metadata.author).trim()] : [],
+        author: String(metadata?.author || (Array.isArray(metadata?.authors) ? metadata.authors[0] : "") || "").trim(),
+        description: String(metadata?.description || "").trim(),
+        series: String(metadata?.series || "").trim(),
+        seriesIndex: String(metadata?.seriesIndex || "").trim(),
+        poster: metadata?.poster || "",
+        cover: metadata?.cover || "",
+        gridPoster: metadata?.gridPoster || "",
+        detailPoster: metadata?.detailPoster || "",
+        artworkOverrides: metadata?.artworkOverrides || {},
+        selectedArtwork: metadata?.selectedArtwork || null,
+      } : null;
+      metadata = await enrichBookCandidate(metadata);
+      metadata = {
+        ...metadata,
+        ...(reviewedBookFields || {}),
+        fixedMatch: req.body?.manualOverride !== false,
+        matchLocked: req.body?.manualOverride !== false || metadata?.matchLocked === true,
+        metadataEnrichedAt: new Date().toISOString(),
+      };
+    }
+
     const matches = readMetadataMatches();
     const key = `${libraryType}:${localId}`;
 
-    const existingMatch = matches[key] || {};
+    // A display-title alias may be shared by separate regional editions.
+    // Only follow it when it actually belongs to this exact local record.
+    const pointedKey = matches[key]?.aliasOf || key;
+    const pointedRecord = matches[pointedKey];
+    const existingKey = pointedRecord?.localId && String(pointedRecord.localId) === String(localId)
+      ? pointedKey
+      : key;
+    const existingMatch = matches[existingKey] || {};
 
-    const aliases = buildMetadataMatchAliases({ localId, localItem, metadata });
+    let aliases = buildMetadataMatchAliases({ localId, localItem, metadata });
+    if (["music", "books"].includes(libraryType)) aliases = [String(localId)];
+    if (libraryType === "tv" && req.body?.manualOverride !== false) {
+      const item = localItem || {};
+      const original = item.originalItem || {};
+      aliases = buildStableTvMatchAliases({ localId, localItem: item, metadata });
+    }
 
-    const savedMatch = {
+    const savedMatch = compactMetadataMatchRecord({
       ...existingMatch,
       ...metadata,
       libraryType,
       localId,
-      localItem,
       aliases,
+      manualOverride: req.body?.manualOverride !== false,
+      matchLocked: req.body?.manualOverride !== false || metadata?.matchLocked === true,
+      matchSource: req.body?.matchSource || "manual-fix-match",
+      previousMatch: existingMatch?.providerId || existingMatch?.tmdbId
+        ? {
+            providerId: existingMatch.providerId || existingMatch.tmdbId,
+            tmdbId: existingMatch.tmdbId || existingMatch.providerId,
+            title: existingMatch.title || "",
+            year: existingMatch.year || "",
+            poster: existingMatch.poster || "",
+            savedAt: new Date().toISOString(),
+          }
+        : existingMatch?.previousMatch || null,
       matchedAt: existingMatch.matchedAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-    };
+    });
 
+    // Keep existing manual artwork unless this request explicitly selected a
+    // new book cover. A Fixed Match artwork choice is authoritative app-wide.
+    const requestedArtworkOverrides = metadata?.artworkOverrides && typeof metadata.artworkOverrides === "object"
+      ? metadata.artworkOverrides
+      : {};
+    const effectiveArtworkOverrides = {
+      ...(existingMatch.artworkOverrides || {}),
+      ...requestedArtworkOverrides,
+    };
+    savedMatch.artworkOverrides = effectiveArtworkOverrides;
+    Object.assign(savedMatch, applyArtwork(savedMatch, effectiveArtworkOverrides));
+
+    let localArtwork = null;
+    if (["movies", "tv"].includes(String(libraryType)) && req.body?.manualOverride !== false) {
+      try {
+        localArtwork = await saveConfirmedMatchArtwork({
+          libraryType,
+          localItem: localItem || {},
+          metadata: savedMatch,
+          preserveArtwork: req.body?.preserveArtwork === true,
+        });
+        for (const item of localArtwork?.saved || []) {
+          if (item.slot === "poster" && item.publicUrl) savedMatch.poster = item.publicUrl;
+          if (item.slot === "backdrop" && item.publicUrl) savedMatch.backdrop = item.publicUrl;
+        }
+        savedMatch.localArtwork = localArtwork;
+      } catch (artworkError) {
+        console.warn("[artwork] Fixed Match saved, but local artwork could not be written:", artworkError.message);
+        localArtwork = { error: artworkError.message || "Artwork download failed; provider URL retained." };
+      }
+    }
+    // Re-matching a local show replaces only aliases owned by that same local
+    // record. It must never delete or redirect a sibling remake's aliases.
+    for (const matchKey of Object.keys(matches)) {
+      if (matches[matchKey]?.aliasOf === key) delete matches[matchKey];
+    }
     matches[key] = savedMatch;
 
     for (const alias of aliases) {
-      matches[`${libraryType}:${alias}`] = {
-        ...savedMatch,
-        aliasOf: key,
-      };
+      const aliasKey = `${libraryType}:${alias}`;
+      if (aliasKey === key) continue;
+      const existingAlias = matches[aliasKey];
+      if (!existingAlias || existingAlias.aliasOf === key) matches[aliasKey] = { aliasOf: key };
     }
 
     writeMetadataMatches(matches);
+
+    if (libraryType === "music" && req.body?.manualOverride !== false) {
+      setImmediate(() => syncLocalMusicArtistsWithLidarr({ refreshMetadata: true })
+        .catch((refreshError) => console.error("[lidarr] Fixed artist refresh failed:", refreshError)));
+    }
 
     res.json({
       ok: true,
       key,
       aliases,
       match: savedMatch,
+      localArtwork,
       stats: getMetadataMatchStats(matches),
       file: METADATA_MATCHES_FILE,
     });
@@ -7652,7 +13350,7 @@ app.get("/api/integrations/seerr/search", async (req, res) => {
   }
 });
 
-app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/details", async (req, res) => {
+app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/details", homesteadAccess.requireSession, async (req, res) => {
   try {
     const { mediaType, tmdbId } = req.params;
     const { baseUrl, apiKey } = getSeerrConfig();
@@ -7665,6 +13363,8 @@ app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/details", async (req, 
     }
 
     const normalizedType = mediaType === "tv" ? "tv" : "movie";
+    const libraryId = normalizedType === "tv" ? "tv" : "movies";
+    if (!homesteadAccess.canAccessLibrary(req, libraryId)) return res.status(403).json({ ok: false, message: "Library access denied." });
 
     const response = await fetch(
       `${baseUrl}/api/v1/${normalizedType}/${tmdbId}`,
@@ -7672,6 +13372,7 @@ app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/details", async (req, 
         headers: {
           "X-Api-Key": apiKey,
         },
+        signal: AbortSignal.timeout(10000),
       }
     );
 
@@ -7685,12 +13386,64 @@ app.get("/api/integrations/seerr/media/:mediaType/:tmdbId/details", async (req, 
       });
     }
 
+    const optionalSources = {};
+    const fetchOptionalJson = async (suffix) => {
+      try {
+        const optionalResponse = await fetch(
+          `${baseUrl}/api/v1/${normalizedType}/${tmdbId}/${suffix}`,
+          { headers: { "X-Api-Key": apiKey }, signal: AbortSignal.timeout(10000) }
+        );
+        const optionalData = await optionalResponse.json().catch(() => ({}));
+        optionalSources[suffix] = { ok: optionalResponse.ok, status: optionalResponse.status };
+        return optionalResponse.ok ? optionalData : null;
+      } catch (error) {
+        optionalSources[suffix] = { ok: false, status: 0, message: error.message };
+        return null;
+      }
+    };
+
+    const [creditsData, recommendationsData, similarData, ratingsData] = await Promise.all([
+      data.credits ? Promise.resolve(data.credits) : fetchOptionalJson("credits"),
+      fetchOptionalJson("recommendations"),
+      fetchOptionalJson("similar"),
+      fetchOptionalJson("ratingscombined"),
+    ]);
+    const credits = data.credits || creditsData || data.aggregateCredits || {};
+    const cast = credits.cast || data.cast || [];
+    const crew = credits.crew || data.crew || [];
+    const unwrapResults = (value) => Array.isArray(value)
+      ? value
+      : Array.isArray(value?.results)
+      ? value.results
+      : Array.isArray(value?.data?.results)
+      ? value.data.results
+      : [];
+    const relatedById = new Map();
+    [
+      ...unwrapResults(data.recommendations),
+      ...unwrapResults(data.similar),
+      ...unwrapResults(recommendationsData),
+      ...unwrapResults(similarData),
+    ]
+      .filter((entry) => entry?.id && String(entry.id) !== String(tmdbId))
+      .forEach((entry) => {
+        const entryType = entry.mediaType || entry.media_type || normalizedType;
+        relatedById.set(`${entryType}:${entry.id}`, { ...entry, mediaType: entryType });
+      });
+    const missingSections = [];
+    if (!cast.length) missingSections.push("cast");
+    if (!crew.length) missingSections.push("crew");
+    if (!relatedById.size) missingSections.push("related media");
+
 res.json({
   ok: true,
   item: data,
-  cast: data.credits?.cast || data.cast || [],
-  crew: data.credits?.crew || data.crew || [],
-  collection: data.collection || data.belongsToCollection || null,
+  cast,
+  crew,
+  related: Array.from(relatedById.values()).slice(0, 18),
+  collection: data.collection || data.belongsToCollection || data.belongs_to_collection || null,
+  ratings: ratingsData || {},
+  trailers: data.relatedVideos || data.videos?.results || data.videos || data.trailers || [],
   genres: data.genres || [],
 
   mediaInfo: data.mediaInfo || null,
@@ -7699,12 +13452,146 @@ res.json({
     data.mediaInfo?.downloadStatus ||
     data.mediaInfo?.downloadStatus4k ||
     [],
+  seasonStates: normalizedType === "tv" ? buildSeerrSeasonStates(data) : [],
+  partial: missingSections.length > 0,
+  missingSections,
+  sources: { detail: { ok: true, status: response.status }, ...optionalSources },
 });
   } catch (error) {
     res.status(500).json({
       ok: false,
       message: error.message,
     });
+  }
+});
+
+function collectSeerrPersonCredits(...payloads) {
+  const rows = [];
+  const visit = (value, inheritedMediaType = "") => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry, inheritedMediaType));
+      return;
+    }
+    if (typeof value !== "object") return;
+    if (value.id && (value.title || value.name || value.originalTitle || value.originalName)) {
+      const mediaType = value.mediaType || value.media_type || inheritedMediaType || (value.firstAirDate || value.first_air_date || value.originalName ? "tv" : "movie");
+      if (["movie", "tv"].includes(mediaType)) rows.push({ ...value, mediaType });
+      return;
+    }
+    for (const [key, nested] of Object.entries(value)) {
+      if (["cast", "crew", "results", "data", "credits", "combinedCredits", "combined_credits", "castCredits", "cast_credits", "crewCredits", "crew_credits", "knownFor", "known_for"].includes(key)) {
+        visit(nested, inheritedMediaType);
+      }
+    }
+  };
+  payloads.forEach((payload) => visit(payload));
+  const seen = new Set();
+  return rows
+    .filter((entry) => {
+      const key = `${entry.mediaType}:${entry.id}:${entry.character || entry.job || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => {
+      const leftDate = left.releaseDate || left.release_date || left.firstAirDate || left.first_air_date || "";
+      const rightDate = right.releaseDate || right.release_date || right.firstAirDate || right.first_air_date || "";
+      return String(rightDate).localeCompare(String(leftDate)) || Number(right.popularity || right.voteCount || 0) - Number(left.popularity || left.voteCount || 0);
+    });
+}
+
+const seerrPersonSummaryCache = new Map();
+const seerrPersonCreditsCache = new Map();
+const SEERR_PERSON_SUMMARY_TTL_MS = 15 * 60 * 1000;
+const SEERR_PERSON_CREDITS_TTL_MS = 30 * 60 * 1000;
+
+function readFreshSeerrPersonCache(cache, key, ttlMs) {
+  const cached = cache.get(key);
+  if (!cached || Date.now() - cached.cachedAt >= ttlMs) return null;
+  return cached.value;
+}
+
+function writeBoundedSeerrPersonCache(cache, key, value) {
+  cache.set(key, { cachedAt: Date.now(), value });
+  if (cache.size > 500) cache.delete(cache.keys().next().value);
+  return value;
+}
+
+async function fetchSeerrPersonSummary(personId, baseUrl, headers) {
+  const cacheKey = `${baseUrl}:${personId}`;
+  const cached = readFreshSeerrPersonCache(seerrPersonSummaryCache, cacheKey, SEERR_PERSON_SUMMARY_TTL_MS);
+  if (cached) return cached;
+  const response = await fetch(`${baseUrl}/api/v1/person/${personId}`, {
+    headers,
+    signal: AbortSignal.timeout(6000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.message || `Seerr returned ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return writeBoundedSeerrPersonCache(seerrPersonSummaryCache, cacheKey, data);
+}
+
+app.get("/api/integrations/seerr/person/:tmdbId", async (req, res) => {
+  try {
+    const { baseUrl, apiKey } = getSeerrConfig();
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const personId = encodeURIComponent(req.params.tmdbId);
+    const headers = { "X-Api-Key": apiKey };
+    const data = await fetchSeerrPersonSummary(personId, baseUrl, headers);
+    const person = data.person || data;
+    const appearances = collectSeerrPersonCredits(
+      data,
+      person,
+      data.combinedCredits,
+      data.combined_credits,
+      data.credits,
+      data.castCredits,
+      data.cast_credits,
+      data.crewCredits,
+      data.crew_credits,
+      data.knownFor,
+      data.known_for,
+    );
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ ok: true, person, appearances, creditSourcesChecked: 1, creditsPending: appearances.length === 0 });
+  } catch (error) {
+    res.status(error.status || 500).json({ ok: false, message: error.message });
+  }
+});
+
+app.get("/api/integrations/seerr/person/:tmdbId/appearances", async (req, res) => {
+  try {
+    const { baseUrl, apiKey } = getSeerrConfig();
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const personId = encodeURIComponent(req.params.tmdbId);
+    const cacheKey = `${baseUrl}:${personId}`;
+    const cached = readFreshSeerrPersonCache(seerrPersonCreditsCache, cacheKey, SEERR_PERSON_CREDITS_TTL_MS);
+    if (cached) {
+      res.setHeader("Cache-Control", "private, max-age=300");
+      return res.json({ ok: true, appearances: cached, cached: true });
+    }
+    const headers = { "X-Api-Key": apiKey };
+    const data = await fetchSeerrPersonSummary(personId, baseUrl, headers);
+    const optionalPaths = ["combined_credits", "combinedcredits", "credits"];
+    const optionalResponses = await Promise.allSettled(optionalPaths.map(async (suffix) => {
+      const creditResponse = await fetch(`${baseUrl}/api/v1/person/${personId}/${suffix}`, {
+        headers,
+        signal: AbortSignal.timeout(2800),
+      });
+      if (!creditResponse.ok) return null;
+      return creditResponse.json().catch(() => null);
+    }));
+    const optionalPayloads = optionalResponses.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+    const appearances = collectSeerrPersonCredits(data, data.person || data, ...optionalPayloads);
+    writeBoundedSeerrPersonCache(seerrPersonCreditsCache, cacheKey, appearances);
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ ok: true, appearances, cached: false, creditSourcesChecked: 1 + optionalPaths.length });
+  } catch (error) {
+    res.status(error.status || 500).json({ ok: false, message: error.message });
   }
 });
 
@@ -7818,7 +13705,7 @@ app.get("/api/metadata/tv/:tmdbId", async (req, res) => {
 
 app.get("/", sendHomesteadBrandedIndex);
 // Step 37C: read the canonical metadata.json for a profile.
-app.get("/api/profiles/metadata", (req, res) => {
+app.get("/api/profiles/metadata", homesteadAccess.requireSession, (req, res) => {
   try {
     const profileId = String(req.query.profileId || "").trim();
     const profileName = String(req.query.profileName || "").trim();
@@ -7838,42 +13725,12 @@ app.get("/api/profiles/metadata", (req, res) => {
       filePath: requestedMetadataPath,
     });
 
-    let resolvedProfileDir = profileDir;
+    const resolvedProfileDir = profileDir;
 
     if (!resolvedProfileDir) {
-      const requestedSlug = slugifyAdultProfileName(
-        profileName || profileId
-      );
-      const librariesToSearch = [
-        libraryType,
-        "performers",
-        "personal",
-        "girls",
-        "celebrities",
-      ].filter(
-        (value, index, array) =>
-          value && array.indexOf(value) === index
-      );
-
-      for (const candidateLibrary of librariesToSearch) {
-        const match = listAdultProfileDirs(candidateLibrary).find(
-          (row) =>
-            row.folderName === profileId ||
-            slugifyAdultProfileName(row.folderName) ===
-              slugifyAdultProfileName(profileId) ||
-            slugifyAdultProfileName(row.name) === requestedSlug
-        );
-
-        if (match?.profileDir) {
-          resolvedProfileDir = match.profileDir;
-          break;
-        }
-      }
-    }
-
-    if (!resolvedProfileDir) {
-      return res.status(404).json({
+      return res.status(200).json({
         ok: false,
+        missing: true,
         message: "Profile folder was not found.",
         profileId,
         profileName,
@@ -7887,8 +13744,9 @@ app.get("/api/profiles/metadata", (req, res) => {
     );
 
     if (!fs.existsSync(metadataPath)) {
-      return res.status(404).json({
+      return res.status(200).json({
         ok: false,
+        missing: true,
         message: "metadata.json was not found.",
         profileDir: resolvedProfileDir,
         metadataPath,
@@ -7896,6 +13754,20 @@ app.get("/api/profiles/metadata", (req, res) => {
     }
 
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8") || "{}");
+    const access = homesteadAccess.accessContext(req);
+    const adultAccess = access.adultSublibraryAccess || {};
+    const stripSensitive = (value = {}) => {
+      if (!access.user || access.user.role === "owner") return value;
+      const next = { ...value };
+      ["privateNotes", "profilePrivateNotes", "profileNotes", "privateNoteCards"].forEach((key) => delete next[key]);
+      if (!adultAccess.bodyDetails) {
+        ["height", "weight", "weightUnit", "measurements", "measurementsRaw", "bodyMeasurements", "bust", "waist", "hips", "braBand", "cupSize", "braSize", "pantySize", "pantySizeSystem", "shoeSize", "dressSize", "clothingSize", "hairColor", "eyeColor", "tattoos", "piercings", "body", "bodyDetails", "clothingSizes", "metadataLocks", "metadataFieldSources", "metadataChangeHistory"].forEach((key) => delete next[key]);
+      }
+      if (!adultAccess.timelines) ["timeline", "timelineEntries", "profileTimeline"].forEach((key) => delete next[key]);
+      return next;
+    };
+    const visibleMetadata = stripSensitive(metadata);
+    if (metadata.metadata && typeof metadata.metadata === "object") visibleMetadata.metadata = stripSensitive(metadata.metadata);
 
     res.setHeader("Cache-Control", "no-store");
     return res.json({
@@ -7903,20 +13775,20 @@ app.get("/api/profiles/metadata", (req, res) => {
       profileDir: resolvedProfileDir,
       metadataPath,
       profile: {
-        ...metadata,
+        ...visibleMetadata,
         profileDir:
-          metadata.profileDir || resolvedProfileDir,
+          visibleMetadata.profileDir || resolvedProfileDir,
         folderPath:
-          metadata.folderPath || resolvedProfileDir,
+          visibleMetadata.folderPath || resolvedProfileDir,
         sourcePath:
-          metadata.sourcePath || resolvedProfileDir,
+          visibleMetadata.sourcePath || resolvedProfileDir,
         metadataPath,
         poster: chooseProfilePoster(
           resolvedProfileDir,
-          metadata.poster,
-          metadata.posterPath,
-          metadata.image,
-          metadata.thumbnail
+          visibleMetadata.poster,
+          visibleMetadata.posterPath,
+          visibleMetadata.image,
+          visibleMetadata.thumbnail
         ),
       },
     });
@@ -8226,6 +14098,15 @@ console.log("Testing Lidarr URL:", `${baseUrl}/api/v1/system/status`);
   }
 });
 
+app.get("/api/integrations/bindery/status", async (req, res) => {
+  try {
+    const data = await binderyFetch("/api/v1/system/status");
+    res.json({ connected: true, appName: "Bindery", version: data?.version || "", buildDate: data?.buildDate || "" });
+  } catch (error) {
+    res.status(503).json({ connected: false, error: error.message || "Bindery status failed" });
+  }
+});
+
 async function lidarrFetch(path, options = {}) {
   const config = getLidarrConfig();
 
@@ -8238,6 +14119,7 @@ async function lidarrFetch(path, options = {}) {
 
   const response = await fetch(`${baseUrl}${path}`, {
     ...options,
+    signal: options.signal || AbortSignal.timeout(8000),
     headers: {
       "X-Api-Key": apiKey,
       Accept: "application/json",
@@ -8266,6 +14148,570 @@ if (!response.ok) {
 
   return data;
 }
+
+
+const lidarrArtworkCacheRoot = path.join(dataDir, "lidarr-artwork-cache");
+const lidarrRemoteArtworkSources = new Map();
+const lidarrArtworkNegativeCache = new Map();
+const artistArtworkFallbackCache = new Map();
+let musicBrainzArtworkQueue = Promise.resolve();
+let musicBrainzArtworkNextRequestAt = 0;
+
+function queueMusicBrainzArtworkRequest(task) {
+  const queued = musicBrainzArtworkQueue.then(async () => {
+    const waitMs = Math.max(0, musicBrainzArtworkNextRequestAt - Date.now());
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    musicBrainzArtworkNextRequestAt = Date.now() + 1100;
+    return task();
+  });
+  musicBrainzArtworkQueue = queued.catch(() => null);
+  return queued;
+}
+
+function isPublicLidarrArtworkUrl(value = "") {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (!host || host === "localhost" || host.endsWith(".local")) return false;
+    const ipType = net.isIP(host);
+    if (ipType === 4 && /^(?:10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)) return false;
+    if (ipType === 6 && /^(?:::1|f[cd]|fe80:)/i.test(host)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function registerLidarrRemoteArtwork(value = "") {
+  const remoteUrl = String(value || "").trim();
+  if (!isPublicLidarrArtworkUrl(remoteUrl)) return "";
+  const token = crypto.createHash("sha256").update(remoteUrl).digest("hex");
+  lidarrRemoteArtworkSources.set(token, { remoteUrl, registeredAt: Date.now() });
+  if (lidarrRemoteArtworkSources.size > 5000) {
+    const oldest = lidarrRemoteArtworkSources.keys().next().value;
+    lidarrRemoteArtworkSources.delete(oldest);
+  }
+  return token;
+}
+
+async function getArtistArtworkFallbackUrls({ artistName = "", artistMbid = "" } = {}) {
+  const cleanName = String(artistName || "").trim().slice(0, 200);
+  const cleanMbid = normalizeLidarrMbid(artistMbid);
+  if (!cleanName && !cleanMbid) return [];
+  const cacheKey = `${cleanMbid}:${normalizeLidarrCompare(cleanName)}`;
+  const cached = artistArtworkFallbackCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt < 6 * 60 * 60 * 1000) return cached.urls;
+
+  const lookupUrls = [];
+  if (cleanMbid) lookupUrls.push(`https://www.theaudiodb.com/api/v1/json/123/artist-mb.php?i=${encodeURIComponent(cleanMbid)}`);
+  if (cleanName) lookupUrls.push(`https://www.theaudiodb.com/api/v1/json/123/search.php?s=${encodeURIComponent(cleanName)}`);
+
+  const lookupPayloads = await Promise.allSettled(lookupUrls.map(async (lookupUrl) => {
+    const response = await fetch(lookupUrl, {
+      headers: { Accept: "application/json", "User-Agent": "Homestead/0.6.8" },
+      signal: AbortSignal.timeout(3000),
+    });
+    return response.ok ? response.json().catch(() => null) : null;
+  }));
+  const lookupRecords = lookupPayloads.flatMap((result) =>
+    result.status === "fulfilled" && Array.isArray(result.value?.artists) ? result.value.artists : []
+  );
+  const record = lookupRecords.find((item) =>
+    (cleanMbid && normalizeLidarrMbid(item?.strMusicBrainzID) === cleanMbid) ||
+    (cleanName && normalizeLidarrCompare(item?.strArtist) === normalizeLidarrCompare(cleanName))
+  ) || (lookupRecords.length === 1 ? lookupRecords[0] : null);
+
+  const urls = [
+    record?.strArtistThumb,
+    record?.strArtistWideThumb,
+    record?.strArtistFanart,
+    record?.strArtistFanart2,
+    record?.strArtistFanart3,
+    record?.strArtistFanart4,
+  ].map((value) => String(value || "").trim()).filter((value, index, values) =>
+    isPublicLidarrArtworkUrl(value) && values.indexOf(value) === index
+  );
+
+  // Some less-common artists are present in MusicBrainz/Wikidata but not in
+  // TheAudioDB. Only make the rate-limited metadata request after Lidarr,
+  // Lidarr's provider, and TheAudioDB have all failed to supply an image.
+  if (!urls.length && cleanMbid) {
+    try {
+      const artistData = await queueMusicBrainzArtworkRequest(async () => {
+        const response = await fetch(
+          `https://musicbrainz.org/ws/2/artist/${encodeURIComponent(cleanMbid)}?fmt=json&inc=url-rels`,
+          {
+            headers: { Accept: "application/json", "User-Agent": "Homestead/0.6.8 (https://gethomesteadapp.com)" },
+            signal: AbortSignal.timeout(3500),
+          }
+        );
+        return response.ok ? response.json() : null;
+      });
+      const wikidataUrl = (artistData?.relations || []).find((relation) => relation?.type === "wikidata")?.url?.resource || "";
+      const wikidataId = String(wikidataUrl).match(/\/wiki\/(Q\d+)$/i)?.[1] || "";
+      if (wikidataId) {
+        const response = await fetch(`https://www.wikidata.org/wiki/Special:EntityData/${wikidataId}.json`, {
+          headers: { Accept: "application/json", "User-Agent": "Homestead/0.6.8 (https://gethomesteadapp.com)" },
+          signal: AbortSignal.timeout(3500),
+        });
+        const payload = response.ok ? await response.json().catch(() => null) : null;
+        const imageName = payload?.entities?.[wikidataId]?.claims?.P18?.[0]?.mainsnak?.datavalue?.value || "";
+        const commonsUrl = imageName
+          ? `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(imageName)}`
+          : "";
+        if (isPublicLidarrArtworkUrl(commonsUrl)) urls.push(commonsUrl);
+      }
+    } catch {
+      // Wikimedia artwork is a final optional fallback.
+    }
+  }
+  artistArtworkFallbackCache.set(cacheKey, { checkedAt: Date.now(), urls });
+  if (artistArtworkFallbackCache.size > 1000) {
+    const oldest = artistArtworkFallbackCache.keys().next().value;
+    artistArtworkFallbackCache.delete(oldest);
+  }
+  return urls;
+}
+
+function normalizeLidarrMediaCoverPath(value = "") {
+  const rawUrl = String(value || "").trim();
+  if (!rawUrl) return "";
+  try {
+    const config = getLidarrConfig();
+    const baseUrl = new URL(String(config.url || "").replace(/\/+$/, "") + "/");
+    const parsed = new URL(rawUrl, baseUrl);
+    if (parsed.origin !== baseUrl.origin) return "";
+
+    // Lidarr can run at the origin root or beneath an application URL such as
+    // /lidarr. Its API returns either shape depending on the release and proxy.
+    // Store a path relative to the configured Lidarr URL so the proxy does not
+    // reject or duplicate the application prefix.
+    const configuredBasePath = baseUrl.pathname.replace(/\/+$/, "");
+    let mediaCoverPath = parsed.pathname;
+    if (configuredBasePath && configuredBasePath !== "/" && (
+      mediaCoverPath === configuredBasePath || mediaCoverPath.startsWith(`${configuredBasePath}/`)
+    )) {
+      mediaCoverPath = mediaCoverPath.slice(configuredBasePath.length) || "/";
+    }
+    if (!/^\/(?:api\/v1\/)?mediacover\//i.test(mediaCoverPath)) return "";
+    return `${mediaCoverPath}${parsed.search}`;
+  } catch {
+    return "";
+  }
+}
+
+function getLidarrMediaCoverPath(image = {}) {
+  for (const value of [image?.url, image?.localUrl, image?.path]) {
+    const imagePath = normalizeLidarrMediaCoverPath(value);
+    if (imagePath) return imagePath;
+  }
+  return "";
+}
+
+function getLidarrApiMediaCoverPath(value = "") {
+  const imagePath = normalizeLidarrMediaCoverPath(value);
+  if (!imagePath) return "";
+  const parsed = new URL(imagePath, "http://lidarr.local");
+  const decodedPath = parsed.pathname;
+  let apiPath = "";
+
+  const existingApi = decodedPath.match(/^\/api\/v1\/mediacover\/(artist|album)\/(\d+)\/([^/]+)$/i);
+  if (existingApi) {
+    apiPath = `/api/v1/mediacover/${existingApi[1].toLowerCase()}/${existingApi[2]}/${encodeURIComponent(decodeURIComponent(existingApi[3]))}`;
+  } else {
+    const albumCover = decodedPath.match(/^\/mediacover\/albums\/(\d+)\/([^/]+)$/i);
+    const artistCover = decodedPath.match(/^\/mediacover\/(\d+)\/([^/]+)$/i);
+    if (albumCover) {
+      apiPath = `/api/v1/mediacover/album/${albumCover[1]}/${encodeURIComponent(decodeURIComponent(albumCover[2]))}`;
+    } else if (artistCover) {
+      apiPath = `/api/v1/mediacover/artist/${artistCover[1]}/${encodeURIComponent(decodeURIComponent(artistCover[2]))}`;
+    }
+  }
+
+  return apiPath ? `${apiPath}${parsed.search}` : "";
+}
+
+function getLidarrArtworkImages(entity = {}) {
+  return [
+    ...(Array.isArray(entity?.images) ? entity.images : []),
+    ...(Array.isArray(entity?.metadata?.images) ? entity.metadata.images : []),
+    ...(Array.isArray(entity?.metadata?.value?.images) ? entity.metadata.value.images : []),
+    ...(Array.isArray(entity?.artistMetadata?.images) ? entity.artistMetadata.images : []),
+  ];
+}
+
+function getLidarrArtworkMap(entity = {}, { entityType = "" } = {}) {
+  const artwork = {};
+  const sourcesByType = new Map();
+  const addSource = (coverType, { imagePath = "", remoteToken = "" } = {}) => {
+    const normalizedType = String(coverType || "").trim().toLowerCase();
+    if (!normalizedType || (!imagePath && !remoteToken)) return;
+    if (!sourcesByType.has(normalizedType)) sourcesByType.set(normalizedType, { paths: [], remoteTokens: [] });
+    const sources = sourcesByType.get(normalizedType);
+    if (imagePath && !sources.paths.includes(imagePath)) sources.paths.push(imagePath);
+    if (remoteToken && !sources.remoteTokens.includes(remoteToken)) sources.remoteTokens.push(remoteToken);
+  };
+
+  const images = getLidarrArtworkImages(entity);
+  for (const image of images) {
+    const coverType = String(image?.coverType || "").trim().toLowerCase();
+    const imagePath = getLidarrMediaCoverPath(image);
+    const remoteToken = registerLidarrRemoteArtwork(image?.remoteUrl);
+    addSource(coverType, { imagePath, remoteToken });
+  }
+
+  // Lidarr's Artists screen derives these standard MediaCover URLs from the
+  // artist id even when the collection/detail resource omits its images array.
+  // Mirror that behavior so Homestead can display everything Lidarr displays.
+  const entityId = String(entity?.id ?? "").trim();
+  if (entityType === "artist" && /^\d+$/.test(entityId)) {
+    const versionValue = String(entity?.lastInfoSync || entity?.lastDiskSync || "").trim().slice(0, 100);
+    const versionQuery = versionValue ? `?homesteadLastSync=${encodeURIComponent(versionValue)}` : "";
+    // One generated Lidarr URL is enough. Trying three missing variants in
+    // series made a single absent artist image stall for up to 90 seconds.
+    for (const filename of ["poster-500.jpg"]) {
+      addSource("poster", { imagePath: `/api/v1/mediacover/artist/${entityId}/${filename}${versionQuery}` });
+    }
+  }
+  if (entityType === "album" && !sourcesByType.size) {
+    const releaseGroupId = normalizeLidarrMbid(
+      entity?.foreignAlbumId || entity?.releaseGroupId || entity?.musicbrainzId || ""
+    );
+    const remoteToken = registerLidarrRemoteArtwork(musicReleaseGroupCoverUrl(releaseGroupId));
+    if (remoteToken) addSource("cover", { remoteToken });
+  }
+
+  for (const [coverType, sources] of sourcesByType.entries()) {
+    // Keep every usable local path ahead of every provider URL. This also lets
+    // the proxy try Lidarr's generated 500px image, 250px image, and original.
+    const parameters = new URLSearchParams();
+    sources.paths.forEach((imagePath) => parameters.append("path", imagePath));
+    sources.remoteTokens.forEach((remoteToken) => parameters.append("remote", remoteToken));
+    if (entityType === "artist") {
+      const artistName = String(entity?.artistName || entity?.name || "").trim().slice(0, 200);
+      const artistMbid = normalizeLidarrMbid(entity?.foreignArtistId || entity?.musicbrainzId || "");
+      if (artistName) parameters.set("artist", artistName);
+      if (artistMbid) parameters.set("mbid", artistMbid);
+    }
+    artwork[coverType] = `/api/integrations/lidarr/artwork-file?${parameters.toString()}`;
+  }
+  return artwork;
+}
+
+function hasAdvertisedLidarrArtwork(entity = {}) {
+  return getLidarrArtworkImages(entity).some((image) =>
+    Boolean(getLidarrMediaCoverPath(image) || registerLidarrRemoteArtwork(image?.remoteUrl))
+  );
+}
+
+function normalizeLidarrMbid(value = "") {
+  return String(value || "").match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i)?.[0]?.toLowerCase() || "";
+}
+
+function lidarrArtistCompareNames(artist = {}) {
+  const aliases = Array.isArray(artist.aliases) ? artist.aliases : [];
+  return [artist.artistName, artist.name, artist.sortName, ...aliases.map((alias) => typeof alias === "string" ? alias : alias?.name)]
+    .map(normalizeLidarrCompare)
+    .filter(Boolean);
+}
+
+function findLidarrArtist(artists = [], request = {}) {
+  const requestedMbid = normalizeLidarrMbid(request.artistMbid || request.mbid || request.foreignArtistId || "");
+  const requestedName = normalizeLidarrCompare(request.name || request.artist || "");
+  return (Array.isArray(artists) ? artists : []).find((artist) =>
+    (requestedMbid && normalizeLidarrMbid(artist.foreignArtistId) === requestedMbid) ||
+    (requestedName && lidarrArtistCompareNames(artist).includes(requestedName))
+  ) || null;
+}
+
+function findLidarrAlbum(albums = [], request = {}) {
+  const requestedMbid = String(request.mbid || request.foreignAlbumId || request.releaseGroupId || "").trim();
+  const requestedTitle = normalizeLidarrCompare(request.title || request.album || "");
+  return (Array.isArray(albums) ? albums : []).find((album) =>
+    (requestedMbid && [album.foreignAlbumId, album.releaseGroupId, album.id]
+      .filter(Boolean)
+      .map(String)
+      .includes(requestedMbid)) ||
+    (requestedTitle && normalizeLidarrCompare(album.title) === requestedTitle)
+  ) || null;
+}
+
+async function mapWithConcurrency(values = [], concurrency = 6, mapper) {
+  const output = new Array(values.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor++;
+      output[index] = await mapper(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return output;
+}
+
+const lidarrLibraryListCache = {
+  artists: { value: null, cachedAt: 0, pending: null },
+  albums: { value: null, cachedAt: 0, pending: null },
+};
+
+async function getCachedLidarrLibraryList(kind) {
+  const entry = lidarrLibraryListCache[kind];
+  if (!entry) return [];
+  if (Array.isArray(entry.value) && Date.now() - entry.cachedAt < 2 * 60 * 1000) return entry.value;
+  if (entry.pending) return entry.pending;
+  const apiPath = kind === "albums" ? "/api/v1/album" : "/api/v1/artist";
+  entry.pending = lidarrFetch(apiPath)
+    .then((value) => {
+      entry.value = Array.isArray(value) ? value : [];
+      entry.cachedAt = Date.now();
+      return entry.value;
+    })
+    .finally(() => { entry.pending = null; });
+  return entry.pending;
+}
+
+app.get("/api/integrations/lidarr/artist-artwork", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const artistName = String(req.query.name || "").trim();
+
+    if (!artistName) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing artist name",
+      });
+    }
+
+    const artists = await lidarrFetch("/api/v1/artist");
+
+    const artist = findLidarrArtist(artists, {
+      name: artistName,
+      mbid: String(req.query.mbid || "").trim(),
+    });
+
+    if (!artist) {
+      return res.status(404).json({
+        ok: false,
+        error: "Artist not found in Lidarr",
+      });
+    }
+
+    const artwork = getLidarrArtworkMap(artist, { entityType: "artist" });
+
+    res.json({
+      ok: true,
+      id: artist.id,
+      artistName: artist.artistName || artist.name,
+      foreignArtistId: artist.foreignArtistId || null,
+      artwork,
+    });
+  } catch (error) {
+    console.error("Lidarr artist artwork lookup failed:", error);
+
+    res.status(500).json({
+      ok: false,
+      error: error.message || "Lidarr artwork lookup failed",
+    });
+  }
+});
+
+app.post("/api/integrations/lidarr/library-artwork", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const artistRequests = Array.isArray(req.body?.artists) ? req.body.artists.slice(0, 300) : [];
+    const albumRequests = Array.isArray(req.body?.albums) ? req.body.albums.slice(0, 800) : [];
+    const [artists, albums] = await Promise.all([
+      getCachedLidarrLibraryList("artists"),
+      albumRequests.length ? getCachedLidarrLibraryList("albums").catch(() => []) : Promise.resolve([]),
+    ]);
+    const artistResults = {};
+    const albumResults = {};
+    const albumsByArtistId = new Map();
+    albums.forEach((album) => {
+      const artistId = String(album.artistId || album.artist?.id || "");
+      if (!albumsByArtistId.has(artistId)) albumsByArtistId.set(artistId, []);
+      albumsByArtistId.get(artistId).push(album);
+    });
+
+    for (const request of artistRequests) {
+      const key = String(request?.key || request?.name || "").slice(0, 500);
+      if (!key) continue;
+      const artist = findLidarrArtist(artists, request);
+      if (!artist) {
+        artistResults[key] = { matched: false, artwork: {}, reason: "artist-not-found" };
+        continue;
+      }
+      const advertisedArtwork = hasAdvertisedLidarrArtwork(artist);
+      const artwork = getLidarrArtworkMap(artist, { entityType: "artist" });
+      artistResults[key] = {
+        matched: true,
+        id: artist.id,
+        foreignArtistId: artist.foreignArtistId || "",
+        name: artist.artistName || artist.name || request.name || "",
+        artwork,
+        reason: advertisedArtwork ? "" : "synthetic-mediacover",
+      };
+    }
+
+    for (const request of albumRequests) {
+      const artist = findLidarrArtist(artists, request);
+      const key = String(request?.key || `${request?.artist || ""}:${request?.album || ""}`).slice(0, 500);
+      if (!key) continue;
+      if (!artist) {
+        albumResults[key] = { matched: false, artwork: {}, reason: "artist-not-found" };
+        continue;
+      }
+      const artistAlbums = albumsByArtistId.get(String(artist.id)) || [];
+      const album = findLidarrAlbum(artistAlbums.length ? artistAlbums : albums, request);
+      albumResults[key] = album ? {
+        matched: true,
+        id: album.id,
+        foreignAlbumId: album.foreignAlbumId || album.releaseGroupId || "",
+        title: album.title || request.album || "",
+        artistId: artist.id,
+        artwork: getLidarrArtworkMap(album, { entityType: "album" }),
+      } : { matched: false, artwork: {}, reason: "album-not-found" };
+    }
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ ok: true, artists: artistResults, albums: albumResults });
+  } catch (error) {
+    console.error("Lidarr library artwork lookup failed:", error);
+    res.status(502).json({ ok: false, message: error.message || "Lidarr artwork lookup failed." });
+  }
+});
+
+app.get("/api/integrations/lidarr/artwork-file", homesteadAccess.requireSession, async (req, res) => {
+  try {
+    const queryValues = (value) => (Array.isArray(value) ? value : [value])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+    const imagePaths = queryValues(req.query.path)
+      .filter((imagePath) => /^\/(?:api\/v1\/)?mediacover\//i.test(imagePath))
+      .slice(0, 8);
+    const remoteSources = queryValues(req.query.remote)
+      .filter((remoteToken) => /^[a-f0-9]{64}$/i.test(remoteToken))
+      .map((remoteToken) => lidarrRemoteArtworkSources.get(remoteToken))
+      .filter(Boolean)
+      .slice(0, 8);
+    const requestCacheKey = crypto.createHash("sha256").update(JSON.stringify({ imagePaths, remoteSources: remoteSources.map((entry) => entry.remoteUrl), artist: req.query.artist || "", mbid: req.query.mbid || "" })).digest("hex");
+    if (Date.now() - (lidarrArtworkNegativeCache.get(requestCacheKey) || 0) < 2 * 60 * 1000) {
+      res.setHeader("Cache-Control", "private, max-age=60");
+      return res.status(404).send("Artwork temporarily unavailable");
+    }
+
+    if (!remoteSources.length && !imagePaths.length) {
+      return res.status(400).send("Invalid Lidarr artwork path");
+    }
+
+    const config = getLidarrConfig();
+    const baseUrl = String(config.url || "").replace(/\/$/, "");
+    const apiKey = String(config.apiKey || "");
+
+    if (imagePaths.length && (!baseUrl || !apiKey) && !remoteSources.length) {
+      return res.status(503).send("Lidarr is not configured");
+    }
+    const candidates = [];
+    if (imagePaths.length && baseUrl && apiKey) {
+      for (const imagePath of imagePaths) {
+        const apiImagePath = getLidarrApiMediaCoverPath(imagePath);
+        if (!apiImagePath) continue;
+        const authenticatedArtworkUrl = new URL(baseUrl + apiImagePath);
+        // /MediaCover is Lidarr's browser route and can redirect API-key callers
+        // to /login. The versioned route serves the same cached file through
+        // Lidarr's normal API authentication policy.
+        candidates.push({
+          kind: "lidarr-api-cache",
+          url: authenticatedArtworkUrl.toString(),
+          headers: { "X-Api-Key": apiKey, Accept: "image/*" },
+        });
+      }
+    }
+    for (const remoteSource of remoteSources) {
+      candidates.push({ kind: "remote-provider", url: remoteSource.remoteUrl, headers: { Accept: "image/*" } });
+    }
+
+    const failures = [];
+    const fallbackUrlsPromise = String(req.query.artist || "").trim()
+      ? getArtistArtworkFallbackUrls({
+          artistName: String(req.query.artist || "").trim().slice(0, 200),
+          artistMbid: String(req.query.mbid || "").trim(),
+        })
+      : Promise.resolve([]);
+    let candidateIndex = 0;
+    let fallbackDiscovered = false;
+    while (candidateIndex < candidates.length || !fallbackDiscovered) {
+      if (candidateIndex >= candidates.length && !fallbackDiscovered) {
+        fallbackDiscovered = true;
+        const fallbackUrls = await fallbackUrlsPromise;
+        for (const fallbackUrl of fallbackUrls) {
+          candidates.push({
+            kind: "artist-metadata-fallback",
+            url: fallbackUrl,
+            headers: { Accept: "image/*", "User-Agent": "Homestead/0.6.8" },
+          });
+        }
+      }
+      if (candidateIndex >= candidates.length) break;
+      const candidate = candidates[candidateIndex++];
+      try {
+        const parsedSource = new URL(candidate.url);
+        const extension = parsedSource.pathname.match(/\.(jpe?g|png|webp|gif)$/i)?.[1]?.toLowerCase() || "jpg";
+        const cacheKey = crypto.createHash("sha256").update(candidate.url).digest("hex");
+        const cachePath = path.join(lidarrArtworkCacheRoot, `${cacheKey}.${extension === "jpeg" ? "jpg" : extension}`);
+        if (fs.existsSync(cachePath)) {
+          res.setHeader("X-Homestead-Artwork-Source", `${candidate.kind}-cached`);
+          res.setHeader("Cache-Control", "private, max-age=604800, immutable");
+          return res.sendFile(cachePath);
+        }
+
+        const response = await fetch(candidate.url, {
+          headers: candidate.headers,
+          signal: AbortSignal.timeout(candidate.kind === "lidarr-api-cache" ? 2500 : 4000),
+          redirect: "follow",
+        });
+        if (!response.ok) {
+          failures.push(`${candidate.kind}: HTTP ${response.status}`);
+          continue;
+        }
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.toLowerCase().startsWith("image/")) {
+          failures.push(`${candidate.kind}: non-image response`);
+          continue;
+        }
+        const contentLength = Number(response.headers.get("content-length") || 0);
+        if (contentLength > 25 * 1024 * 1024) {
+          failures.push(`${candidate.kind}: image too large`);
+          continue;
+        }
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (!buffer.length || buffer.length > 25 * 1024 * 1024) {
+          failures.push(`${candidate.kind}: empty or oversized image`);
+          continue;
+        }
+
+        fs.mkdirSync(lidarrArtworkCacheRoot, { recursive: true });
+        const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(temporaryPath, buffer);
+        fs.renameSync(temporaryPath, cachePath);
+        lidarrArtworkNegativeCache.delete(requestCacheKey);
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("X-Homestead-Artwork-Source", candidate.kind);
+        res.setHeader("Cache-Control", "private, max-age=604800, immutable");
+        return res.send(buffer);
+      } catch (candidateError) {
+        failures.push(`${candidate.kind}: ${candidateError.message || "request failed"}`);
+      }
+    }
+
+    console.warn("Lidarr artwork sources failed:", failures);
+    lidarrArtworkNegativeCache.set(requestCacheKey, Date.now());
+    res.setHeader("Cache-Control", "private, max-age=60");
+    return res.status(404).send("Lidarr artwork unavailable from cache or provider");
+  } catch (error) {
+    console.error("Lidarr artwork proxy failed:", error);
+    res.status(500).send("Lidarr artwork proxy failed");
+  }
+});
 
 app.post("/api/integrations/lidarr/request-artist", async (req, res) => {
   try {
@@ -8427,6 +14873,9 @@ app.post("/api/integrations/lidarr/request-album", async (req, res) => {
 function normalizeLidarrCompare(value = "") {
   return String(value || "")
     .toLowerCase()
+    .replace(/°/g, " degrees ")
+    .replace(/&/g, " and ")
+    .replace(/^the\s+/, "")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -8493,7 +14942,16 @@ async function ensureLidarrArtistForRequest(artist = {}) {
     normalizeLidarrCompare(item.artistName || item.name) === normalizeLidarrCompare(artist.name)
   );
 
-  if (existing) return existing;
+  if (existing) {
+    if (existing.monitored) return existing;
+    return lidarrFetch(`/api/v1/artist/${existing.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...existing,
+        monitored: true,
+      }),
+    });
+  }
 
   const lookupResults = await lidarrFetch(`/api/v1/artist/lookup?term=${encodeURIComponent(artist.name)}`);
   const lidarrArtist =
@@ -8735,6 +15193,463 @@ app.get("/api/integrations/lidarr/artist-status/:mbid", async (req, res) => {
       monitored: false,
       error: error.message,
     });
+  }
+});
+
+function firstRemoteImage(images = [], preferred = ["cover", "poster", "fanart", "banner"]) {
+  const list = Array.isArray(images) ? images : [];
+  for (const type of preferred) {
+    const image = list.find((candidate) => String(candidate?.coverType || "").toLowerCase() === type);
+    if (image?.remoteUrl || image?.url) return image.remoteUrl || image.url;
+  }
+  return list.find((image) => image?.remoteUrl || image?.url)?.remoteUrl || list.find((image) => image?.url)?.url || "";
+}
+
+function normalizeAcquisitionStatus(status = "") {
+  const value = String(status || "").toLowerCase();
+  if (["imported", "available"].includes(value)) return "available";
+  if (["downloading", "queued", "grabbed", "completed", "downloaded"].includes(value)) return "downloading";
+  if (["importing", "scanning"].includes(value)) return value;
+  if (["failed", "importfailed", "importblocked", "blocked", "needs-attention"].includes(value)) return "needs-attention";
+  return "requested";
+}
+
+function normalizeAcquisitionText(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function binderyPayloadItems(payload) {
+  if (Array.isArray(payload)) return payload;
+  return Array.isArray(payload?.items) ? payload.items : [];
+}
+
+function findBinderyLibraryBook(searchBook = {}, libraryBooks = []) {
+  const foreignId = String(searchBook.foreignBookId || "");
+  const title = normalizeAcquisitionText(searchBook.title);
+  const author = normalizeAcquisitionText(searchBook.author?.authorName || searchBook.authorName);
+  return libraryBooks.find((book) => {
+    if (foreignId && String(book.foreignBookId || "") === foreignId) return true;
+    if (title && normalizeAcquisitionText(book.title) !== title) return false;
+    const localAuthor = normalizeAcquisitionText(book.author?.authorName || book.author?.name || book.authorName);
+    return !author || !localAuthor || author === localAuthor;
+  }) || null;
+}
+
+function findBinderyQueueItem(book = {}, searchBook = {}, queueItems = []) {
+  const bookId = Number(book?.id || 0);
+  const title = normalizeAcquisitionText(book?.title || searchBook?.title);
+  return queueItems.find((item) =>
+    (bookId && Number(item.bookId || item.book?.id || 0) === bookId) ||
+    (title && normalizeAcquisitionText(item.book?.title || item.title).includes(title))
+  ) || null;
+}
+
+function binderyAcquisitionState(book = null, queueItem = null) {
+  const hasFile = Boolean(book?.filePath || book?.ebookFilePath || book?.audiobookFilePath || book?.status === "imported");
+  if (hasFile) return { status: "available", message: "Available in Bindery." };
+  const queueStatus = String(queueItem?.status || "");
+  if (["failed", "importfailed", "importblocked", "blocked"].includes(queueStatus.toLowerCase())) {
+    return { status: "needs-attention", message: queueItem?.errorMessage || `Bindery: ${queueStatus}` };
+  }
+  if (queueItem) {
+    return { status: normalizeAcquisitionStatus(queueStatus), message: `Bindery: ${queueStatus || "queued"}` };
+  }
+  if (book?.monitored || book?.status === "wanted") {
+    return { status: normalizeAcquisitionStatus(book?.status || "requested"), message: `Bindery: ${book?.status || "wanted"}` };
+  }
+  return { status: "discovery", message: "" };
+}
+
+function acquisitionResultJob(result = {}) {
+  const identity = acquisitionIdentity(result);
+  return readAcquisitionJobs().find((job) => acquisitionIdentity(job) === identity) || null;
+}
+
+function binderyArtworkUrl(value = "") {
+  const source = String(value || "").trim();
+  if (!source) return "";
+  if (/^https?:\/\//i.test(source)) return source;
+  return `/api/integrations/bindery/image?path=${encodeURIComponent(source)}`;
+}
+
+app.get("/api/integrations/bindery/image", async (req, res) => {
+  try {
+    const sourcePath = String(req.query.path || "");
+    if (!sourcePath.startsWith("/api/")) return res.status(400).send("Invalid Bindery artwork path");
+    const config = getBinderyConfig();
+    const baseUrl = String(config.url || "").replace(/\/+$/, "");
+    const response = await fetch(`${baseUrl}${sourcePath}`, {
+      headers: { "X-Api-Key": String(config.apiKey || "") },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) return res.status(response.status).send("Bindery artwork unavailable");
+    res.setHeader("Content-Type", response.headers.get("content-type") || "application/octet-stream");
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    res.status(502).send(error.message || "Bindery artwork unavailable");
+  }
+});
+
+app.get("/api/acquisition/search", async (req, res) => {
+  const query = String(req.query.q || req.query.query || "").trim();
+  if (query.length < 2) return res.json({ ok: true, results: [], providers: {} });
+  const setup = readSetupConfig();
+  const providers = {};
+  const tasks = [];
+
+  if (setup?.enabledLibraries?.books !== false && getBinderyConfig()?.url && getBinderyConfig()?.apiKey) {
+    tasks.push((async () => {
+      try {
+        const [catalogueResponse, libraryResponse, queueResponse] = await Promise.allSettled([
+          binderyFetch(`/api/v1/search/book?term=${encodeURIComponent(query)}`),
+          binderyFetch(`/api/v1/book?search=${encodeURIComponent(query)}&limit=100`),
+          binderyFetch("/api/v1/queue"),
+        ]);
+        if (catalogueResponse.status !== "fulfilled") throw catalogueResponse.reason;
+        const books = binderyPayloadItems(catalogueResponse.value);
+        const libraryBooks = libraryResponse.status === "fulfilled" ? binderyPayloadItems(libraryResponse.value) : [];
+        const queueItems = queueResponse.status === "fulfilled" ? binderyPayloadItems(queueResponse.value) : [];
+        providers.bindery = { connected: true };
+        return books.slice(0, 20).map((book) => {
+          const author = book.author || {};
+          const result = {
+            type: "book",
+            library: "books",
+            provider: "bindery",
+            providerId: book.foreignBookId || book.id,
+            foreignBookId: book.foreignBookId || "",
+            foreignAuthorId: author.foreignAuthorId || book.foreignAuthorId || "",
+            title: book.title || "Untitled book",
+            author: author.authorName || book.authorName || "Unknown author",
+            subtitle: [author.authorName || book.authorName || "Book", book.releaseDate ? String(book.releaseDate).slice(0, 4) : "", book.mediaType].filter(Boolean).join(" • "),
+            poster: binderyArtworkUrl(book.imageUrl || book.coverUrl),
+            mediaType: book.mediaType || "ebook",
+            raw: book,
+          };
+          const libraryBook = findBinderyLibraryBook(book, libraryBooks);
+          const queueItem = findBinderyQueueItem(libraryBook, book, queueItems);
+          const remote = binderyAcquisitionState(libraryBook, queueItem);
+          let job = acquisitionResultJob(result);
+          if (libraryBook) {
+            job = upsertAcquisitionJob({
+              ...result,
+              binderyBookId: libraryBook.id,
+              status: remote.status,
+              remoteStatus: queueItem?.status || libraryBook.status || "",
+              message: remote.message,
+            });
+          }
+          return { ...result, status: remote.status !== "discovery" ? remote.status : job?.status || "discovery", job: job || null };
+        });
+      } catch (error) {
+        providers.bindery = { connected: false, error: error.message };
+        return [];
+      }
+    })());
+  }
+
+  if (setup?.enabledLibraries?.music !== false && getLidarrConfig()?.url && getLidarrConfig()?.apiKey) {
+    tasks.push((async () => {
+      try {
+        const [artistResponse, albumResponse] = await Promise.allSettled([
+          lidarrFetch(`/api/v1/artist/lookup?term=${encodeURIComponent(query)}`),
+          lidarrFetch(`/api/v1/album/lookup?term=${encodeURIComponent(query)}`),
+        ]);
+        providers.lidarr = { connected: true };
+        const artists = artistResponse.status === "fulfilled" ? artistResponse.value : [];
+        const albums = albumResponse.status === "fulfilled" ? albumResponse.value : [];
+        const artistResults = (Array.isArray(artists) ? artists : []).slice(0, 12).map((artist) => {
+          const result = {
+            type: "music-artist",
+            library: "music",
+            provider: "lidarr",
+            providerId: artist.foreignArtistId || artist.id,
+            foreignArtistId: artist.foreignArtistId || "",
+            title: artist.artistName || artist.name || "Unknown artist",
+            subtitle: ["Music artist", artist.disambiguation].filter(Boolean).join(" • "),
+            poster: firstRemoteImage(artist.images),
+            raw: artist,
+          };
+          const job = acquisitionResultJob(result);
+          return { ...result, status: job?.status || "discovery", job };
+        });
+        const albumResults = (Array.isArray(albums) ? albums : []).slice(0, 12).map((album) => {
+          const artist = album.artist || {};
+          const result = {
+            type: "music-album",
+            library: "music",
+            provider: "lidarr",
+            providerId: album.foreignAlbumId || album.id,
+            foreignAlbumId: album.foreignAlbumId || "",
+            foreignArtistId: artist.foreignArtistId || album.foreignArtistId || "",
+            title: album.title || "Untitled album",
+            artist: artist.artistName || album.artistName || "Unknown artist",
+            subtitle: [artist.artistName || album.artistName || "Album", String(album.releaseDate || "").slice(0, 4)].filter(Boolean).join(" • "),
+            poster: firstRemoteImage(album.images),
+            raw: album,
+          };
+          const job = acquisitionResultJob(result);
+          return { ...result, status: job?.status || "discovery", job };
+        });
+        return [...artistResults, ...albumResults];
+      } catch (error) {
+        providers.lidarr = { connected: false, error: error.message };
+        return [];
+      }
+    })());
+  }
+
+  const groups = await Promise.all(tasks);
+  res.json({ ok: true, results: groups.flat(), providers });
+});
+
+async function triggerLidarrArtistSearch(artistId) {
+  try {
+    return await lidarrFetch("/api/v1/command", {
+      method: "POST",
+      body: JSON.stringify({ name: "ArtistSearch", artistIds: [artistId], artistId }),
+    });
+  } catch (error) {
+    return lidarrFetch("/api/v1/command", {
+      method: "POST",
+      body: JSON.stringify({ name: "MissingAlbumSearch", artistId }),
+    });
+  }
+}
+
+app.post("/api/acquisition/request", async (req, res) => {
+  const item = req.body?.item || req.body || {};
+  const mediaType = String(req.body?.mediaType || item.mediaType || "").toLowerCase();
+  try {
+    if (item.type === "book" || item.library === "books") {
+      if (!item.foreignBookId && !item.providerId) throw new Error("Bindery book identity is missing.");
+      const created = await binderyFetch("/api/v1/author/book", {
+        method: "POST",
+        body: JSON.stringify({
+          foreignBookId: item.foreignBookId || item.providerId,
+          foreignAuthorId: item.foreignAuthorId || item.raw?.author?.foreignAuthorId || "",
+          authorName: item.author || item.raw?.author?.authorName || item.raw?.authorName || "",
+          mediaType: ["ebook", "audiobook", "both"].includes(mediaType) ? mediaType : "ebook",
+          searchOnAdd: true,
+        }),
+      });
+      const job = upsertAcquisitionJob({
+        ...item,
+        library: "books",
+        provider: "bindery",
+        providerId: item.foreignBookId || item.providerId,
+        binderyBookId: created?.id || created?.book?.id || null,
+        status: normalizeAcquisitionStatus(created?.status || "requested"),
+        message: "Requested in Bindery. Homestead will scan Books after import.",
+      });
+      return res.status(201).json({ ok: true, job, result: created });
+    }
+
+    if (item.type === "music-album") {
+      const artist = { id: item.foreignArtistId || item.raw?.artist?.foreignArtistId, name: item.artist || item.raw?.artist?.artistName || item.raw?.artistName };
+      const album = { id: item.foreignAlbumId || item.providerId, title: item.title };
+      const requested = await requestLidarrAlbumForSong(artist, album);
+      const job = upsertAcquisitionJob({
+        ...item,
+        library: "music",
+        provider: "lidarr",
+        providerId: item.foreignAlbumId || item.providerId,
+        lidarrArtistId: requested.lidarrArtist.id,
+        lidarrAlbumId: requested.lidarrAlbum.id,
+        status: "requested",
+        message: "Album requested in Lidarr. Homestead will scan Music after import.",
+      });
+      return res.status(201).json({ ok: true, job, result: requested });
+    }
+
+    if (item.type === "music-artist" || item.library === "music") {
+      const artist = await ensureLidarrArtistForRequest({ id: item.foreignArtistId || item.providerId, name: item.title || item.artist });
+      await triggerLidarrArtistSearch(artist.id);
+      const job = upsertAcquisitionJob({
+        ...item,
+        library: "music",
+        provider: "lidarr",
+        providerId: item.foreignArtistId || item.providerId,
+        lidarrArtistId: artist.id,
+        status: "requested",
+        message: "Artist requested in Lidarr. Homestead will scan Music after import.",
+      });
+      return res.status(201).json({ ok: true, job, result: artist });
+    }
+
+    return res.status(400).json({ ok: false, message: "Unsupported acquisition type." });
+  } catch (error) {
+    const job = upsertAcquisitionJob({ ...item, status: "needs-attention", message: error.message || "Request failed" });
+    res.status(502).json({ ok: false, message: error.message || "Request failed", job });
+  }
+});
+
+let acquisitionRefreshRunning = false;
+const acquisitionScanRunning = new Set();
+
+function runAcquisitionScan(library) {
+  if (acquisitionScanRunning.has(library)) return Promise.resolve(false);
+  acquisitionScanRunning.add(library);
+  const jobs = readAcquisitionJobs().map((job) => job.library === library && job.status === "importing"
+    ? { ...job, status: "scanning", updatedAt: new Date().toISOString(), message: `Import complete. Scanning ${library === "books" ? "Books" : "Music"}…` }
+    : job);
+  writeAcquisitionJobs(jobs);
+  return new Promise((resolve) => {
+    runScannerCommands(buildScanCommands({ libraryId: library }), (error) => {
+      if (!error && library === "books") reconcileNestedBooksMediaIndex();
+      const next = readAcquisitionJobs().map((job) => job.library === library && job.status === "scanning"
+        ? { ...job, status: error ? "needs-attention" : "available", updatedAt: new Date().toISOString(), completedAt: error ? "" : new Date().toISOString(), message: error ? `Import finished, but Homestead scan failed: ${error.message}` : "Available in Homestead." }
+        : job);
+      writeAcquisitionJobs(next);
+      acquisitionScanRunning.delete(library);
+      if (!error && ["music", "books"].includes(library)) libraryAutoMatch.start(library, { automatic: true });
+      resolve(!error);
+    });
+  });
+}
+
+async function refreshAcquisitionJobs() {
+  if (acquisitionRefreshRunning) return readAcquisitionJobs();
+  acquisitionRefreshRunning = true;
+  try {
+    let jobs = readAcquisitionJobs();
+    const active = jobs.filter((job) => !["available", "scanning"].includes(job.status)).slice(-100);
+    const binderyQueue = active.some((job) => job.provider === "bindery")
+      ? binderyPayloadItems(await binderyFetch("/api/v1/queue").catch(() => []))
+      : [];
+    let lidarrQueueError = '';
+    const lidarrQueueResponse = active.some((job) => job.provider === 'lidarr')
+      ? await lidarrFetch('/api/v1/queue?page=1&pageSize=1000&includeArtist=true&includeAlbum=true').catch((error) => { lidarrQueueError = error.message; return null; }) : null;
+    const lidarrQueue = Array.isArray(lidarrQueueResponse) ? lidarrQueueResponse : lidarrQueueResponse?.records || [];
+    for (const job of active) {
+      try {
+        if (job.provider === "bindery" && job.binderyBookId) {
+          const book = await binderyFetch(`/api/v1/book/${job.binderyBookId}`);
+          const ready = Boolean(book?.filePath || book?.ebookFilePath || book?.audiobookFilePath || book?.status === "imported");
+          const queueItem = findBinderyQueueItem(book, job, binderyQueue);
+          const remote = binderyAcquisitionState(book, queueItem);
+          const status = ready ? "importing" : remote.status;
+          upsertAcquisitionJob({ ...job, status, percent: queueItem ? requestLifecycle.progressOf(queueItem) : null, lastPollError: '', remoteStatus: queueItem?.status || book?.status || "", message: ready ? "Bindery imported the book. Waiting for Homestead scan." : remote.message });
+        } else if (job.provider === "lidarr" && job.lidarrAlbumId) {
+          const album = await lidarrFetch(`/api/v1/album/${job.lidarrAlbumId}`);
+          const ready = Number(album?.statistics?.trackFileCount || 0) > 0;
+          const transfer = lidarrQueue.find((row) => String(row.albumId || row.album?.id) === String(job.lidarrAlbumId));
+          upsertAcquisitionJob({ ...job, status: ready ? 'importing' : transfer ? 'downloading' : lidarrQueueError ? job.status : 'requested', percent: transfer ? requestLifecycle.progressOf(transfer) : null, eta: transfer?.timeleft || transfer?.estimatedCompletionTime || '', lastPollError: lidarrQueueError, remoteStatus: ready ? 'imported' : transfer?.status || 'monitored', message: ready ? 'Lidarr imported the album. Waiting for Homestead scan.' : transfer ? 'Downloading through Lidarr.' : 'Monitored in Lidarr; waiting for a matching release.' });
+        } else if (job.provider === "lidarr" && job.lidarrArtistId) {
+          const artist = await lidarrFetch(`/api/v1/artist/${job.lidarrArtistId}`);
+          const ready = Number(artist?.statistics?.trackFileCount || 0) > 0;
+          const transfer = lidarrQueue.find((row) => String(row.artistId || row.artist?.id) === String(job.lidarrArtistId));
+          upsertAcquisitionJob({ ...job, status: ready ? 'importing' : transfer ? 'downloading' : lidarrQueueError ? job.status : 'requested', percent: transfer ? requestLifecycle.progressOf(transfer) : null, eta: transfer?.timeleft || transfer?.estimatedCompletionTime || '', lastPollError: lidarrQueueError, remoteStatus: ready ? 'imported' : transfer?.status || 'monitored', message: ready ? 'Lidarr imported music for this artist. Waiting for Homestead scan.' : transfer ? 'Downloading through Lidarr.' : 'Monitored in Lidarr; waiting for a matching release.' });
+        }
+      } catch (error) {
+        upsertAcquisitionJob({ ...job, lastPollError: error.message, message: job.message || "Waiting for provider status." });
+      }
+    }
+    jobs = readAcquisitionJobs();
+    for (const library of ["books", "music"]) {
+      if (jobs.some((job) => job.library === library && job.status === "importing")) await runAcquisitionScan(library);
+    }
+    return readAcquisitionJobs();
+  } finally {
+    acquisitionRefreshRunning = false;
+  }
+}
+
+app.get("/api/acquisition/jobs", async (req, res) => {
+  if (req.query.refresh === "true") await refreshAcquisitionJobs().catch(() => {});
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true, jobs: readAcquisitionJobs() });
+});
+
+async function syncLocalMusicArtistsWithLidarr({ refreshMetadata = false } = {}) {
+  const config = getLidarrConfig();
+  if (!config.url || !config.apiKey) return { ok: false, configured: false, linked: 0, existing: 0, ambiguous: [] };
+  const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {});
+  const localArtists = Object.values(mediaIndex?.libraries?.music || {});
+  const existingArtists = await lidarrFetch("/api/v1/artist");
+  const metadataMatches = readMetadataMatches();
+  let defaults = null;
+  const refreshIds = new Set();
+  const summary = { ok: true, configured: true, linked: 0, existing: 0, refreshed: 0, ambiguous: [], missing: [] };
+
+  for (const local of localArtists) {
+    const name = String(local.name || local.title || local.id || "").trim();
+    if (!name) continue;
+    const localId = String(local.id || local.localId || local.path || name).trim();
+    const pointedMatch = metadataMatches[`music:${localId}`];
+    const fixedMatch = pointedMatch?.aliasOf ? metadataMatches[pointedMatch.aliasOf] : pointedMatch;
+    const mbid = normalizeLidarrMbid(
+      fixedMatch?.foreignArtistId || fixedMatch?.musicbrainzId || fixedMatch?.mbid || fixedMatch?.providerId ||
+      local.foreignArtistId || local.musicbrainzId || local.mbid ||
+      local.metadata?.foreignArtistId || local.metadata?.musicbrainzId || local.metadata?.mbid || ""
+    );
+    const normalizedName = normalizeLidarrCompare(name);
+    const existing = existingArtists.find((artist) =>
+      (mbid && normalizeLidarrMbid(artist.foreignArtistId) === mbid) ||
+      lidarrArtistCompareNames(artist).includes(normalizedName));
+    if (existing) {
+      summary.existing += 1;
+      refreshIds.add(existing.id);
+      continue;
+    }
+    let lookup = await lidarrFetch(`/api/v1/artist/lookup?term=${encodeURIComponent(mbid ? `lidarr:${mbid}` : name)}`).catch(() => []);
+    let exact = (Array.isArray(lookup) ? lookup : []).filter((artist) =>
+      (mbid && normalizeLidarrMbid(artist.foreignArtistId) === mbid) ||
+      lidarrArtistCompareNames(artist).includes(normalizedName));
+    if (mbid && exact.length === 0) {
+      lookup = await lidarrFetch(`/api/v1/artist/lookup?term=${encodeURIComponent(name)}`).catch(() => []);
+      exact = (Array.isArray(lookup) ? lookup : []).filter((artist) => lidarrArtistCompareNames(artist).includes(normalizedName));
+    }
+    if (exact.length !== 1) {
+      (exact.length > 1 ? summary.ambiguous : summary.missing).push({ name, mbid, candidates: exact.map((candidate) => ({ id: candidate.foreignArtistId, name: candidate.artistName || candidate.name })) });
+      continue;
+    }
+    const candidate = exact[0];
+    try {
+      defaults ||= await getLidarrDefaults();
+      const added = await lidarrFetch("/api/v1/artist", {
+        method: "POST",
+        body: JSON.stringify({
+          ...candidate,
+          monitored: false,
+          rootFolderPath: defaults.rootFolder.path,
+          qualityProfileId: defaults.qualityProfile.id,
+          metadataProfileId: defaults.metadataProfile.id,
+          addOptions: { monitor: "none", searchForMissingAlbums: false },
+        }),
+      });
+      existingArtists.push(added);
+      refreshIds.add(added.id);
+      summary.linked += 1;
+    } catch (error) {
+      summary.missing.push({ name, mbid, error: error.message });
+    }
+  }
+  if (refreshMetadata && refreshIds.size) {
+    try {
+      await lidarrFetch("/api/v1/command", {
+        method: "POST",
+        body: JSON.stringify({ name: "RefreshArtist", artistIds: Array.from(refreshIds) }),
+      });
+      summary.refreshed = refreshIds.size;
+    } catch (error) {
+      summary.refreshError = error.message || "Lidarr metadata refresh could not be started.";
+    }
+  }
+  writeJsonFile(path.join(dataDir, "lidarr-local-links.json"), { ...summary, updatedAt: new Date().toISOString() });
+  return summary;
+}
+
+app.post("/api/integrations/lidarr/link-local-artists", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    res.json(await syncLocalMusicArtistsWithLidarr({ refreshMetadata: req.body?.refreshMetadata !== false }));
+  } catch (error) {
+    res.status(502).json({ ok: false, message: error.message || "Could not link local artists to Lidarr." });
   }
 });
 
@@ -9244,7 +16159,7 @@ app.delete("/api/livetv/sources/:sourceId", (req, res) => {
   });
 });
 
-app.post("/api/livetv/sources/:sourceId/scan", async (req, res) => {
+app.post("/api/livetv/sources/:sourceId/scan", homesteadAccess.requireAdmin, async (req, res) => {
   try {
     const config = getLiveTvConfig();
     const { sourceId } = req.params;
@@ -9340,7 +16255,7 @@ app.get("/api/livetv/epg", (req, res) => {
   });
 });
 
-app.post("/api/livetv/sources/scan-all", async (req, res) => {
+app.post("/api/livetv/sources/scan-all", homesteadAccess.requireAdmin, async (req, res) => {
   try {
     const config = getLiveTvConfig();
     const enabledSources = (config.liveTvSources || []).filter((source) => {
@@ -9720,6 +16635,7 @@ const ADULT_IMPORT_TYPE_FOLDERS = {
   poster: "",
   banner: "",
   headshot: "",
+  trailer: "",
   artwork: "artwork",
   reference: "references",
   scene: "scenes",
@@ -9791,7 +16707,7 @@ function isAllowedAdultImportMedia(importType, ext, contentType = "") {
   if (["photo", "photos", "gallery", "nude", "nudes", "adultSet", "poster", "banner", "headshot", "artwork", "reference", "private"].includes(importType)) {
     return ADULT_IMPORT_IMAGE_EXTS.has(ext) || lower.startsWith("image/");
   }
-  if (["scene", "video"].includes(importType)) {
+  if (["scene", "video", "trailer"].includes(importType)) {
     return ADULT_IMPORT_VIDEO_EXTS.has(ext) || lower.startsWith("video/") || lower.includes("application/octet-stream");
   }
   if (importType === "ai") {
@@ -9937,7 +16853,7 @@ async function downloadAdultImportMediaToProfile({ mediaUrl, rawPageUrl = "", pr
   const response = await fetch(mediaUrl, {
     headers: {
       "User-Agent": "Homestead/1.0 AdultImport (+user-initiated)",
-      Accept: importType === "scene" || importType === "video" ? "video/*,*/*" : "image/*,*/*",
+      Accept: ["scene", "video", "trailer"].includes(importType) ? "video/*,*/*" : "image/*,*/*",
       Referer: rawPageUrl || undefined,
     },
     redirect: "follow",
@@ -9951,12 +16867,12 @@ async function downloadAdultImportMediaToProfile({ mediaUrl, rawPageUrl = "", pr
   const ext = extensionFromContentType(contentType, mediaUrl);
 
   if (!isAllowedAdultImportMedia(importType, ext, contentType)) {
-    throw new Error(`URL did not return an allowed ${importType === "scene" || importType === "video" ? "video" : "image"} file${contentType ? ` (${contentType})` : ""}.`);
+    throw new Error(`URL did not return an allowed ${["scene", "video", "trailer"].includes(importType) ? "video" : "image"} file${contentType ? ` (${contentType})` : ""}.`);
   }
 
   const parsed = new URL(mediaUrl);
   const sourceBaseName = sanitizeAdultImportSegment(path.basename(parsed.pathname, path.extname(parsed.pathname)) || `${sourceSlug}-${Date.now()}-${index + 1}`);
-  const finalExt = ext || (importType === "scene" ? ".mp4" : ".jpg");
+  const finalExt = ext || (["scene", "video", "trailer"].includes(importType) ? ".mp4" : ".jpg");
   let destination;
 
   if (importType === "poster") {
@@ -9965,6 +16881,8 @@ async function downloadAdultImportMediaToProfile({ mediaUrl, rawPageUrl = "", pr
     destination = path.join(profileDir, `banner${finalExt}`);
   } else if (importType === "headshot") {
     destination = path.join(profileDir, `headshot${finalExt}`);
+  } else if (importType === "trailer") {
+    destination = path.join(profileDir, `trailer${finalExt || ".mp4"}`);
   } else {
     const folder = importType === "nude" || importType === "nudes" || importType === "adultSet"
       ? "nudes"
@@ -9977,7 +16895,7 @@ async function downloadAdultImportMediaToProfile({ mediaUrl, rawPageUrl = "", pr
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  const isVideoImport = importType === "scene" || importType === "video";
+  const isVideoImport = ["scene", "video", "trailer"].includes(importType);
   const maxBytes = isVideoImport ? ADULT_IMPORT_MAX_VIDEO_BYTES : ADULT_IMPORT_MAX_IMAGE_BYTES;
   if (buffer.length > maxBytes) {
     const maxMb = Math.round(maxBytes / 1024 / 1024);
@@ -9990,7 +16908,7 @@ async function downloadAdultImportMediaToProfile({ mediaUrl, rawPageUrl = "", pr
     type: importType === "nude" || importType === "nudes" || importType === "adultSet" ? "nude" : importType,
     destinationType: importType === "nude" || importType === "nudes" || importType === "adultSet"
       ? "nudes"
-      : (["poster", "banner", "headshot"].includes(importType) ? importType : (ADULT_IMPORT_TYPE_FOLDERS[importType] || "photos")),
+      : (["poster", "banner", "headshot", "trailer"].includes(importType) ? importType : (ADULT_IMPORT_TYPE_FOLDERS[importType] || "photos")),
     sourceName,
     sourceUrl: rawPageUrl || mediaUrl,
     directUrl: mediaUrl,
@@ -10132,6 +17050,10 @@ app.post("/api/adult/import-preview-url", async (req, res) => {
 app.post("/api/adult/import-url", async (req, res) => {
   try {
     const rawUrl = String(req.body?.url || "").trim();
+    const sourcePageUrl = String(req.body?.sourcePageUrl || rawUrl).trim();
+    const requestedSelectedUrls = Array.isArray(req.body?.selectedUrls)
+      ? req.body.selectedUrls.map((value) => String(value || "").trim()).filter((value) => /^https?:\/\//i.test(value))
+      : [];
     const targetLibrary = String(req.body?.targetLibrary || "performers").trim();
     const profileName = String(req.body?.profileName || "").trim();
     const importType = String(req.body?.importType || "photo").trim();
@@ -10175,6 +17097,77 @@ app.post("/api/adult/import-url", async (req, res) => {
         profileName,
         profileId: path.basename(profileDir),
         message: "Saved source reference."
+      });
+    }
+
+    if (requestedSelectedUrls.length) {
+      if (req.body?.userApproved !== true) {
+        return res.status(400).json({ ok: false, error: "Review and approve the selected media before importing it." });
+      }
+      const isSingleArtwork = ["poster", "banner", "headshot", "trailer"].includes(importType);
+      const selectionLimit = isSingleArtwork ? 1 : (["scene", "video"].includes(importType) ? 50 : 100);
+      const seenSelection = new Set();
+      const selectedUrls = requestedSelectedUrls.filter((mediaUrl) => {
+        const key = adultGalleryDedupeKey(mediaUrl);
+        if (!key || seenSelection.has(key)) return false;
+        seenSelection.add(key);
+        return true;
+      }).slice(0, selectionLimit);
+      const imported = [];
+      const failed = [];
+      const skipped = [];
+      const existingKeys = getExistingAdultImportKeys(profileDir);
+
+      for (const [index, mediaUrl] of selectedUrls.entries()) {
+        const normalizedKey = normalizeAdultImportUrlKey(mediaUrl);
+        const basenameKey = adultImportBasenameKey(mediaUrl);
+        if ((normalizedKey && existingKeys.urlKeys.has(normalizedKey)) || (basenameKey && existingKeys.basenameKeys.has(basenameKey))) {
+          skipped.push({ url: mediaUrl, reason: "duplicate" });
+          continue;
+        }
+        try {
+          const record = await downloadAdultImportMediaToProfile({
+            mediaUrl,
+            rawPageUrl: sourcePageUrl,
+            profileDir,
+            importType,
+            sourceName,
+            sourceSlug,
+            index,
+            now,
+          });
+          appendAdultImportRecord(profileDir, record);
+          imported.push(record);
+          if (record.directUrl) existingKeys.urlKeys.add(normalizeAdultImportUrlKey(record.directUrl));
+          if (record.directUrl) existingKeys.basenameKeys.add(adultImportBasenameKey(record.directUrl));
+        } catch (error) {
+          failed.push({ url: mediaUrl, message: error.message || "Import failed" });
+        }
+      }
+
+      const scanLibrary = adultLibraryIdFromProfileLibrary(targetLibrary);
+      if (imported.length) runMediaScan();
+      return res.json({
+        ok: true,
+        importedAs: importType,
+        sourcePageUrl,
+        selectedImport: true,
+        selectedCount: selectedUrls.length,
+        importedCount: imported.length,
+        failedCount: failed.length,
+        skippedCount: skipped.length,
+        imported,
+        failed,
+        skipped,
+        destination: imported[0]?.destination || "",
+        relativeDestination: imported[0]?.relativeDestination || "",
+        record: imported[0] || null,
+        scanRequested: imported.length > 0,
+        scanLibrary,
+        targetLibrary,
+        profileName,
+        profileId: path.basename(profileDir),
+        message: `Imported ${imported.length} selected item${imported.length === 1 ? "" : "s"}${skipped.length ? `; skipped ${skipped.length} duplicate${skipped.length === 1 ? "" : "s"}` : ""}${failed.length ? `; ${failed.length} failed.` : "."}`,
       });
     }
 
@@ -10406,7 +17399,7 @@ function inferAdultUploadMediaType(importType = "photo", ext = "", contentType =
   const lower = String(contentType || "").toLowerCase();
   if (["poster", "banner", "headshot", "nude", "private"].includes(importType)) return importType;
   if (importType === "ai") return ADULT_IMPORT_VIDEO_EXTS.has(ext) || lower.startsWith("video/") ? "video" : "image";
-  if (["scene", "video"].includes(importType)) return "video";
+  if (["scene", "video", "trailer"].includes(importType)) return "video";
   return "image";
 }
 
@@ -10433,6 +17426,8 @@ function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceN
     destination = path.join(profileDir, `banner${ext || ".jpg"}`);
   } else if (normalizedImportType === "headshot") {
     destination = path.join(profileDir, `headshot${ext || ".jpg"}`);
+  } else if (normalizedImportType === "trailer") {
+    destination = path.join(profileDir, `trailer${ext || ".mp4"}`);
   } else {
     const folder = normalizedImportType === "nude" || normalizedImportType === "nudes" || normalizedImportType === "adultSet"
       ? "nudes"
@@ -10450,7 +17445,7 @@ function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceN
     id: `adult-upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type: normalizedImportType === "nude" || normalizedImportType === "nudes" || normalizedImportType === "adultSet" ? "nude" : normalizedImportType,
     mediaType: inferAdultUploadMediaType(normalizedImportType, ext, file.contentType),
-    destinationType: ["poster", "banner", "headshot"].includes(normalizedImportType)
+    destinationType: ["poster", "banner", "headshot", "trailer"].includes(normalizedImportType)
       ? normalizedImportType
       : (normalizedImportType === "nude" || normalizedImportType === "nudes" || normalizedImportType === "adultSet" ? "nudes" : (ADULT_IMPORT_TYPE_FOLDERS[normalizedImportType] || "photos")),
     sourceName,
@@ -10567,6 +17562,15 @@ function normalizeEpornerVideoToAdultScene(video = {}) {
     : [];
   const defaultThumb = normalizeEpornerThumb(video.default_thumb) || thumbs[0] || "";
   const url = normalizeEpornerString(video.url);
+  const performers = [video.performers, video.cast, video.models, video.pornstars, video.actors, video.actresses]
+    .flat()
+    .filter(Boolean)
+    .map((entry) => typeof entry === "string" ? { name: entry } : {
+      name: entry.name || entry.title || entry.username || "",
+      imageUrl: entry.imageUrl || entry.image || entry.thumb || entry.thumbnail || "",
+      url: entry.url || entry.profileUrl || "",
+    })
+    .filter((entry) => entry.name);
   return {
     id: id ? `eporner-${id}` : `eporner-${slugifyAdultImportSegment(video.title || url || Date.now())}`,
     providerId: id,
@@ -10582,6 +17586,7 @@ function normalizeEpornerVideoToAdultScene(video = {}) {
     thumbnail: defaultThumb,
     thumbs,
     keywords: normalizeEpornerKeywords(video.keywords),
+    performers,
     added: normalizeEpornerString(video.added),
     duration: normalizeEpornerString(video.length_min),
     length: normalizeEpornerString(video.length_min),
@@ -11197,6 +18202,8 @@ app.post("/api/adult/media/set-artwork", async (req, res) => {
       destination,
       relativeDestination,
       publicPath: destination,
+      publicUrl: `/api/file?path=${encodeURIComponent(destination)}&v=${Date.parse(now)}`,
+      artworkVersion: Date.parse(now),
       mediaType: isVideo && !croppedBuffer ? "video" : "image",
       cropped: Boolean(croppedBuffer),
       crop: crop || null,
@@ -11211,6 +18218,41 @@ app.post("/api/adult/media/set-artwork", async (req, res) => {
   }
 });
 
+async function createPantyBackgroundCutout(inputPath, outputPath, sensitivity = 50) {
+  const resolvedInput = path.resolve(String(inputPath || ""));
+  const resolvedOutput = path.resolve(String(outputPath || ""));
+  if (!fs.existsSync(resolvedInput) || !fs.statSync(resolvedInput).isFile()) throw new Error("The source artwork image could not be found.");
+  fs.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
+  const temporaryOutput = path.join(path.dirname(resolvedOutput), `.${path.basename(resolvedOutput, path.extname(resolvedOutput))}-${crypto.randomBytes(5).toString("hex")}.png`);
+  const attempts = [
+    { command: "rembg", args: ["i", "-m", "u2net", resolvedInput, temporaryOutput], engine: "rembg" },
+    { command: "python3", args: ["-m", "rembg", "i", "-m", "u2net", resolvedInput, temporaryOutput], engine: "python3-rembg" },
+    { command: "python", args: ["-m", "rembg", "i", "-m", "u2net", resolvedInput, temporaryOutput], engine: "python-rembg" },
+  ];
+  let lastError = null;
+  try {
+    for (const attempt of attempts) {
+      try {
+        await execFilePromise(attempt.command, attempt.args, { timeout: 180000, maxBuffer: 8 * 1024 * 1024 });
+        if (!fs.existsSync(temporaryOutput) || fs.statSync(temporaryOutput).size < 100) throw new Error("rembg did not create a usable cutout.");
+        if (sharp) {
+          const metadata = await sharp(temporaryOutput).metadata();
+          if (metadata.format !== "png" || metadata.hasAlpha === false) throw new Error("rembg returned an image without transparency.");
+        }
+        if (fs.existsSync(resolvedOutput)) fs.unlinkSync(resolvedOutput);
+        fs.renameSync(temporaryOutput, resolvedOutput);
+        return { engine: attempt.engine, sensitivity: Math.max(0, Math.min(100, Number(sensitivity) || 50)) };
+      } catch (error) {
+        lastError = error;
+        if (fs.existsSync(temporaryOutput)) fs.rmSync(temporaryOutput, { force: true });
+      }
+    }
+  } finally {
+    if (fs.existsSync(temporaryOutput)) fs.rmSync(temporaryOutput, { force: true });
+  }
+  const unavailable = ["ENOENT", 127].includes(lastError?.code) || /not found|No module named rembg/i.test(String(lastError?.message || ""));
+  throw new Error(unavailable ? "Background removal is not installed in this Homestead container. Install rembg and restart Homestead." : `Background removal failed: ${lastError?.message || "rembg could not process this image."}`);
+}
 
 app.post("/api/adult/media/remove-artwork-background", express.json({ limit: "1mb" }), async (req, res) => {
   try {
@@ -11494,7 +18536,8 @@ function getCustomCollectionPath(collectionId = "") {
 }
 
 function normalizeCustomCollectionItem(item = {}, index = 0) {
-  const library = item.library === "tv" ? "tv" : "movies";
+  const requestedLibrary = String(item.library || "movies");
+  const library = ["movies", "tv", "books", "youtube"].includes(requestedLibrary) ? requestedLibrary : "movies";
   const sourceId = String(item.sourceId || item.id || item.localId || "").trim();
   const title = String(item.title || item.name || "").trim();
   if (!sourceId && !title) return null;
@@ -11502,6 +18545,13 @@ function normalizeCustomCollectionItem(item = {}, index = 0) {
     library,
     sourceId,
     title,
+    poster: String(item.poster || item.thumbnail || item.thumb || "").trim(),
+    creatorId: String(item.creatorId || "").trim(),
+    creatorName: String(item.creatorName || "").trim(),
+    series: String(item.series || "").trim(),
+    season: String(item.season || "").trim(),
+    releaseDate: String(item.releaseDate || item.publishedAt || "").trim(),
+    sourcePath: String(item.sourcePath || item.path || item.publicPath || "").trim(),
     order: Number.isFinite(Number(item.order)) ? Number(item.order) : index + 1,
   };
 }
@@ -11517,9 +18567,15 @@ function normalizeCustomCollectionPayload(payload = {}, existing = null) {
   return {
     id,
     name,
+    generatedCollectionId: String(payload.generatedCollectionId ?? existing?.generatedCollectionId ?? "").trim(),
     description: String(payload.description ?? existing?.description ?? "").trim(),
     poster: String(payload.poster ?? existing?.poster ?? "").trim(),
     banner: String(payload.banner ?? existing?.banner ?? "").trim(),
+    background: String(payload.background ?? existing?.background ?? "").trim(),
+    backgroundOpacity: Math.max(0, Math.min(1, Number(payload.backgroundOpacity ?? existing?.backgroundOpacity ?? 0.3))),
+    backgroundBlur: Math.max(0, Math.min(40, Number(payload.backgroundBlur ?? existing?.backgroundBlur ?? 0))),
+    backgroundBrightness: Math.max(20, Math.min(180, Number(payload.backgroundBrightness ?? existing?.backgroundBrightness ?? 75))),
+    backgroundPosition: String(payload.backgroundPosition ?? existing?.backgroundPosition ?? "center").trim() || "center",
     tags: Array.isArray(payload.tags) ? payload.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : (existing?.tags || []),
     source: "custom",
     sortMode: "manual",
@@ -11655,6 +18711,8 @@ app.delete("/api/collections/order-overrides/:collectionId", (req, res) => {
 
 // User-editable titles and artwork for generated metadata/smart collections.
 const collectionAppearanceOverridesDir = path.join(dataDir, "collections", "appearance-overrides");
+const collectionBackgroundsDir = path.join(dataDir, "collections", "backgrounds");
+const collectionArtworkDir = path.join(dataDir, "collections", "artwork");
 
 function sanitizeCollectionAppearanceOverrideId(value = "") {
   return String(value || "collection")
@@ -11680,7 +18738,85 @@ function readAllCollectionAppearanceOverrides() {
     .filter(Boolean);
 }
 
-app.get("/api/collections/appearance-overrides", (req, res) => {
+function findCollectionBackground(collectionId = "") {
+  fs.mkdirSync(collectionBackgroundsDir, { recursive: true });
+  const safeId = sanitizeCollectionAppearanceOverrideId(collectionId);
+  for (const extension of [".jpg", ".png", ".webp", ".gif"]) {
+    const candidate = path.join(collectionBackgroundsDir, `${safeId}${extension}`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "";
+}
+
+function findCollectionArtwork(collectionId = "", requestedRole = "poster") {
+  fs.mkdirSync(collectionArtworkDir, { recursive: true });
+  const safeId = sanitizeCollectionAppearanceOverrideId(collectionId);
+  const role = requestedRole === "banner" ? "banner" : "poster";
+  for (const extension of [".jpg", ".png", ".webp"]) {
+    const candidate = path.join(collectionArtworkDir, `${safeId}-${role}${extension}`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "";
+}
+
+app.get("/api/collections/:collectionId/artwork/:role", homesteadAccess.requireSession, (req, res) => {
+  const filePath = findCollectionArtwork(req.params.collectionId, req.params.role);
+  if (!filePath) return res.status(404).send("Collection artwork not found.");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  return res.sendFile(filePath);
+});
+
+app.post("/api/collections/:collectionId/artwork/:role", homesteadAccess.requireAdmin, express.raw({ type: "application/octet-stream", limit: "20mb" }), async (req, res) => {
+  try {
+    const safeId = sanitizeCollectionAppearanceOverrideId(req.params.collectionId);
+    const role = req.params.role === "banner" ? "banner" : "poster";
+    const contentType = String(req.get("x-homestead-content-type") || "").toLowerCase();
+    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : contentType.includes("jpeg") || contentType.includes("jpg") ? ".jpg" : "";
+    if (!extension || !Buffer.isBuffer(req.body) || req.body.length < 32) throw new Error("Choose a JPG, PNG, or WebP image.");
+    if (sharp) await sharp(req.body, { animated: false }).metadata();
+    fs.mkdirSync(collectionArtworkDir, { recursive: true });
+    for (const previousExtension of [".jpg", ".png", ".webp"]) {
+      const previous = path.join(collectionArtworkDir, `${safeId}-${role}${previousExtension}`);
+      if (fs.existsSync(previous)) fs.unlinkSync(previous);
+    }
+    const destination = path.join(collectionArtworkDir, `${safeId}-${role}${extension}`);
+    fs.writeFileSync(destination, req.body);
+    const version = String(Math.floor(fs.statSync(destination).mtimeMs));
+    return res.json({ ok: true, role, url: `/api/collections/${encodeURIComponent(safeId)}/artwork/${role}?v=${version}` });
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message || "Could not save the collection artwork." });
+  }
+});
+
+app.get("/api/collections/:collectionId/background", homesteadAccess.requireSession, (req, res) => {
+  const filePath = findCollectionBackground(req.params.collectionId);
+  if (!filePath) return res.status(404).send("Collection background not found.");
+  res.setHeader("Cache-Control", "private, max-age=300");
+  return res.sendFile(filePath);
+});
+
+app.post("/api/collections/:collectionId/background", homesteadAccess.requireAdmin, express.raw({ type: "application/octet-stream", limit: "32mb" }), async (req, res) => {
+  try {
+    const safeId = sanitizeCollectionAppearanceOverrideId(req.params.collectionId);
+    const contentType = String(req.get("x-homestead-content-type") || "").toLowerCase();
+    const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : contentType.includes("gif") ? ".gif" : contentType.includes("jpeg") || contentType.includes("jpg") ? ".jpg" : "";
+    if (!extension || !Buffer.isBuffer(req.body) || req.body.length < 32) throw new Error("Choose a JPG, PNG, WebP, or GIF image.");
+    if (sharp) await sharp(req.body, { animated: false }).metadata();
+    fs.mkdirSync(collectionBackgroundsDir, { recursive: true });
+    for (const previousExtension of [".jpg", ".png", ".webp", ".gif"]) {
+      const previous = path.join(collectionBackgroundsDir, `${safeId}${previousExtension}`);
+      if (fs.existsSync(previous)) fs.unlinkSync(previous);
+    }
+    const destination = path.join(collectionBackgroundsDir, `${safeId}${extension}`);
+    fs.writeFileSync(destination, req.body);
+    const version = String(Math.floor(fs.statSync(destination).mtimeMs));
+    res.json({ ok: true, url: `/api/collections/${encodeURIComponent(safeId)}/background?v=${version}` });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || "Could not save the collection background." });
+  }
+});
+
+app.get("/api/collections/appearance-overrides", homesteadAccess.requireSession, (req, res) => {
   try {
     res.json({ ok: true, overrides: readAllCollectionAppearanceOverrides(), storagePath: collectionAppearanceOverridesDir });
   } catch (error) {
@@ -11689,10 +18825,19 @@ app.get("/api/collections/appearance-overrides", (req, res) => {
   }
 });
 
-app.post("/api/collections/appearance-overrides", (req, res) => {
+app.post("/api/collections/appearance-overrides", homesteadAccess.requireAdmin, (req, res) => {
   try {
     const collectionId = sanitizeCollectionAppearanceOverrideId(req.body?.collectionId || req.body?.id);
     const { filePath } = getCollectionAppearanceOverridePath(collectionId);
+    const knowledgeSources = (Array.isArray(req.body?.knowledgeSources) ? req.body.knowledgeSources : []).slice(0, 5).map((source) => {
+      const parsed = new URL(String(source?.url || "").trim());
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("Collection knowledge links must use a public HTTP or HTTPS URL.");
+      return {
+        label: String(source?.label || parsed.hostname || "Website").trim().slice(0, 80),
+        url: parsed.toString(),
+        mode: source?.mode === "suggest" ? "suggest" : "reference",
+      };
+    });
     const override = {
       collectionId,
       source: String(req.body?.source || "metadata").trim(),
@@ -11700,6 +18845,12 @@ app.post("/api/collections/appearance-overrides", (req, res) => {
       description: String(req.body?.description || "").trim(),
       poster: String(req.body?.poster || "").trim(),
       banner: String(req.body?.banner || "").trim(),
+      background: String(req.body?.background || "").trim(),
+      backgroundOpacity: Math.max(0, Math.min(1, Number(req.body?.backgroundOpacity ?? 0.3))),
+      backgroundBlur: Math.max(0, Math.min(40, Number(req.body?.backgroundBlur ?? 0))),
+      backgroundBrightness: Math.max(20, Math.min(180, Number(req.body?.backgroundBrightness ?? 75))),
+      backgroundPosition: String(req.body?.backgroundPosition || "center").trim() || "center",
+      knowledgeSources,
       updatedAt: new Date().toISOString(),
     };
     writeJsonFile(filePath, override);
@@ -12038,13 +19189,237 @@ const activityDataPath = intakeQueuePath;
 
 const intakeLibraryRecordsDir = path.join(intakeDataDir, "library-records");
 
+// Canonical on-disk trading-card library. JSON library records remain a fast index,
+// while these folders are the durable source that survives browser/container rebuilds.
+const TCG_STORAGE_FIX_VERSION = "2026-08-06-media-inventory-v2";
+const tcgCanonicalRoot = path.resolve(process.env.HOMESTEAD_INVENTORY_ROOT || "/media/inventory", "tcg");
+if (tcgCanonicalRoot.startsWith(path.resolve(dataDir) + path.sep)) {
+  throw new Error(`Refusing to store canonical TCG files inside app data: ${tcgCanonicalRoot}`);
+}
+console.log(`[Homestead] TCG canonical storage ${TCG_STORAGE_FIX_VERSION}: ${tcgCanonicalRoot}`);
+
+function slugifyTcgPathPart(value = "", fallback = "unknown") {
+  const slug = String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160);
+  return slug || fallback;
+}
+
+function getTcgCanonicalPaths(record = {}, printing = {}) {
+  const game = slugifyTcgPathPart(record.tcg?.game || printing.game || "yugioh", "yugioh");
+  const cardName = slugifyTcgPathPart(
+    record.tcg?.cardName || record.title || record.name || "unknown-card",
+    "unknown-card"
+  );
+  const printCode = slugifyTcgPathPart(
+    printing.setCode || record.tcg?.setCode || "unknown-print",
+    "unknown-print"
+  );
+  const cardDir = path.join(tcgCanonicalRoot, game, cardName);
+  const printingDir = path.join(cardDir, printCode);
+  return {
+    game,
+    cardName,
+    printCode,
+    cardDir,
+    printingDir,
+    metadataPath: path.join(printingDir, "metadata.json"),
+    frontPath: path.join(printingDir, "front.jpg"),
+  };
+}
+
+function writeTcgFrontFromDataUrl(dataUrl = "", outputPath = "") {
+  const match = String(dataUrl || "").match(/^data:image\/(?:jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match || !outputPath) return false;
+  fs.writeFileSync(outputPath, Buffer.from(match[1].replace(/\s+/g, ""), "base64"));
+  return true;
+}
+
+async function downloadTcgFrontImage(url = "", outputPath = "") {
+  const source = String(url || "").trim();
+  if (!/^https?:\/\//i.test(source) || !outputPath) return false;
+  const response = await fetch(source, {
+    signal: AbortSignal.timeout ? AbortSignal.timeout(12000) : undefined,
+    headers: { "User-Agent": "Homestead/1.0" },
+  });
+  if (!response.ok) throw new Error(`Artwork download failed with HTTP ${response.status}.`);
+  const contentType = String(response.headers.get("content-type") || "");
+  if (!contentType.startsWith("image/")) throw new Error("Artwork URL did not return an image.");
+  fs.writeFileSync(outputPath, Buffer.from(await response.arrayBuffer()));
+  return true;
+}
+
+function makeCanonicalTcgMetadata(record = {}, printing = {}, paths = {}) {
+  return {
+    schemaVersion: 1,
+    type: "tcg-printing",
+    recordId: record.id || record.homesteadId || "",
+    homesteadId: record.homesteadId || record.id || "",
+    libraryId: "inventory",
+    category: "trading-cards",
+    title: record.tcg?.cardName || record.title || record.name || "Untitled card",
+    name: record.tcg?.cardName || record.name || record.title || "Untitled card",
+    game: record.tcg?.game || printing.game || "yugioh",
+    cardSlug: paths.cardName || "",
+    printingSlug: paths.printCode || "",
+    images: { front: "front.jpg" },
+    tcg: {
+      ...(record.tcg || {}),
+      ...printing,
+      printings: undefined,
+      totalQuantity: undefined,
+    },
+    notes: record.notes || "",
+    captures: [],
+    source: "homestead-canonical-tcg",
+    createdAt: printing.createdAt || record.createdAt || new Date().toISOString(),
+    updatedAt: printing.updatedAt || record.updatedAt || new Date().toISOString(),
+  };
+}
+
+function persistTcgCanonicalRecord(record = {}) {
+  if (!record?.tcg) return;
+  const printings = Array.isArray(record.tcg.printings) && record.tcg.printings.length
+    ? record.tcg.printings
+    : [record.tcg];
+
+  printings.forEach((printing) => {
+    const paths = getTcgCanonicalPaths(record, printing);
+    fs.mkdirSync(paths.printingDir, { recursive: true });
+    writeJsonFile(paths.metadataPath, makeCanonicalTcgMetadata(record, printing, paths));
+
+    if (fs.existsSync(paths.frontPath)) return;
+
+    const capture = (Array.isArray(record.captures) ? record.captures : []).find(
+      (item) => /^data:image\//i.test(String(item?.dataUrl || ""))
+    );
+    const artwork = String(
+      printing.selectedArtwork ||
+      printing.selectedPrinting?.image ||
+      record.tcg?.selectedArtwork ||
+      record.tcg?.selectedPrinting?.image ||
+      ""
+    ).trim();
+
+    // Prefer the selected catalog artwork. The phone capture is used only as a
+    // fallback so recognition photos do not replace the clean card-front image.
+    if (/^data:image\//i.test(artwork)) {
+      writeTcgFrontFromDataUrl(artwork, paths.frontPath);
+    } else if (/^https?:\/\//i.test(artwork)) {
+      downloadTcgFrontImage(artwork, paths.frontPath).catch((error) => {
+        console.warn("Unable to cache canonical TCG artwork:", error.message || error);
+        if (capture?.dataUrl) writeTcgFrontFromDataUrl(capture.dataUrl, paths.frontPath);
+      });
+    } else if (capture?.dataUrl) {
+      writeTcgFrontFromDataUrl(capture.dataUrl, paths.frontPath);
+    }
+  });
+}
+
+function readCanonicalTcgRecords() {
+  if (!fs.existsSync(tcgCanonicalRoot)) return [];
+  const grouped = new Map();
+
+  const gameDirs = fs.readdirSync(tcgCanonicalRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  gameDirs.forEach((gameEntry) => {
+    const gameDir = path.join(tcgCanonicalRoot, gameEntry.name);
+    fs.readdirSync(gameDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).forEach((cardEntry) => {
+      const cardDir = path.join(gameDir, cardEntry.name);
+      fs.readdirSync(cardDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).forEach((printingEntry) => {
+        const printingDir = path.join(cardDir, printingEntry.name);
+        const metadataPath = path.join(printingDir, "metadata.json");
+        if (!fs.existsSync(metadataPath)) return;
+        const metadata = readJsonFile(metadataPath, null);
+        if (!metadata || metadata.type !== "tcg-printing" || !metadata.tcg) return;
+
+        const recordId = String(metadata.recordId || metadata.homesteadId || `tcg-${gameEntry.name}-${cardEntry.name}`);
+        if (!grouped.has(recordId)) {
+          grouped.set(recordId, {
+            id: recordId,
+            homesteadId: metadata.homesteadId || recordId,
+            libraryId: "inventory",
+            title: metadata.title || metadata.name || metadata.tcg.cardName || "Untitled card",
+            name: metadata.name || metadata.title || metadata.tcg.cardName || "Untitled card",
+            notes: metadata.notes || "",
+            category: "trading-cards",
+            captures: [],
+            metadata: {},
+            source: "homestead-canonical-tcg",
+            status: "active",
+            createdAt: metadata.createdAt || new Date().toISOString(),
+            updatedAt: metadata.updatedAt || new Date().toISOString(),
+            tcgBase: {
+              game: metadata.game || metadata.tcg.game || gameEntry.name,
+              cardName: metadata.title || metadata.tcg.cardName || "Untitled card",
+              cardIdentityKey: metadata.tcg.cardIdentityKey || metadata.tcg.providerCardId || metadata.title || cardEntry.name,
+              providerCardId: metadata.tcg.providerCardId || "",
+            },
+            printings: [],
+          });
+        }
+
+        const group = grouped.get(recordId);
+        const frontPath = path.join(printingDir, metadata.images?.front || "front.jpg");
+        const frontUrl = fs.existsSync(frontPath)
+          ? `/api/file?path=${encodeURIComponent(frontPath)}`
+          : metadata.tcg.selectedArtwork || metadata.tcg.selectedPrinting?.image || "";
+        group.printings.push({
+          ...metadata.tcg,
+          selectedArtwork: frontUrl || metadata.tcg.selectedArtwork || "",
+          selectedPrinting: metadata.tcg.selectedPrinting
+            ? { ...metadata.tcg.selectedPrinting, image: frontUrl || metadata.tcg.selectedPrinting.image || "" }
+            : metadata.tcg.selectedPrinting,
+        });
+        if (new Date(metadata.updatedAt || 0) > new Date(group.updatedAt || 0)) group.updatedAt = metadata.updatedAt;
+      });
+    });
+  });
+
+  return [...grouped.values()].map((group) => {
+    const tcg = summarizeTcgPrintings(group.tcgBase, group.printings);
+    return {
+      id: group.id,
+      homesteadId: group.homesteadId,
+      libraryId: "inventory",
+      title: group.title,
+      name: group.name,
+      notes: group.notes,
+      category: "trading-cards",
+      tcg,
+      captures: [],
+      metadata: { thumbnail: tcg.selectedArtwork || "" },
+      poster: tcg.selectedArtwork || "",
+      source: group.source,
+      status: group.status,
+      createdAt: group.createdAt,
+      updatedAt: group.updatedAt,
+    };
+  });
+}
+
 function intakeLibraryRecordsPath(libraryId = "inventory") {
   const safeLibrary = String(libraryId || "inventory").replace(/[^a-z0-9_-]/gi, "") || "inventory";
   return path.join(intakeLibraryRecordsDir, `${safeLibrary}.json`);
 }
 
 function readIntakeLibraryRecords(libraryId = "inventory") {
-  return readIntakeCollection(intakeLibraryRecordsPath(libraryId));
+  const indexed = readIntakeCollection(intakeLibraryRecordsPath(libraryId));
+  if (libraryId !== "inventory") return indexed;
+
+  const canonical = readCanonicalTcgRecords();
+  if (!canonical.length) return indexed;
+
+  const canonicalIds = new Set(canonical.map((record) => record.id));
+  const nonCanonicalInventory = indexed.filter((record) => {
+    const isTcg = String(record?.category || "").toLowerCase() === "trading-cards" && record?.tcg;
+    return !isTcg || !canonicalIds.has(record.id);
+  });
+  return [...nonCanonicalInventory, ...canonical];
 }
 
 function writeIntakeLibraryRecords(libraryId = "inventory", records = []) {
@@ -12683,6 +20058,14 @@ async function runTesseractOcr(imagePath, psm = "6") {
     return await execFilePromise("tesseract", [imagePath, "stdout", "-l", "eng", "--psm", String(psm)], { timeout: 24000, maxBuffer: 4 * 1024 * 1024 });
   } catch (error) {
     throw new Error(error.message?.includes("not found") ? "Tesseract OCR is unavailable." : error.message || "Tesseract OCR failed.");
+  }
+}
+
+async function runTesseractTsv(imagePath, psm = "11") {
+  try {
+    return await execFilePromise("tesseract", [imagePath, "stdout", "-l", "eng", "--psm", String(psm), "tsv"], { timeout: 36000, maxBuffer: 12 * 1024 * 1024 });
+  } catch (error) {
+    throw new Error(error.message?.includes("not found") ? "Tesseract OCR is unavailable." : error.message || "Position-aware schedule recognition failed.");
   }
 }
 
@@ -14221,6 +21604,7 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
         decksChanged = true;
       });
       if (decksChanged) writeTcgDecks(decks);
+      persistTcgCanonicalRecord(updated);
 
       return updated;
     }
@@ -14270,6 +21654,9 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
   if (index >= 0) records[index] = { ...records[index], ...record, createdAt: records[index].createdAt || now };
   else records.push(record);
   writeIntakeLibraryRecords(libraryId, records);
+  if (libraryId === "inventory" && record.tcg) {
+    persistTcgCanonicalRecord(record);
+  }
   if (libraryId === "inventory" && record.tcg && Array.isArray(record.tcg.linkedDeckIds)) {
     const decks = readTcgDecks(); let changed = false;
     decks.forEach((deck) => {
@@ -14478,27 +21865,65 @@ app.post("/api/intake/resolve", async (req, res) => {
 });
 
 function getActivityItems() {
-  return readIntakeCollection(activityDataPath).map((item) => ({
+  const intakeItems = readIntakeCollection(activityDataPath).map((item) => ({
     activityType: item.activityType || "intake",
     ...item,
     code: getIntakeItemCode(item),
   }));
+  const jobs = activityJobStore.read().map((item) => ({ ...item, persistentJob: true }));
+  return [...intakeItems, ...jobs].sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
 }
 
 function getNeedsAttentionCount(items = []) {
   return items.filter((item) => ["queued", "pending", "needs-attention", "failed"].includes(String(item?.status || "queued"))).length;
 }
 
-app.get("/api/activity", (req, res) => {
-  const items = getActivityItems().slice().reverse();
+function filterActivityItemsForRequest(req, items = []) {
+  const access = homesteadAccess.accessContext(req);
+  const role = String(access?.user?.role || "").toLowerCase();
+  if (["owner", "admin"].includes(role)) return items;
+  if (role === "child") return items.filter((item) => !String(item.activityType || "").startsWith("metadata-") && !["personal", "performers", "celebrities"].includes(String(item.libraryId || "")));
+  return items.filter((item) => {
+    if (item.activityType === "metadata-approval" || item.proposal || item.libraryId === "personal") return false;
+    if (item.libraryId === "performers" && !access.adultSublibraryAccess?.performers) return false;
+    if (item.libraryId === "celebrities" && !access.adultSublibraryAccess?.celebrities) return false;
+    return true;
+  });
+}
+
+function canManagePersistentActivity(req, item = {}) {
+  if (!item?.persistentJob && !String(item?.id || "").startsWith("activity-job-")) return true;
+  if (!String(item.activityType || "").startsWith("metadata-")) return true;
+  const role = String(homesteadAccess.accessContext(req)?.user?.role || "").toLowerCase();
+  return ["owner", "admin"].includes(role);
+}
+
+app.get("/api/activity", homesteadAccess.requireAdmin, (req, res) => {
+  const items = filterActivityItemsForRequest(req, getActivityItems()).slice().reverse();
   const needsAttentionCount = getNeedsAttentionCount(items);
-  if (String(req.query?.summary || "") === "1") return res.json({ ok: true, count: items.length, needsAttentionCount });
-  res.json({ ok: true, count: items.length, needsAttentionCount, items });
+  const activeCount = items.filter((item) => String(item?.status || "") === "processing").length;
+  const approvalCount = items.filter((item) => item.activityType === "metadata-approval" && item.status === "needs-attention").length;
+  if (String(req.query?.summary || "") === "1") return res.json({ ok: true, count: items.length, needsAttentionCount, activeCount, approvalCount });
+  res.json({ ok: true, count: items.length, needsAttentionCount, activeCount, approvalCount, items });
 });
 
-app.patch("/api/activity/:activityId", (req, res) => {
+app.patch("/api/activity/:activityId", homesteadAccess.requireAdmin, (req, res) => {
   try {
-    const items = getActivityItems();
+    const persistent = activityJobStore.read().find((item) => item.id === req.params.activityId);
+    if (persistent) {
+      if (!canManagePersistentActivity(req, { ...persistent, persistentJob: true })) return res.status(403).json({ ok: false, message: "Owner or admin authorization is required for metadata activity." });
+      const allowedStatuses = new Set(["queued", "pending", "processing", "needs-attention", "completed", "failed", "cancelled"]);
+      const nextStatus = String(req.body?.status || persistent.status || "queued");
+      if (!allowedStatuses.has(nextStatus)) return res.status(400).json({ ok: false, message: "Unsupported activity status." });
+      const item = activityJobStore.update(persistent.id, { status: nextStatus });
+      const summary = activityJobStore.summary();
+      return res.json({ ok: true, item: { ...item, persistentJob: true }, ...summary });
+    }
+    const items = readIntakeCollection(activityDataPath).map((item) => ({
+      activityType: item.activityType || "intake",
+      ...item,
+      code: getIntakeItemCode(item),
+    }));
     const index = items.findIndex((item) => item.id === req.params.activityId);
     if (index < 0) return res.status(404).json({ ok: false, message: "Activity not found." });
     const allowedStatuses = new Set(["queued", "pending", "matched", "needs-attention", "completed", "failed", "cancelled"]);
@@ -14513,8 +21938,14 @@ app.patch("/api/activity/:activityId", (req, res) => {
 });
 
 
-app.delete("/api/activity/:activityId", (req, res) => {
+app.delete("/api/activity/:activityId", homesteadAccess.requireAdmin, (req, res) => {
   try {
+    const persistent = activityJobStore.read().find((item) => item.id === req.params.activityId);
+    if (persistent && !canManagePersistentActivity(req, { ...persistent, persistentJob: true })) return res.status(403).json({ ok: false, message: "Owner or admin authorization is required for metadata activity." });
+    if (persistent && activityJobStore.remove(req.params.activityId)) {
+      const items = getActivityItems();
+      return res.json({ ok: true, removedId: req.params.activityId, needsAttentionCount: getNeedsAttentionCount(items), activeCount: items.filter((item) => item.status === "processing").length });
+    }
     const items = readIntakeCollection(activityDataPath);
     const next = items.filter((item) => item.id !== req.params.activityId);
     if (next.length === items.length) return res.status(404).json({ ok: false, message: "Activity not found." });
@@ -14525,12 +21956,18 @@ app.delete("/api/activity/:activityId", (req, res) => {
   }
 });
 
-app.post("/api/activity/cleanup-completed", (req, res) => {
+app.post("/api/activity/cleanup-completed", homesteadAccess.requireAdmin, (req, res) => {
   try {
     const items = readIntakeCollection(activityDataPath);
     const next = items.filter((item) => String(item?.status || "") !== "completed");
     writeJsonFile(activityDataPath, next.slice(-2000));
-    res.json({ ok: true, removedCount: items.length - next.length, needsAttentionCount: getNeedsAttentionCount(next) });
+    const jobItems = activityJobStore.read();
+    const role = String(homesteadAccess.accessContext(req)?.user?.role || "").toLowerCase();
+    const canManageMetadata = ["owner", "admin"].includes(role);
+    const nextJobs = jobItems.filter((item) => String(item?.status || "") !== "completed" || (!canManageMetadata && String(item.activityType || "").startsWith("metadata-")));
+    activityJobStore.write(nextJobs);
+    const combined = getActivityItems();
+    res.json({ ok: true, removedCount: (items.length - next.length) + (jobItems.length - nextJobs.length), needsAttentionCount: getNeedsAttentionCount(combined), activeCount: combined.filter((item) => item.status === "processing").length });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Unable to clear completed activity." });
   }
@@ -14939,9 +22376,26 @@ app.delete("/api/intake/library-records/:libraryId/:recordId", (req, res) => {
   }
 });
 
-app.post("/api/activity/:activityId/retry", async (req, res) => {
+app.post("/api/activity/:activityId/retry", homesteadAccess.requireAdmin, async (req, res) => {
   try {
-    const items = getActivityItems();
+    const persistent = activityJobStore.read().find((item) => item.id === req.params.activityId);
+    if (persistent) {
+      if (!canManagePersistentActivity(req, { ...persistent, persistentJob: true })) return res.status(403).json({ ok: false, message: "Owner or admin authorization is required for metadata activity." });
+      if (persistent.activityType === "metadata-approval") {
+        return res.status(400).json({ ok: false, message: "Review this metadata proposal instead of retrying it." });
+      }
+      const item = activityJobStore.update(persistent.id, {
+        status: "needs-attention",
+        notes: "Retry requested. Start the related scan or metadata action again from its library.",
+        error: "This interrupted task must be restarted from its original library action.",
+      });
+      return res.json({ ok: true, item: { ...item, persistentJob: true }, ...activityJobStore.summary() });
+    }
+    const items = readIntakeCollection(activityDataPath).map((item) => ({
+      activityType: item.activityType || "intake",
+      ...item,
+      code: getIntakeItemCode(item),
+    }));
     const index = items.findIndex((item) => item.id === req.params.activityId);
     if (index < 0) return res.status(404).json({ ok: false, message: "Activity not found." });
     const item = items[index];
@@ -14955,14 +22409,14 @@ app.post("/api/activity/:activityId/retry", async (req, res) => {
   }
 });
 
-app.get("/api/activity/:activityId/label", (req, res) => {
+app.get("/api/activity/:activityId/label", homesteadAccess.requireAdmin, (req, res) => {
   const item = getActivityItems().find((activity) => activity.id === req.params.activityId);
   if (!item) return res.status(404).json({ ok: false, message: "Activity not found." });
   res.json({ ok: true, label: { title: item.title || item.code || "Homestead item", code: item.code || item.id, homesteadId: item.linkedRecord?.id || item.id, libraryId: item.libraryId || "inventory", qrValue: `HOMESTEAD:${item.linkedRecord?.id || item.id}` } });
 });
 
 app.get("/api/intake/queue", (req, res) => {
-  const items = getActivityItems();
+  const items = readIntakeCollection(activityDataPath).map((item) => ({ activityType: item.activityType || "intake", ...item, code: getIntakeItemCode(item) }));
   res.json({ ok: true, count: items.length, items: items.slice().reverse() });
 });
 
@@ -16625,6 +24079,14 @@ for (const plugin of pluginRegistry.scan()) {
   }
 }
 
+app.get("/api/library-watch/status", (req, res) => {
+  res.json({ ok: true, library: "movies", roots: getConfiguredMovieFolders(), watchedDirectories: [], watchedDirectoryCount: libraryWatchWorkerStatus.movies.watchedDirectoryCount || 0, scanScheduled: Boolean(movieScanTimer), scanRunning: movieScanRunning, scanPending: movieScanPending, pollingEnabled: true, watcherProcess: libraryWatchWorkerStatus.movies, lastChangeDetectedAt: movieLastChangeDetectedAt, lastScanCompletedAt: movieLastScanCompletedAt, snapshotItems: libraryWatchWorkerStatus.movies.snapshotItems || 0 });
+});
+
+app.get("/api/library-watch/tv/status", (req, res) => {
+  res.json({ ok: true, library: "tv", roots: getConfiguredTvFolders(), watchedDirectories: [], watchedDirectoryCount: libraryWatchWorkerStatus.tv.watchedDirectoryCount || 0, scanScheduled: Boolean(tvScanTimer), scanRunning: tvScanRunning, scanPending: tvScanPending, pollingEnabled: true, watcherProcess: libraryWatchWorkerStatus.tv, lastChangeDetectedAt: tvLastChangeDetectedAt, lastScanCompletedAt: tvLastScanCompletedAt, snapshotItems: libraryWatchWorkerStatus.tv.snapshotItems || 0 });
+});
+
 // All API and server routes must be registered before this SPA fallback.
 // Otherwise Express serves index.html for valid API GET requests declared later.
 app.use("/api", (req, res) => {
@@ -16636,6 +24098,673 @@ app.use("/api", (req, res) => {
 
 app.get(/.*/, sendHomesteadBrandedIndex);
 
+const movieLibraryWatchers = new Map();
+let libraryWatchWorker = null;
+let libraryWatchWorkerStopping = false;
+let libraryWatchWorkerRestartTimer = null;
+const libraryWatchWorkerStatus = {
+  movies: { state: "starting", watchedDirectoryCount: 0, snapshotItems: 0, lastMessageAt: "" },
+  tv: { state: "starting", watchedDirectoryCount: 0, snapshotItems: 0, lastMessageAt: "" },
+};
+
+function configureLibraryWatchWorker() {
+  if (!libraryWatchWorker?.connected) return false;
+  libraryWatchWorker.send({ type: "configure", movies: getConfiguredMovieFolders(), tv: getConfiguredTvFolders() });
+  return true;
+}
+
+function refreshLibraryWatchBaseline(library = "") {
+  if (!libraryWatchWorker?.connected || !["movies", "tv"].includes(library)) return false;
+  libraryWatchWorker.send({ type: "baseline", library });
+  return true;
+}
+
+function startLibraryWatchWorker() {
+  if (libraryWatchWorker || libraryWatchWorkerStopping) return;
+  const workerPath = path.join(__dirname, "scripts", "library-watch-worker.cjs");
+  if (!fs.existsSync(workerPath)) {
+    console.warn("[library-watch] Worker script is unavailable; automatic watching is disabled.");
+    libraryWatchWorkerStatus.movies = { ...libraryWatchWorkerStatus.movies, state: "unavailable" };
+    libraryWatchWorkerStatus.tv = { ...libraryWatchWorkerStatus.tv, state: "unavailable" };
+    return;
+  }
+  libraryWatchWorker = fork(workerPath, [], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  libraryWatchWorker.on("message", (message = {}) => {
+    const library = message.library === "tv" ? "tv" : message.library === "movies" ? "movies" : "";
+    if (message.type === "ready") {
+      configureLibraryWatchWorker();
+      return;
+    }
+    if (message.type === "change" && library === "movies") scheduleAutomaticMovieScan(message.reason || "watch worker change");
+    if (message.type === "change" && library === "tv") scheduleAutomaticTvScan(message.reason || "watch worker change");
+    if (message.type === "status" && library) {
+      libraryWatchWorkerStatus[library] = { ...libraryWatchWorkerStatus[library], ...message, lastMessageAt: new Date().toISOString() };
+    }
+    if (["warning", "error"].includes(message.type)) {
+      console.warn(`[library-watch-worker] ${library || "system"}: ${message.message || message.type}`);
+    }
+  });
+  libraryWatchWorker.on("exit", (code, signal) => {
+    libraryWatchWorker = null;
+    libraryWatchWorkerStatus.movies = { ...libraryWatchWorkerStatus.movies, state: "stopped", exitCode: code, signal };
+    libraryWatchWorkerStatus.tv = { ...libraryWatchWorkerStatus.tv, state: "stopped", exitCode: code, signal };
+    if (libraryWatchWorkerStopping) return;
+    clearTimeout(libraryWatchWorkerRestartTimer);
+    libraryWatchWorkerRestartTimer = setTimeout(startLibraryWatchWorker, 15000);
+    libraryWatchWorkerRestartTimer.unref();
+  });
+  libraryWatchWorker.on("error", (error) => console.error("[library-watch-worker]", error.message));
+}
+
+function stopLibraryWatchWorker() {
+  libraryWatchWorkerStopping = true;
+  clearTimeout(libraryWatchWorkerRestartTimer);
+  if (libraryWatchWorker?.connected) libraryWatchWorker.disconnect();
+  libraryWatchWorker = null;
+}
+
+let movieScanTimer = null;
+let movieScanRunning = false;
+let movieScanPending = false;
+let movieLastChangeDetectedAt = "";
+let movieLastScanCompletedAt = "";
+let movieLibrarySnapshot = new Map();
+let movieScanActivityJobId = "";
+
+function getConfiguredMovieFolders() {
+  const configured = readSetupConfig()?.folderMappings?.movies;
+  return normalizeScanFolders("", [
+    ...(Array.isArray(configured) ? configured : configured ? [configured] : []),
+    "/media/movies",
+    "/media/movies-disk1",
+  ]);
+}
+
+function collectMovieDirectories(roots = []) {
+  const directories = new Set();
+  const pending = [...roots];
+  while (pending.length && directories.size < 10000) {
+    const directory = pending.pop();
+    if (!directory || directories.has(directory)) continue;
+    directories.add(directory);
+    try {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+      }
+    } catch (error) {
+      console.warn(`[library-watch] Unable to inspect ${directory}:`, error.message);
+    }
+  }
+  return Array.from(directories);
+}
+
+function runAutomaticMovieScan() {
+  movieScanTimer = null;
+  if (movieScanRunning) {
+    movieScanPending = true;
+    return;
+  }
+  if (mediaScanRunning) {
+    movieScanPending = true;
+    movieScanTimer = setTimeout(runAutomaticMovieScan, 30000);
+    movieScanTimer.unref?.();
+    console.log("[library-watch] Another media scan is active; Movies scan deferred without creating an Activity error.");
+    return;
+  }
+  movieScanRunning = true;
+  movieScanPending = false;
+  const scanJob = activityJobStore.create({ activityType: "library-scan", status: "processing", title: "Automatic Movies scan", libraryId: "movies", source: "Library watcher", notes: "A settled filesystem change started this scan.", progress: { current: 0, total: 0, label: "Scanning Movies folders" }, cancellable: false });
+  movieScanActivityJobId = scanJob.id;
+  console.log("[library-watch] Movie folder settled; starting automatic Movies scan.");
+  runScannerCommands(buildScanCommands({ libraryId: "movies", folders: getConfiguredMovieFolders() }), (error) => {
+    movieScanRunning = false;
+    if (error?.code === "SCAN_ALREADY_RUNNING") {
+      movieScanPending = true;
+      activityJobStore.complete(scanJob.id, { skippedBecauseBusy: true, progress: { percent: 100, label: "Skipped duplicate scan" } }, "Skipped because another media scan was already running. No media failed.");
+      console.log("[library-watch] Movies scan overlapped another scan and was deferred.");
+    }
+    else if (error) {
+      requestImportScanErrors.set("movies", `Movies scan failed: ${error.message}`);
+      activityJobStore.fail(scanJob.id, error);
+      console.error("[library-watch] Automatic Movies scan failed:", error.message);
+    }
+    else {
+      movieLastScanCompletedAt = new Date().toISOString();
+      requestImportScanErrors.delete("movies");
+      activityJobStore.complete(scanJob.id, { progress: { percent: 100, label: "Movies scan complete" }, completedAt: movieLastScanCompletedAt }, "Automatic Movies scan completed.");
+      console.log("[library-watch] Automatic Movies scan completed.");
+      setImmediate(() => runMovieAutoMatch().catch((autoMatchError) => console.error("[auto-match] Automatic post-watch matching failed:", autoMatchError)));
+    }
+    refreshLibraryWatchBaseline("movies");
+    movieScanActivityJobId = "";
+    if (movieScanPending) scheduleAutomaticMovieScan("changes received during scan");
+  });
+}
+
+function scheduleAutomaticMovieScan(reason = "filesystem change") {
+  movieLastChangeDetectedAt = new Date().toISOString();
+  clearTimeout(movieScanTimer);
+  movieScanTimer = setTimeout(runAutomaticMovieScan, 15000);
+  console.log(`[library-watch] Movies change detected (${reason}); scan scheduled after 15 seconds of quiet.`);
+}
+
+function buildMovieLibrarySnapshot() {
+  const snapshot = new Map();
+  const pending = [...getConfiguredMovieFolders()];
+  while (pending.length && snapshot.size < 100000) {
+    const current = pending.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) { pending.push(fullPath); continue; }
+      if (!/\.(mp4|m4v|mov|mkv|avi|webm|jpg|jpeg|png|webp|json)$/i.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        snapshot.set(fullPath, `${stat.size}:${Math.floor(stat.mtimeMs)}`);
+      } catch {}
+    }
+  }
+  return snapshot;
+}
+
+function pollMovieLibraryChanges() {
+  const next = buildMovieLibrarySnapshot();
+  if (!movieLibrarySnapshot.size) {
+    movieLibrarySnapshot = next;
+    return;
+  }
+  let changed = next.size !== movieLibrarySnapshot.size;
+  if (!changed) {
+    for (const [filePath, signature] of next) {
+      if (movieLibrarySnapshot.get(filePath) !== signature) { changed = true; break; }
+    }
+  }
+  movieLibrarySnapshot = next;
+  if (changed) scheduleAutomaticMovieScan("poll detected add/remove/rename/replace");
+}
+
+function syncMovieLibraryWatchers() {
+  const wanted = new Set(collectMovieDirectories(getConfiguredMovieFolders()));
+  for (const [folder, watcher] of movieLibraryWatchers.entries()) {
+    if (wanted.has(folder)) continue;
+    watcher.close();
+    movieLibraryWatchers.delete(folder);
+  }
+  for (const folder of wanted) {
+    if (movieLibraryWatchers.has(folder)) continue;
+    try {
+      const watcher = fs.watch(folder, { persistent: false }, (eventType, filename) => {
+        scheduleAutomaticMovieScan(`${eventType}${filename ? `: ${filename}` : ""}`);
+        if (eventType === "rename") setTimeout(syncMovieLibraryWatchers, 1000);
+      });
+      watcher.on("error", (error) => {
+        console.error(`[library-watch] Watcher error for ${folder}:`, error.message);
+        watcher.close();
+        movieLibraryWatchers.delete(folder);
+      });
+      movieLibraryWatchers.set(folder, watcher);
+      console.log(`[library-watch] Watching Movies folder: ${folder}`);
+    } catch (error) {
+      console.error(`[library-watch] Unable to watch ${folder}:`, error.message);
+    }
+  }
+}
+
+const tvLibraryWatchers = new Map();
+let tvScanTimer = null;
+let tvScanRunning = false;
+let tvScanPending = false;
+let tvLastChangeDetectedAt = "";
+let tvLastScanCompletedAt = "";
+let tvLibrarySnapshot = new Map();
+let tvScanActivityJobId = "";
+
+function getConfiguredTvFolders() {
+  const mappings = readSetupConfig()?.folderMappings || {};
+  const configured = mappings.tvshows || mappings.tv;
+  return normalizeScanFolders("", [
+    ...(Array.isArray(configured) ? configured : configured ? [configured] : []),
+    "/media/tv",
+    "/media/tv-disk1",
+  ]);
+}
+
+const folderConsolidationJournalPath = path.join(dataDir, "folder-consolidation-journal.json");
+
+function normalizeConsolidationTitle(value = "") {
+  return String(value || "")
+    .replace(/\s*[([]\s*(?:19|20)\d{2}\s*[)\]]\s*$/, "")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function safeCanonicalFolderName(title = "Untitled", year = "") {
+  const safeTitle = String(title || "Untitled").replace(/[<>:"/\\|?*\x00-\x1F]/g, " ").replace(/\s+/g, " ").trim() || "Untitled";
+  return year ? `${safeTitle} (${year})` : safeTitle;
+}
+
+function folderForLibraryItem(item = {}, roots = []) {
+  const candidates = [
+    item.sourcePath, item.folderPath, item.path,
+    ...(Array.isArray(item.files) ? item.files.flatMap((file) => [file.sourcePath, file.path, file.filePath]) : []),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const resolved = path.resolve(String(candidate));
+    for (const rootValue of roots) {
+      const root = path.resolve(rootValue);
+      if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) continue;
+      const relative = path.relative(root, resolved);
+      const first = relative.split(path.sep).filter(Boolean)[0];
+      if (first) return path.join(root, first);
+    }
+  }
+  return "";
+}
+
+function listFolderFiles(root = "") {
+  const files = [];
+  const pending = [root];
+  while (pending.length && files.length < 250000) {
+    const current = pending.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(fullPath);
+      else if (entry.isFile()) files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function buildFolderConsolidationPreview(library = "tv") {
+  const libraryId = library === "movies" ? "movies" : "tv";
+  const roots = libraryId === "tv" ? getConfiguredTvFolders() : getConfiguredMovieFolders();
+  const mediaIndex = readJsonFile(path.join(dataDir, "media-index.json"), {});
+  const items = Object.values(mediaIndex?.libraries?.[libraryId] || {});
+  const matches = readMetadataMatches();
+  const folders = new Map();
+  for (const item of items) {
+    const folder = folderForLibraryItem(item, roots);
+    if (!folder || !fs.existsSync(folder)) continue;
+    const match = findStoredMetadataMatch(matches, libraryId, item) || item.metadataMatch || item.metadata || {};
+    const basename = path.basename(folder);
+    const title = match.title || item.name || item.title || basename;
+    const year = String(match.year || item.metadata?.year || basename.match(/\b((?:19|20)\d{2})\b/)?.[1] || "").slice(0, 4);
+    const providerId = String(match.tmdbId || match.providerId || item.tmdbId || item.metadata?.tmdbId || "");
+    const record = folders.get(folder) || { path: folder, basename, title, year, providerIds: new Set(), itemIds: [] };
+    if (providerId) record.providerIds.add(providerId);
+    record.itemIds.push(item.id || item.localId || basename);
+    if (!record.year && year) record.year = year;
+    if (match.title) record.title = match.title;
+    folders.set(folder, record);
+  }
+  const groups = new Map();
+  for (const record of folders.values()) {
+    const providerId = record.providerIds.size === 1 ? Array.from(record.providerIds)[0] : "";
+    const key = providerId ? `tmdb:${providerId}` : `title:${normalizeConsolidationTitle(record.title || record.basename)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(record);
+  }
+  return Array.from(groups.entries()).filter(([, rows]) => rows.length > 1).map(([identity, rows]) => {
+    const providerIds = new Set(rows.flatMap((row) => Array.from(row.providerIds)));
+    const sameProvider = providerIds.size === 1 && rows.every((row) => row.providerIds.size === 1);
+    const title = rows.find((row) => row.title)?.title || rows[0].basename;
+    const year = rows.find((row) => row.year)?.year || "";
+    const expectedName = safeCanonicalFolderName(title, year);
+    const existingCanonical = rows.find((row) => row.basename.toLowerCase() === expectedName.toLowerCase());
+    const target = existingCanonical?.path || path.join(path.dirname(rows[0].path), expectedName);
+    const sources = rows.map((row) => row.path).filter((folder) => path.resolve(folder) !== path.resolve(target));
+    const targetFiles = fs.existsSync(target) ? new Set(listFolderFiles(target).map((file) => path.relative(target, file).toLowerCase())) : new Set();
+    const conflicts = sources.flatMap((source) => listFolderFiles(source).map((file) => path.relative(source, file)).filter((relative) => targetFiles.has(relative.toLowerCase())).map((relative) => ({ source, relative })));
+    const id = crypto.createHash("sha256").update(`${libraryId}\0${[...sources, target].sort().join("\0")}`).digest("hex").slice(0, 16);
+    return {
+      id, identity, library: libraryId, title, year, target, sources,
+      confidence: sameProvider ? "provider-id" : "needs-review",
+      providerId: sameProvider ? Array.from(providerIds)[0] : "",
+      conflictCount: conflicts.length,
+      conflicts: conflicts.slice(0, 100),
+      safeToApply: sameProvider && sources.length > 0,
+      itemIds: [...new Set(rows.flatMap((row) => row.itemIds))],
+    };
+  });
+}
+
+function removeEmptyFolders(root = "") {
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  entries.filter((entry) => entry.isDirectory()).forEach((entry) => removeEmptyFolders(path.join(root, entry.name)));
+  try { if (fs.readdirSync(root).length === 0) fs.rmdirSync(root); } catch { /* Non-empty or in use; leave it. */ }
+}
+
+async function updateAutomationFolderPaths(library, moves = []) {
+  const id = library === "tv" ? "sonarr" : "radarr";
+  const settings = readSetupConfig()?.integrationSettings?.[id] || {};
+  const baseUrl = String(settings.baseUrl || settings.url || "").replace(/\/+$/, "");
+  const apiKey = String(settings.apiKey || "");
+  if (!baseUrl || !apiKey) return { updated: 0, warning: `${id === "sonarr" ? "Sonarr" : "Radarr"} path update needs review because its direct API settings are not configured in Homestead.` };
+  const endpoint = `${baseUrl}/api/v3/${library === "tv" ? "series" : "movie"}`;
+  const response = await fetch(endpoint, { headers: { "X-Api-Key": apiKey, Accept: "application/json" }, signal: AbortSignal.timeout(10000) });
+  const records = await response.json().catch(() => []);
+  if (!response.ok || !Array.isArray(records)) return { updated: 0, warning: `${id} returned ${response.status}; paths need review.` };
+  let updated = 0;
+  for (const record of records) {
+    const move = moves.find((entry) => path.resolve(String(record.path || "")) === path.resolve(entry.source));
+    if (!move) continue;
+    const save = await fetch(`${endpoint}/${record.id}?moveFiles=false`, { method: "PUT", headers: { "X-Api-Key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ ...record, path: move.target }), signal: AbortSignal.timeout(10000) });
+    if (save.ok) updated += 1;
+  }
+  return { updated, warning: updated < moves.length ? `${id === "sonarr" ? "Sonarr" : "Radarr"} did not have a separate record for every source folder; review its paths.` : "" };
+}
+
+async function applyFolderConsolidationGroup(group, source = "manual") {
+  const roots = group.library === "tv" ? getConfiguredTvFolders() : getConfiguredMovieFolders();
+  const withinRoots = (value) => roots.some((rootValue) => {
+    const root = path.resolve(rootValue), resolved = path.resolve(value);
+    return resolved !== root && resolved.startsWith(`${root}${path.sep}`);
+  });
+  if (!group.safeToApply || !withinRoots(group.target) || !group.sources.every(withinRoots)) throw new Error("This folder group is not safe for automatic consolidation.");
+  const job = activityJobStore.create({ activityType: "folder-consolidation", status: "processing", title: group.title, libraryId: group.library, source: source === "automatic" ? "Automatic folder organizer" : "Folder organizer", notes: `Consolidating into ${group.target}.`, progress: { current: 0, total: group.sources.length, label: "Moving non-conflicting files" }, cancellable: false });
+  const moved = [], conflicts = [], failures = [];
+  try {
+    fs.mkdirSync(group.target, { recursive: true });
+    for (const sourceFolder of group.sources) {
+      const files = listFolderFiles(sourceFolder);
+      for (const sourceFile of files) {
+        const relative = path.relative(sourceFolder, sourceFile);
+        const destination = path.join(group.target, relative);
+        if (fs.existsSync(destination)) { conflicts.push({ source: sourceFile, destination, reason: "Destination already exists; nothing was overwritten." }); continue; }
+        try { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.renameSync(sourceFile, destination); moved.push({ source: sourceFile, destination }); }
+        catch (error) { failures.push({ source: sourceFile, destination, reason: error.message }); }
+      }
+      removeEmptyFolders(sourceFolder);
+    }
+    const automation = await updateAutomationFolderPaths(group.library, group.sources.map((sourcePath) => ({ source: sourcePath, target: group.target })));
+    const entry = { id: job.id, groupId: group.id, library: group.library, title: group.title, target: group.target, sources: group.sources, moved, conflicts, failures, automation, createdAt: new Date().toISOString() };
+    const journal = readJsonFile(folderConsolidationJournalPath, []);
+    writeJsonFile(folderConsolidationJournalPath, [entry, ...journal].slice(0, 500));
+    const needsReview = conflicts.length > 0 || failures.length > 0 || Boolean(automation.warning);
+    activityJobStore.update(job.id, { status: needsReview ? "needs-attention" : "completed", notes: needsReview ? `${moved.length} files moved; ${conflicts.length + failures.length} file conflicts and/or automation paths need review.` : `${moved.length} files moved safely. No files were overwritten.`, consolidation: entry, progress: { current: group.sources.length, total: group.sources.length, percent: 100, label: needsReview ? "Completed with review needed" : "Consolidation complete" }, completedAt: new Date().toISOString() });
+    if (group.library === "tv") scheduleAutomaticTvScan("folder consolidation completed");
+    else scheduleAutomaticMovieScan("folder consolidation completed");
+    return entry;
+  } catch (error) {
+    activityJobStore.fail(job.id, error);
+    throw error;
+  }
+}
+
+app.get("/api/admin/media-folders/consolidation", homesteadAccess.requireAdmin, (req, res) => {
+  const library = req.query.library === "movies" ? "movies" : "tv";
+  const config = readSetupConfig();
+  const key = library === "tv" ? "tvshows" : "movies";
+  res.json({ ok: true, library, enabled: config?.libraryPreferences?.[key]?.folderConsolidation?.enabled === true, groups: buildFolderConsolidationPreview(library), journal: readJsonFile(folderConsolidationJournalPath, []).filter((entry) => entry.library === library).slice(0, 20) });
+});
+
+app.post("/api/admin/media-folders/consolidation/settings", homesteadAccess.requireAdmin, (req, res) => {
+  const library = req.body?.library === "movies" ? "movies" : "tv";
+  const key = library === "tv" ? "tvshows" : "movies";
+  const config = readSetupConfig();
+  config.libraryPreferences = { ...(config.libraryPreferences || {}), [key]: { ...(config.libraryPreferences?.[key] || {}), folderConsolidation: { enabled: req.body?.enabled === true, canonicalPattern: "Title (Year)", conflictPolicy: "never-overwrite" } } };
+  fs.writeFileSync(setupConfigPath, JSON.stringify(config, null, 2));
+  res.json({ ok: true, enabled: config.libraryPreferences[key].folderConsolidation.enabled });
+});
+
+app.post("/api/admin/media-folders/consolidation/apply", homesteadAccess.requireAdmin, async (req, res) => {
+  try {
+    const library = req.body?.library === "movies" ? "movies" : "tv";
+    const wanted = new Set(Array.isArray(req.body?.groupIds) ? req.body.groupIds.map(String) : []);
+    const groups = buildFolderConsolidationPreview(library).filter((group) => group.safeToApply && (!wanted.size || wanted.has(group.id)));
+    const results = [];
+    for (const group of groups) results.push(await applyFolderConsolidationGroup(group, "manual"));
+    res.json({ ok: true, applied: results.length, results, remaining: buildFolderConsolidationPreview(library) });
+  } catch (error) { res.status(500).json({ ok: false, message: error.message || "Folder consolidation failed." }); }
+});
+
+function collectTvDirectories(roots = []) {
+  const directories = new Set();
+  const pending = [...roots];
+  while (pending.length && directories.size < 20000) {
+    const directory = pending.pop();
+    if (!directory || directories.has(directory)) continue;
+    directories.add(directory);
+    try {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+      }
+    } catch (error) {
+      console.warn(`[tv-library-watch] Unable to inspect ${directory}:`, error.message);
+    }
+  }
+  return Array.from(directories);
+}
+
+function runAutomaticTvScan() {
+  tvScanTimer = null;
+  if (tvScanRunning) {
+    tvScanPending = true;
+    return;
+  }
+  if (mediaScanRunning) {
+    tvScanPending = true;
+    tvScanTimer = setTimeout(runAutomaticTvScan, 30000);
+    tvScanTimer.unref?.();
+    console.log("[tv-library-watch] Another media scan is active; TV scan deferred without creating an Activity error.");
+    return;
+  }
+  tvScanRunning = true;
+  tvScanPending = false;
+  const scanJob = activityJobStore.create({ activityType: "library-scan", status: "processing", title: "Automatic TV scan", libraryId: "tv", source: "Library watcher", notes: "A settled filesystem change started this scan.", progress: { current: 0, total: 0, label: "Scanning TV folders" }, cancellable: false });
+  tvScanActivityJobId = scanJob.id;
+  console.log("[tv-library-watch] TV folder settled; starting automatic TV scan.");
+  runScannerCommands(buildScanCommands({ libraryId: "tv", folders: getConfiguredTvFolders() }), (error) => {
+    tvScanRunning = false;
+    if (error?.code === "SCAN_ALREADY_RUNNING") {
+      tvScanPending = true;
+      activityJobStore.complete(scanJob.id, { skippedBecauseBusy: true, progress: { percent: 100, label: "Skipped duplicate scan" } }, "Skipped because another media scan was already running. No media failed.");
+      console.log("[tv-library-watch] TV scan overlapped another scan and was deferred.");
+    }
+    else if (error) {
+      requestImportScanErrors.set("tv", `TV scan failed: ${error.message}`);
+      activityJobStore.fail(scanJob.id, error);
+      console.error("[tv-library-watch] Automatic TV scan failed:", error.message);
+    }
+    else {
+      tvLastScanCompletedAt = new Date().toISOString();
+      requestImportScanErrors.delete("tv");
+      activityJobStore.complete(scanJob.id, { progress: { percent: 100, label: "TV scan complete" }, completedAt: tvLastScanCompletedAt }, "Automatic TV scan completed.");
+      console.log("[tv-library-watch] Automatic TV scan completed.");
+      setImmediate(async () => {
+        try {
+          await runTvAutoMatch();
+          const enabled = readSetupConfig()?.libraryPreferences?.tvshows?.folderConsolidation?.enabled === true;
+          if (enabled) {
+            const groups = buildFolderConsolidationPreview("tv").filter((group) => group.safeToApply && group.conflictCount === 0);
+            for (const group of groups) await applyFolderConsolidationGroup(group, "automatic");
+          }
+        } catch (autoMatchError) {
+          console.error("[tv-auto-match] Automatic post-watch matching or folder consolidation failed:", autoMatchError);
+        }
+      });
+    }
+    refreshLibraryWatchBaseline("tv");
+    tvScanActivityJobId = "";
+    if (tvScanPending) scheduleAutomaticTvScan("changes received during scan");
+  });
+}
+
+function scheduleAutomaticTvScan(reason = "filesystem change") {
+  tvLastChangeDetectedAt = new Date().toISOString();
+  clearTimeout(tvScanTimer);
+  tvScanTimer = setTimeout(runAutomaticTvScan, 15000);
+  console.log(`[tv-library-watch] TV change detected (${reason}); scan scheduled after 15 seconds of quiet.`);
+}
+
+function buildTvLibrarySnapshot() {
+  const snapshot = new Map();
+  const pending = [...getConfiguredTvFolders()];
+  while (pending.length && snapshot.size < 200000) {
+    const current = pending.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) { pending.push(fullPath); continue; }
+      if (!/\.(mp4|m4v|mov|mkv|avi|webm|jpg|jpeg|png|webp|json)$/i.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        snapshot.set(fullPath, `${stat.size}:${Math.floor(stat.mtimeMs)}`);
+      } catch {}
+    }
+  }
+  return snapshot;
+}
+
+function pollTvLibraryChanges() {
+  const next = buildTvLibrarySnapshot();
+  if (!tvLibrarySnapshot.size) {
+    tvLibrarySnapshot = next;
+    return;
+  }
+  let changed = next.size !== tvLibrarySnapshot.size;
+  if (!changed) {
+    for (const [filePath, signature] of next) {
+      if (tvLibrarySnapshot.get(filePath) !== signature) { changed = true; break; }
+    }
+  }
+  tvLibrarySnapshot = next;
+  if (changed) scheduleAutomaticTvScan("poll detected add/remove/rename/replace");
+}
+
+function syncTvLibraryWatchers() {
+  const wanted = new Set(collectTvDirectories(getConfiguredTvFolders()));
+  for (const [folder, watcher] of tvLibraryWatchers.entries()) {
+    if (wanted.has(folder)) continue;
+    watcher.close();
+    tvLibraryWatchers.delete(folder);
+  }
+  for (const folder of wanted) {
+    if (tvLibraryWatchers.has(folder)) continue;
+    try {
+      const watcher = fs.watch(folder, { persistent: false }, (eventType, filename) => {
+        scheduleAutomaticTvScan(`${eventType}${filename ? `: ${filename}` : ""}`);
+        if (eventType === "rename") setTimeout(syncTvLibraryWatchers, 1000);
+      });
+      watcher.on("error", (error) => {
+        console.error(`[tv-library-watch] Watcher error for ${folder}:`, error.message);
+        watcher.close();
+        tvLibraryWatchers.delete(folder);
+      });
+      tvLibraryWatchers.set(folder, watcher);
+      console.log(`[tv-library-watch] Watching TV folder: ${folder}`);
+    } catch (error) {
+      console.error(`[tv-library-watch] Unable to watch ${folder}:`, error.message);
+    }
+  }
+}
+
+const TV_IDENTITY_V2_MIGRATION_MARKER = path.join(dataDir, "tv-identity-v2-migration.json");
+
+async function runTvIdentityV2StartupRepair() {
+  if (fs.existsSync(TV_IDENTITY_V2_MIGRATION_MARKER)) return;
+  try {
+    let status = null;
+    for (let pass = 0; pass < 4; pass += 1) {
+      status = await runTvAutoMatch({ limit: 250 });
+      if (status.state !== "complete" || Number(status.remaining || 0) <= 0) break;
+    }
+    if (status?.state === "complete") {
+      writeJsonFile(TV_IDENTITY_V2_MIGRATION_MARKER, {
+        version: 2,
+        completedAt: new Date().toISOString(),
+        matched: Number(status.matched || 0),
+        migrated: Number(status.migrated || 0),
+        ambiguous: Number(status.ambiguous || 0),
+      });
+      console.log("[tv-identity] Duplicate-title identity migration completed.");
+    }
+  } catch (error) {
+    console.error("[tv-identity] Startup migration failed; it will retry after the next restart.", error.message || error);
+  }
+}
+
+function repairArtworkReferencesInIndex() {
+  const indexPath = path.join(HOMESTEAD_DATA_DIR, "media-index.json");
+  const index = readJsonFile(indexPath, null);
+  if (!index?.libraries || typeof index.libraries !== "object") return { checked: 0, repaired: 0 };
+  let checked = 0;
+  let repaired = 0;
+  const repairedItems = [];
+  const artworkNames = {
+    poster: ["poster.jpg", "poster.jpeg", "poster.png", "poster.webp", "folder.jpg", "folder.png", "cover.jpg", "cover.png"],
+    banner: ["banner.jpg", "banner.png", "backdrop.jpg", "backdrop.png", "fanart.jpg", "fanart.png", "landscape.jpg", "landscape.png"],
+  };
+  for (const [library, records] of Object.entries(index.libraries)) {
+    if (!records || typeof records !== "object") continue;
+    for (const [recordId, item] of Object.entries(records)) {
+      if (!item || typeof item !== "object") continue;
+      checked += 1;
+      const sourceCandidates = [item.sourcePath, item.folderPath, item.path, item.files?.[0]?.sourcePath, item.files?.[0]?.path].filter(Boolean);
+      let directory = "";
+      for (const source of sourceCandidates) {
+        const resolved = resolveHomesteadFilePath(source);
+        if (!resolved || !fs.existsSync(resolved)) continue;
+        directory = fs.statSync(resolved).isDirectory() ? resolved : path.dirname(resolved);
+        break;
+      }
+      if (!directory) continue;
+      let itemChanged = false;
+      for (const [slot, names] of Object.entries(artworkNames)) {
+        const current = String(item[slot] || "").trim();
+        const currentResolved = current && !/^https?:/i.test(current) ? resolveHomesteadFilePath(current) : "";
+        if (currentResolved && fs.existsSync(currentResolved)) continue;
+        const found = names.map((name) => resolveCaseInsensitivePath(path.join(directory, name))).find((candidate) => candidate && fs.existsSync(candidate));
+        if (!found) continue;
+        const publicUrl = localArtworkPublicUrl(found);
+        if (!publicUrl || publicUrl === current) continue;
+        item[slot] = publicUrl;
+        itemChanged = true;
+      }
+      if (itemChanged) {
+        repaired += 1;
+        repairedItems.push(`${library}:${recordId}`);
+      }
+    }
+  }
+  if (repaired) {
+    backupArtworkIndexes("before-artwork-relink");
+    const temporaryPath = `${indexPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporaryPath, JSON.stringify(index, null, 2));
+    fs.renameSync(temporaryPath, indexPath);
+  }
+  return { checked, repaired, items: repairedItems.slice(0, 200) };
+}
+
+app.post("/api/admin/artwork/recover", homesteadAccess.requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...repairArtworkReferencesInIndex() });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message || "Artwork recovery failed." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Homestead server running on http://localhost:${PORT}`);
+  try {
+    const artworkRecovery = repairArtworkReferencesInIndex();
+    if (artworkRecovery.repaired) console.log(`[artwork] Relinked ${artworkRecovery.repaired} local artwork reference(s).`);
+  } catch (error) {
+    console.warn("[artwork] Startup recovery skipped:", error.message);
+  }
+  // Recursive Unraid/FUSE inspection runs in a child process so slow mounts
+  // can never block the API event loop or the installer health check.
+  setTimeout(startLibraryWatchWorker, 1500).unref();
+  setTimeout(runTvIdentityV2StartupRepair, 5000).unref();
+  setTimeout(() => refreshAcquisitionJobs().catch((error) => console.error("[acquisition] Startup refresh failed:", error.message)), 8000).unref();
+  setInterval(() => refreshAcquisitionJobs().catch((error) => console.error("[acquisition] Refresh failed:", error.message)), 45000).unref();
 });
+
+process.once("SIGTERM", () => { stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });
+process.once("SIGINT", () => { stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });

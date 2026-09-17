@@ -1,0 +1,8 @@
+services:
+  homestead:
+    volumes:
+      - /mnt/user/Movies:/media/movies
+      - /mnt/user/TV:/media/tv
+      - /mnt/user/Music:/media/music
+      - /mnt/user/Books:/media/books
+      - /mnt/user/YouTube:/media/youtube

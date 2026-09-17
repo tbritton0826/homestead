@@ -1,24 +1,49 @@
+# Dependencies and generated application builds
 node_modules/
 dist/
 coverage/
+
+# Local configuration and secrets
 .env
 .env.*
 !.env.example
+*.log
 npm-debug.log*
 
-# Runtime state and user media.
-data/
-media/
-config/
-uploads/
-backups/
+# User data and media must never be committed
+/data/
+/media/
+/config/
+/uploads/
+/backups/
+/test-data-*/
 
-# Private modules and legacy copies excluded from the public repository.
-src/data/campusBuildings.js
-src/data/campusDistricts.js
-src/data/tierConfig.js
+# Generated release and working directories
+/release/
+/outputs/
+/work/
 
-# Local audit/source bundles.
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Historical handoff copies; active implementations live under src/ or scripts/
+/App.css
+/App.jsx
+/BookMetadataMatchModal.jsx
+/BookSeriesAppearanceEditor.jsx
+/fetch-book-metadata-v2.cjs
+/next-version.cjs
+/schedule-recognition.cjs
+/test-*.cjs
+
+# Private modules and local audit bundles
+/src/data/campusBuildings.js
+/src/data/campusDistricts.js
+/src/data/tierConfig.js
 *.tar
 *.tar.gz
 homestead-tree*.txt
