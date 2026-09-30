@@ -1,3 +1,4 @@
+const { sendIndexJson } = require("./src/server/json-response.cjs");
 const { createPluginRegistry } = require("./plugins/registry.cjs");
 const { createPluginInstaller } = require("./plugins/installer.cjs");
 const { registerNextVersionRoutes } = require("./src/server/next-version.cjs");
@@ -7172,9 +7173,8 @@ function buildLiveMediaIndex() {
   };
 }
 
-app.get("/data/media-index.json", homesteadAccess.requireSession, (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.json(homesteadAccess.filterMediaIndex(req, buildLiveMediaIndex()));
+app.get("/data/media-index.json", homesteadAccess.requireSession, async (req, res) => {
+  await sendIndexJson(req, res, homesteadAccess.filterMediaIndex(req, buildLiveMediaIndex()));
 });
 
 function cleanYouTubeClientTitle(value = "") {
@@ -8061,156 +8061,48 @@ app.get("/api/integrations/seerr/icon", async (req, res) => {
 app.get("/api/integrations/seerr/discover/trending-movies", async (req, res) => {
   try {
     const { baseUrl, apiKey } = getSeerrConfig();
-
-    if (!baseUrl || !apiKey) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing Seerr URL or API key",
-      });
-    }
-
-    const response = await fetch(`${baseUrl}/api/v1/discover/movies`, {
-      headers: {
-        "X-Api-Key": apiKey,
-      },
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        message: data.message || `Seerr returned ${response.status}`,
-        data,
-      });
-    }
-
-    res.json({
-      ok: true,
-      results: data.results || data || [],
-    });
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const data = await seerrReader.json("discover/movies", 300000);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ ok: true, results: data.results || data || [] });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: error.message,
-    });
+    res.status(502).json({ ok: false, message: error.message });
   }
 });
 
 app.get("/api/integrations/seerr/discover/upcoming-movies", async (req, res) => {
   try {
     const { baseUrl, apiKey } = getSeerrConfig();
-
-    if (!baseUrl || !apiKey) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing Seerr URL or API key",
-      });
-    }
-
-    const response = await fetch(`${baseUrl}/api/v1/discover/movies/upcoming`, {
-      headers: {
-        "X-Api-Key": apiKey,
-      },
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        message: data.message || `Seerr returned ${response.status}`,
-        data,
-      });
-    }
-
-    res.json({
-      ok: true,
-      results: data.results || data || [],
-    });
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const data = await seerrReader.json("discover/movies/upcoming", 300000);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ ok: true, results: data.results || data || [] });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: error.message,
-    });
+    res.status(502).json({ ok: false, message: error.message });
   }
 });
 
 app.get("/api/integrations/seerr/discover/trending-tv", async (req, res) => {
   try {
     const { baseUrl, apiKey } = getSeerrConfig();
-
-    if (!baseUrl || !apiKey) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing Seerr URL or API key",
-      });
-    }
-
-    const response = await fetch(`${baseUrl}/api/v1/discover/tv`, {
-      headers: {
-        "X-Api-Key": apiKey,
-      },
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        message: data.message || `Seerr returned ${response.status}`,
-        data,
-      });
-    }
-
-    res.json({
-      ok: true,
-      results: data.results || data || [],
-    });
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const data = await seerrReader.json("discover/tv", 300000);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ ok: true, results: data.results || data || [] });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: error.message,
-    });
+    res.status(502).json({ ok: false, message: error.message });
   }
 });
 
 app.get("/api/integrations/seerr/discover/upcoming-tv", async (req, res) => {
   try {
     const { baseUrl, apiKey } = getSeerrConfig();
-
-    if (!baseUrl || !apiKey) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing Seerr URL or API key",
-      });
-    }
-
-    const response = await fetch(`${baseUrl}/api/v1/discover/tv/upcoming`, {
-      headers: {
-        "X-Api-Key": apiKey,
-      },
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        message: data.message || `Seerr returned ${response.status}`,
-        data,
-      });
-    }
-
-    res.json({
-      ok: true,
-      results: data.results || data || [],
-    });
+    if (!baseUrl || !apiKey) return res.status(400).json({ ok: false, message: "Missing Seerr URL or API key" });
+    const data = await seerrReader.json("discover/tv/upcoming", 300000);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ ok: true, results: data.results || data || [] });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: error.message,
-    });
+    res.status(502).json({ ok: false, message: error.message });
   }
 });
 
