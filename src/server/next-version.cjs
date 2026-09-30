@@ -297,6 +297,7 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
     }
     res.json({ ok: true, authEnabled: state.authEnabled, user: publicUser(currentUser(req)), subscription: subscriptionService.status() });
   });
+  require("./account-playback.cjs").registerAccountPlayback({ app, directory: path.join(stateDir, "playback"), currentUser });
   app.get("/api/account/preferences", (req, res) => {
     const user = currentUser(req);
     if (!user) return res.status(401).json({ ok: false, message: "Sign in to Homestead." });
