@@ -19,6 +19,8 @@
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>
+  <Config Name="Recipes" Target="/media/recipes" Default="/mnt/user/Recipes" Mode="rw" Description="Persistent recipe metadata and photos. Reuse this folder after server reconfiguration. Existing installations must add this mapping and the Recipe metadata folder variable." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Recipes</Config>
+  <Config Name="Recipe metadata folder" Target="HOMESTEAD_RECIPES_DIR" Default="/media/recipes" Mode="" Description="Container path for portable recipe metadata; must match the Recipes path mapping." Type="Variable" Display="advanced" Required="true" Mask="false">/media/recipes</Config>
   <Config Name="Web UI" Target="7312" Default="7312" Mode="tcp" Description="Homestead web interface port." Type="Port" Display="always" Required="true" Mask="false">7312</Config>
   <Config Name="AppData" Target="/app/data" Default="/mnt/user/appdata/homestead" Mode="rw" Description="Persistent Homestead database, settings, indexes, and generated metadata. Back up this folder before updates." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/homestead</Config>
   <Config Name="Movies" Target="/media/movies" Default="/mnt/user/Movies" Mode="rw" Description="Your Movies share. Change this path to match your server." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/Movies</Config>

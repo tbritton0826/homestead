@@ -20321,6 +20321,7 @@ function RecipeCategoryEditor({ category, onClose, onSaved, onDeleted }) {
 
 function RecipesPage({ setActiveLibrary, setupConfig }) {
   const [recipes, setRecipes] = useState([]);
+  const [recipeStorage, setRecipeStorage] = useState(null);
   const [recipeView, setRecipeView] = useState("recipes");
   const [recipeSearch, setRecipeSearch] = useState("");
   const [categories, setCategories] = useState([]);
@@ -20344,6 +20345,7 @@ function RecipesPage({ setActiveLibrary, setupConfig }) {
       if (!recipeResponse.ok || recipeData.ok === false) throw new Error(recipeData.message || "Unable to load recipes.");
       if (!categoryResponse.ok || categoryData.ok === false) throw new Error(categoryData.message || "Unable to load recipe categories.");
       setRecipes(Array.isArray(recipeData.recipes) ? recipeData.recipes : []);
+      setRecipeStorage(recipeData.storage || null);
       setCategories(Array.isArray(categoryData.categories) ? categoryData.categories : []);
       setError("");
     } catch (requestError) { setError(requestError.message || "Unable to load recipes."); }
@@ -20398,6 +20400,13 @@ function RecipesPage({ setActiveLibrary, setupConfig }) {
   const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId) || null;
 
   return <div className={`recipes-page ${focusMode ? "recipes-focus-mode" : ""}`}>
+    {recipeStorage && <p role="status" className="recipe-storage-status">
+      {recipeStorage.recoveredFromBackup
+        ? "Recipes were recovered from the previous metadata backup. Check your most recent changes."
+        : recipeStorage.separateFolder
+          ? "Recipes and photos are saved in your configured recipe folder. Reconnect that folder after reconfiguring Homestead."
+          : "Recipes are saved in appdata. Configure a separate Recipes folder to keep them independent of server settings."}
+    </p>}
     {focusMode && <button className="focus-mode-exit" onClick={() => setFocusMode(false)}>× Exit Full Screen</button>}
     <FamilySectionTabs activeLibrary="recipes" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig}/>
     <div className="recipe-view-toolbar">
