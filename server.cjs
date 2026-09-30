@@ -3420,9 +3420,12 @@ async function readBookArtworkPayload(body = {}) {
   return fetchSafeBookArtworkUrl(body.url, true);
 }
 
-const recipesDataPath = path.join(HOMESTEAD_DATA_DIR, "recipes.json");
-const recipeCategoriesDataPath = path.join(HOMESTEAD_DATA_DIR, "recipe-categories.json");
-const recipeArtworkRoot = path.join(HOMESTEAD_DATA_DIR, "recipe-artwork");
+const { createRecipeLibrary } = require("./src/server/recipe-library.cjs");
+const recipeLibrary = createRecipeLibrary({
+  dataDir: HOMESTEAD_DATA_DIR,
+  libraryDir: process.env.HOMESTEAD_RECIPES_DIR,
+});
+const recipeArtworkRoot = recipeLibrary.artworkRoot;
 
 function cleanRecipeValue(value = "", maximum = 4000) {
   return String(value || "").replace(/\0/g, "").trim().slice(0, maximum);
@@ -3434,16 +3437,7 @@ function cleanRecipeLines(value, maximumItems = 300) {
 }
 
 function readRecipes() {
-  const stored = readJsonFile(recipesDataPath, { version: 1, recipes: [] });
-  return Array.isArray(stored?.recipes) ? stored.recipes : [];
-}
-
-function writeRecipes(recipes = []) {
-  writeJsonFile(recipesDataPath, {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    recipes: Array.isArray(recipes) ? recipes.slice(-5000) : [],
-  });
+  return recipeLibrary.read().recipes;
 }
 
 function recipeAccountId(req) {
@@ -3452,16 +3446,11 @@ function recipeAccountId(req) {
 }
 
 function readRecipeCategoryStore() {
-  const stored = readJsonFile(recipeCategoriesDataPath, { version: 1, users: {} });
-  return { version: 1, users: stored?.users && typeof stored.users === "object" ? stored.users : {} };
+  return { version: 1, users: recipeLibrary.read().users };
 }
 
-function writeRecipeCategoryStore(store = {}) {
-  writeJsonFile(recipeCategoriesDataPath, {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    users: store?.users && typeof store.users === "object" ? store.users : {},
-  });
+function writeRecipeCategoryStore(store = {}, updateRecipes = (recipes) => recipes) {
+  recipeLibrary.update((snapshot) => ({ ...snapshot, users: store.users, recipes: updateRecipes(snapshot.recipes) }));
 }
 
 function recipeCategoriesForRequest(req, store = readRecipeCategoryStore()) {
@@ -3579,7 +3568,8 @@ async function saveRecipeArtwork(recipeId, input) {
   if (!extension) throw new Error("The recipe photo is not a supported image.");
   fs.mkdirSync(recipeArtworkRoot, { recursive: true });
   const safeId = String(recipeId).replace(/[^a-z0-9-]/gi, "");
-  const fileName = sharp ? `${safeId}.webp` : `${safeId}${extension}`;
+  const artworkId = `${safeId}-${crypto.randomBytes(6).toString("hex")}`;
+  const fileName = sharp ? `${artworkId}.webp` : `${artworkId}${extension}`;
   const destination = path.join(recipeArtworkRoot, fileName);
   if (sharp) {
     const temporary = `${destination}.tmp`;
@@ -3593,7 +3583,12 @@ async function saveRecipeArtwork(recipeId, input) {
 
 app.get("/api/recipes", homesteadAccess.requireSession, (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json({ ok: true, recipes: readRecipes().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))) });
+  try {
+    const recipes = readRecipes().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+    res.json({ ok: true, recipes, storage: recipeLibrary.status() });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message });
+  }
 });
 
 app.get("/api/recipes/categories", homesteadAccess.requireSession, (req, res) => {
@@ -3639,8 +3634,7 @@ app.patch("/api/recipes/categories/:categoryId", homesteadAccess.requireSession,
     const nextCategories = categories.slice();
     nextCategories[index] = category;
     store.users[recipeAccountId(req)] = nextCategories;
-    writeRecipeCategoryStore(store);
-    writeRecipes(readRecipes().map((recipe) => recipe.categoryId === category.id ? { ...recipe, category: category.name, updatedAt: category.updatedAt } : recipe));
+    writeRecipeCategoryStore(store, (recipes) => recipes.map((recipe) => recipe.categoryId === category.id ? { ...recipe, category: category.name, updatedAt: category.updatedAt } : recipe));
     res.json({ ok: true, category });
   } catch (error) {
     res.status(400).json({ ok: false, message: error.message || "Could not update that category." });
@@ -3653,9 +3647,8 @@ app.delete("/api/recipes/categories/:categoryId", homesteadAccess.requireSession
     const categories = recipeCategoriesForRequest(req, store);
     if (!categories.some((entry) => entry.id === req.params.categoryId)) return res.status(404).json({ ok: false, message: "Recipe category not found." });
     store.users[recipeAccountId(req)] = categories.filter((entry) => entry.id !== req.params.categoryId);
-    writeRecipeCategoryStore(store);
     const now = new Date().toISOString();
-    writeRecipes(readRecipes().map((recipe) => recipe.categoryId === req.params.categoryId ? { ...recipe, categoryId: "", category: "", updatedAt: now } : recipe));
+    writeRecipeCategoryStore(store, (recipes) => recipes.map((recipe) => recipe.categoryId === req.params.categoryId ? { ...recipe, categoryId: "", category: "", updatedAt: now } : recipe));
     res.json({ ok: true });
   } catch (error) {
     res.status(400).json({ ok: false, message: error.message || "Could not delete that category." });
@@ -3741,7 +3734,15 @@ app.post("/api/recipes", homesteadAccess.requireSession, async (req, res) => {
       createdAt: now,
       updatedAt: now,
     };
-    writeRecipes([...recipes, recipe]);
+    // Artwork retrieval yields to other requests. Re-read inside the synchronous
+    // transaction so simultaneous imports cannot replace each other's recipes.
+    recipeLibrary.update((snapshot) => {
+      if (sourceUrl && snapshot.recipes.some((entry) => String(entry.sourceUrl || "").toLowerCase() === sourceUrl.toLowerCase())) {
+        throw new Error("That source link is already saved in Recipes.");
+      }
+      snapshot.recipes.push(recipe);
+      return snapshot;
+    });
     res.status(201).json({ ok: true, recipe, artworkWarning });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message || "Unable to save that recipe." });
@@ -3790,8 +3791,14 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
         updatedAt: new Date().toISOString(),
       };
     }
-    recipes[index] = next;
-    writeRecipes(recipes);
+    recipeLibrary.update((snapshot) => {
+      const latestIndex = snapshot.recipes.findIndex((entry) => entry.id === current.id);
+      if (latestIndex < 0) throw new Error("Recipe not found.");
+      const latest = snapshot.recipes[latestIndex];
+      if (latest.updatedAt !== current.updatedAt) throw new Error("This recipe changed while saving. Reload it before editing again.");
+      snapshot.recipes[latestIndex] = next;
+      return snapshot;
+    });
     res.json({ ok: true, recipe: next });
   } catch (error) {
     res.status(400).json({ ok: false, message: error.message || "Unable to update that recipe." });
@@ -3801,6 +3808,7 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
 app.get("/api/recipes/artwork/:fileName", homesteadAccess.requireSession, (req, res) => {
   const fileName = String(req.params.fileName || "");
   if (!/^recipe-[a-z0-9-]+\.(?:jpe?g|png|webp|gif)$/i.test(fileName)) return res.status(400).end();
+  recipeLibrary.read(); // Migrate legacy artwork before resolving its URL.
   const target = path.join(recipeArtworkRoot, fileName);
   if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return res.status(404).end();
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
