@@ -40,6 +40,7 @@ import { BrowserMultiFormatReader } from "@zxing/browser";
 import LiveTvSourcesManager from "./components/livetv/LiveTvSourcesManager";
 import AddAdultProfileModal from "./components/adult/AddAdultProfileModal";
 import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
+import "./mobile.css";
 
 
 function encodePublicMediaPath(value = "") {
@@ -1545,6 +1546,7 @@ function MobileBottomNav({ activeLibrary, setActiveLibrary, setupConfig }) {
           key={item.id}
           type="button"
           className={`mobile-bottom-nav-button ${item.active ? "active" : ""}`}
+          aria-current={item.active ? "page" : undefined}
           onClick={item.onClick}
         >
           <span>{item.icon}</span>
@@ -48941,7 +48943,7 @@ const floatingActions = {
   <div className="global-header app-ribbon-header">
     <div className={`library-header-card app-ribbon-card ${pageContext.library === activeLibrary && pageContext.hero?.type === "collection" && pageContext.hero?.render !== false ? "collection-app-hero" : ""}`}>
       {activeLibrary !== "home" && <button
-        className="secondary-button ribbon-nav-button"
+        className="secondary-button ribbon-nav-button ribbon-home-button"
         type="button"
         onClick={() => setActiveLibrary("home")}
       >

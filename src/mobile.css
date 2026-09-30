@@ -1,0 +1,143 @@
+/* Phone layout overrides live together after the legacy feature styles. */
+@media (max-width: 768px) {
+  .app-shell .main {
+    min-width: 0;
+    padding: 12px max(12px, env(safe-area-inset-right)) calc(92px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+  }
+
+  .main .app-ribbon-header { margin: 0 0 16px !important; }
+  .main .app-ribbon-card {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 10px !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    box-sizing: border-box;
+  }
+  .main .app-ribbon-title {
+    flex: 1 1 52px;
+    min-width: 0;
+    margin: 0 !important;
+    order: 0 !important;
+  }
+  .main .app-ribbon-title h2 { margin: 0; font-size: 20px !important; text-align: left; }
+  .main .app-ribbon-card > button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+    margin: 0 !important;
+    padding: 8px !important;
+    order: 1 !important;
+  }
+  .main .app-ribbon-card > .ribbon-nav-button { order: -1 !important; }
+  .app-shell:not(.kiosk-mode) .main .app-ribbon-card > .ribbon-home-button { display: none !important; }
+  .main .app-ribbon-global-add strong { display: none; }
+  .main .app-ribbon-global-add span { font-size: 22px; }
+  .main .app-ribbon-stats {
+    order: 2 !important;
+    flex: 0 0 100% !important;
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start !important;
+    gap: 6px !important;
+    width: 100% !important;
+    min-width: 0;
+    overflow-x: auto !important;
+    white-space: nowrap !important;
+    padding: 2px 0 4px !important;
+    scrollbar-width: thin;
+  }
+  .main .app-ribbon-stats span { flex: 0 0 auto; white-space: nowrap; font-size: 12px !important; }
+  .main .collection-app-hero-body { order: 3; flex-basis: 100%; min-width: 0; }
+
+  .main .dashboard-grid,
+  .main .home-overview-row,
+  .main .media-home-stack,
+  .main .media-home-two-column-row,
+  .main .media-home-split-row {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    width: 100% !important;
+    min-width: 0;
+    gap: 16px !important;
+    margin-inline: 0 !important;
+  }
+  .main .dashboard-home { width: 100%; min-width: 0; margin-inline: 0 !important; padding-inline: 0 !important; }
+  .main .dashboard-panel,
+  .main .media-home-widget {
+    width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box;
+    margin: 0 !important;
+    padding: 14px !important;
+    border-radius: 16px;
+  }
+  .main .dashboard-panel .panel-header,
+  .main .media-home-widget .panel-header {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 8px;
+    margin-bottom: 12px;
+    text-align: left !important;
+  }
+  .main .dashboard-panel .panel-header h3,
+  .main .media-home-widget h2 { margin: 0; font-size: 19px !important; line-height: 1.25; text-align: left !important; }
+  .main .dashboard-panel .panel-header button,
+  .main .media-home-widget .panel-header button {
+    width: auto !important;
+    min-height: 44px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 8px 12px;
+  }
+  .main .dashboard-stat-list { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px !important; }
+  .main .dashboard-stat-row { min-width: 0; padding: 12px !important; text-align: left; overflow-wrap: anywhere; }
+  .main .dashboard-stat-row p { font-size: 14px; }
+  .main .dashboard-stat-row span { font-size: 12px; line-height: 1.4; }
+  .main .mini-poster-row,
+  .main .media-home-card-row {
+    display: flex !important;
+    gap: 12px !important;
+    overflow-x: auto !important;
+    padding-bottom: 8px;
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: 2px;
+    scrollbar-width: thin;
+  }
+  .main .mini-poster-row > *,
+  .main .media-home-card-row > * { flex: 0 0 128px !important; min-width: 0 !important; scroll-snap-align: start; }
+  .main .mini-poster-row > * { width: 128px !important; }
+  .main .mini-poster-row .mini-poster-card img,
+  .main .mini-poster-row .mini-poster-art { width: 100% !important; }
+  .main .media-home-request-card { width: 144px !important; flex-basis: 144px !important; text-align: left; }
+
+  .mobile-bottom-nav { padding-top: 6px !important; padding-bottom: calc(6px + env(safe-area-inset-bottom)) !important; }
+  .mobile-bottom-nav .mobile-bottom-nav-button { min-height: 50px !important; padding: 7px 2px !important; gap: 5px !important; }
+  .mobile-bottom-nav .mobile-bottom-nav-button strong { font-size: 11px !important; line-height: 1.2 !important; }
+  .mobile-more-row { min-height: 56px; }
+  .mobile-more-row-copy { min-width: 0; overflow-wrap: anywhere; }
+  .mobile-more-hero h1 { font-size: 28px; }
+
+  /* Avoid focus zoom on iPhone without disabling user zoom. */
+  .app-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .app-shell select,
+  .app-shell textarea,
+  [role="dialog"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  [role="dialog"] select,
+  [role="dialog"] textarea { font-size: 16px !important; }
+  .spotlight-search-overlay { padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)) !important; }
+  .spotlight-search-wrap { width: 100%; min-width: 0; max-height: calc(100dvh - 32px); overflow-y: auto; }
+  .app-shell button:focus-visible,
+  [role="dialog"] button:focus-visible { outline: 2px solid #b8a4ff; outline-offset: 3px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-poster-row, .media-home-card-row, .app-ribbon-stats { scroll-behavior: auto !important; }
+}
