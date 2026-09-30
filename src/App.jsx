@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -22,12 +22,13 @@ import BookMetadataMatchModal from "./components/BookMetadataMatchModal.jsx";
 import BookSeriesAppearanceEditor from "./components/BookSeriesAppearanceEditor.jsx";
 import ArtworkPicker from "./components/ArtworkPicker.jsx";
 import TransferQueue from "./components/TransferQueue.jsx";
+import { createHomeMusicLookup, recentYouTubeEntries, mapWithConcurrency, createSharedIndexLoader } from "./utils/home-media.js";
 import useLibraryScrollReset from "./hooks/useLibraryScrollReset.js";
 import { chooseOwnedArtist, mergeRequestSnapshot, requestContentKey, readableEbooks } from "./utils/media-polish.js";
 import { resolvePhotoAlbumAppearance, updatePhotoAlbumAppearance, resetPhotoAlbumAppearance } from "./utils/photo-appearance.js";
 
 
-import ModelViewer from "./components/ModelViewer";
+const ModelViewer = lazy(() => import("./components/ModelViewer"));
 import ePub from "epubjs";
 import MediaStatusBadge from "./components/MediaStatusBadge.jsx";
 import RequestRows, { REQUEST_TYPES, RequestStatePill } from "./components/RequestRows.jsx";
@@ -2447,7 +2448,7 @@ function Models3DPage({ files }) {
         <div className="model-overlay-body">
           <div className="model-overlay-viewer">
             {selectedModel.stl ? (
-              <ModelViewer modelPath={selectedModel.stl.path} />
+              <Suspense fallback={<p role="status">Loading 3D viewer…</p>}><ModelViewer modelPath={selectedModel.stl.path} /></Suspense>
             ) : (
               <p>No STL file found for this model folder.</p>
             )}
@@ -18982,13 +18983,13 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
     setupConfig?.serverName?.trim() ||
     setupConfig?.server?.name?.trim() ||
     "Homestead";
-  const movies = Object.values(mediaIndex?.libraries?.movies || {});
-  const tv = Object.values(mediaIndex?.libraries?.tv || {});
-  const books = Object.values(mediaIndex?.libraries?.books || {});
-  const music = Object.values(mediaIndex?.libraries?.music || {});
+  const movies = useMemo(() => Object.values(mediaIndex?.libraries?.movies || {}), [mediaIndex]);
+  const tv = useMemo(() => Object.values(mediaIndex?.libraries?.tv || {}), [mediaIndex]);
+  const books = useMemo(() => Object.values(mediaIndex?.libraries?.books || {}), [mediaIndex]);
+  const music = useMemo(() => Object.values(mediaIndex?.libraries?.music || {}), [mediaIndex]);
 
-  const youtubeCreators = Object.values(youtubeIndex?.creators || {});
-  const youtubeVideos = youtubeCreators.flatMap((creator) =>
+  const youtubeCreators = useMemo(() => Object.values(youtubeIndex?.creators || {}), [youtubeIndex]);
+  const youtubeVideos = useMemo(() => youtubeCreators.flatMap((creator) =>
     Object.values(creator.videos || {}).map((video) => ({
       ...video,
       creatorId: creator.id,
@@ -18996,7 +18997,7 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
       creatorPoster: creator.poster,
       creatorThumb: creator.thumb || creator.thumbnail,
     }))
-  );
+  ), [youtubeCreators]);
 
   function findDashboardBook(progressBook = {}) {
     const progressId = String(progressBook.id || "").trim();
@@ -19006,10 +19007,10 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
     return books.find((book) => {
       const bookFiles = Object.values(book.files || {});
       return (
-        String(book.id || "").trim() === progressId ||
-        String(book.path || book.filePath || "").trim() === progressPath ||
-        String(book.title || book.name || book.metadata?.title || "").toLowerCase().trim() === progressTitle ||
-        bookFiles.some((file) => String(file.path || file.sourcePath || "").trim() === progressPath)
+        (progressId && String(book.id || "").trim() === progressId) ||
+        (progressPath && String(book.path || book.filePath || "").trim() === progressPath) ||
+        (progressTitle && String(book.title || book.name || book.metadata?.title || "").toLowerCase().trim() === progressTitle) ||
+        (progressPath && bookFiles.some((file) => String(file.path || file.sourcePath || "").trim() === progressPath))
       );
     });
   }
@@ -19050,9 +19051,9 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
 
     return youtubeVideos.find((video) => {
       return (
-        String(video.id || "").trim() === progressId ||
-        String(video.path || video.filePath || video.sourcePath || "").trim() === progressPath ||
-        String(video.title || video.name || "").toLowerCase().trim() === progressTitle
+        (progressId && String(video.id || "").trim() === progressId) ||
+        (progressPath && String(video.path || video.filePath || video.sourcePath || "").trim() === progressPath) ||
+        (progressTitle && String(video.title || video.name || "").toLowerCase().trim() === progressTitle)
       );
     });
   }
@@ -19106,26 +19107,12 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
   const recentBooks = books.slice(-6).reverse();
   const recentMusic = music.slice(-6).reverse();
 
-  const homeMusicTracks = music.flatMap((artistFolder) => {
-    const files = Object.values(artistFolder.files || {});
-    return files
-      .filter((file) => file.type === "audio" || file.type === "audiobook")
-      .map((file) => ({ ...normalizeLocalMusicSong(file, artistFolder, files), artistFolder }));
-  });
+  const findDashboardMusicTrack = useMemo(() => createHomeMusicLookup(music, normalizeLocalMusicSong), [music]);
   const homeProgressMusic = Object.entries(watchProgress)
     .map(([id, progress]) => ({ id, ...progress }))
     .filter((item) => item.type === "music")
     .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
     .slice(0, 6);
-  const findDashboardMusicTrack = (progress = {}) => {
-    const wantedPath = String(progress.path || progress.sourcePath || progress.id || "").trim();
-    const wantedTitle = String(progress.title || progress.name || "").trim().toLowerCase();
-    const wantedArtist = String(progress.artist || "").trim().toLowerCase();
-    return homeMusicTracks.find((track) =>
-      (wantedPath && [track.id, track.path, track.audioFile?.path, track.audioFile?.sourcePath].some((value) => String(value || "").trim() === wantedPath)) ||
-      (wantedTitle && String(track.title || "").trim().toLowerCase() === wantedTitle && (!wantedArtist || String(track.artist || "").trim().toLowerCase() === wantedArtist))
-    ) || null;
-  };
   const getDashboardMusicPoster = (item = {}) => {
     const track = findDashboardMusicTrack(item) || {};
     const artistKey = track.artist || item.artist || item.name || item.title || item.id || "";
@@ -19321,22 +19308,11 @@ const continueYouTube = Object.entries(watchProgress)
   .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
   .slice(0, 6);
 
-const recentYouTube = youtubeCreators
-  .flatMap((creator) =>
-    (creator.videos || []).map((video) => ({
-      ...video,
-      creatorId: creator.id,
-      creatorName: creator.name,
-      poster: getDashboardYouTubePoster({ ...video, creatorId: creator.id, creatorName: creator.name }),
-      name:
-        video.title ||
-        video.name ||
-        video.filename ||
-        creator.name,
-    }))
-  )
-  .slice(-6)
-  .reverse();
+const recentYouTube = recentYouTubeEntries(youtubeCreators).map((video) => ({
+  ...video,
+  poster: getDashboardYouTubePoster(video),
+  name: video.title || video.name || video.filename || video.creatorName,
+}));
 
 const showMovies = !!enabledLibraries.movies;
 const showTV = !!enabledLibraries.tvshows;
@@ -19903,6 +19879,7 @@ function HomeDashboardMiniPosterCard({
             src={posterSource}
             alt=""
             loading="lazy"
+            decoding="async"
             onError={() => setImageCandidateIndex((current) => current + 1)}
           />
         ) : (
@@ -46716,6 +46693,7 @@ function HomesteadApp({ sessionUser, onLogout }) {
   const [dashboardOpen, setDashboardOpen] = useState(null);
   const [requestedMediaToolPage, setRequestedMediaToolPage] = useState(null);
   const [mediaIndex, setMediaIndex] = useState(null);
+  const loadMediaIndex = useMemo(() => createSharedIndexLoader(() => fetchJsonIfExists("/data/media-index.json")), []);
   const [metadataMatchesVersion, setMetadataMatchesVersion] = useState(0);
 
   useEffect(() => {
@@ -46865,11 +46843,8 @@ function HomesteadApp({ sessionUser, onLogout }) {
         setRequestSnapshot((current) => requestContentKey(current) === requestContentKey(data) ? current : data);
         setRequests((current) => mergeRequestSnapshot(current, data.rows, REQUEST_TYPES.map(([library]) => library)));
         if (data.indexVersion && data.indexVersion !== requestIndexVersion.current) {
-          const indexResponse = await fetch('/data/media-index.json', { cache: 'no-store', signal: controller.signal });
-          if (indexResponse.ok) {
-            const index = await indexResponse.json();
-            if (!stopped) { setMediaIndex(index); requestIndexVersion.current = data.indexVersion; }
-          }
+          const index = await loadMediaIndex(Boolean(requestIndexVersion.current));
+          if (!stopped && index) { setMediaIndex(index); requestIndexVersion.current = data.indexVersion; }
         }
       } catch (error) {
         if (!stopped) setRequestSnapshot((current) => ({ ...(current || {}), error: error.message }));
@@ -47452,7 +47427,7 @@ useEffect(() => {
 
 useEffect(() => {
   async function loadProfiles() {
-    const index = await fetchJsonIfExists("/data/media-index.json");
+    const index = await loadMediaIndex();
     setMediaIndex(index);
 
 const personalIndex = {
@@ -47477,8 +47452,7 @@ const performerIds = Object.keys(
   index?.libraries?.performers || {}
 );
 
-const generatedProfiles = await Promise.all(
-  girlIds.map(async (id) => {
+const generatedProfiles = await mapWithConcurrency(girlIds, async (id) => {
     const base = defaultProfile(id);
     const indexRecord = personalIndex[id] || {};
     const legacyRecord = legacyGirlsIndex[id] || {};
@@ -47591,11 +47565,9 @@ return {
     ...(metadata.relationships || {}),
   },
 };
-  })
-);
+  });
 
-const generatedCelebrities = await Promise.all(
-  celebrityIds.map(async (id) => {
+const generatedCelebrities = await mapWithConcurrency(celebrityIds, async (id) => {
     const base = defaultProfile(id);
     const indexRecord = index?.libraries?.celebrities?.[id] || {};
 
@@ -47651,11 +47623,9 @@ const generatedCelebrities = await Promise.all(
         [],
       metadataCandidates: candidates?.metadataCandidates || {},
     };
-  })
-);
+  });
 
-const generatedPerformers = await Promise.all(
-  performerIds.map(async (id) => {
+const generatedPerformers = await mapWithConcurrency(performerIds, async (id) => {
     const base = defaultProfile(id);
     const indexRecord = index?.libraries?.performers?.[id] || {};
 
@@ -47701,8 +47671,7 @@ return {
   ],
   metadataCandidates: candidates?.mergedCandidate || {},
 };
-  })
-);
+  });
 
 setPeople(generatedProfiles);
 setCelebrities(generatedCelebrities);
