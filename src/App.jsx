@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { lazyFeature, FeatureReloadButton } from "./components/LazyFeature.jsx";
 import { createProfileStartupLoader, initialStartupProfileList, mergeStartupProfileList } from "./utils/profile-startup.js";
@@ -24,6 +24,8 @@ import BookSeriesAppearanceEditor from "./components/BookSeriesAppearanceEditor.
 import ArtworkPicker from "./components/ArtworkPicker.jsx";
 import TransferQueue from "./components/TransferQueue.jsx";
 import useLibraryScrollReset from "./hooks/useLibraryScrollReset.js";
+import useDialogFocus from "./hooks/useDialogFocus.js";
+import "./PublicQa.css";
 import { chooseOwnedArtist, mergeRequestSnapshot, requestContentKey, readableEbooks } from "./utils/media-polish.js";
 import { resolvePhotoAlbumAppearance } from "./utils/photo-appearance.js";
 import { appearanceScope, appearanceScopeKey, getScopedAppearanceOverrides, withScopedAppearanceOverrides, explicitAppearanceChanges, normalizeLegacyAppearance, appearanceCacheKey, cacheAppearanceScope, clearAppearanceScopeCache, loadAppearanceCache, appearanceDialogVariables, createAppearanceSaveQueue } from "./utils/appearance-state.js";
@@ -5553,6 +5555,7 @@ function readProfileAppearancePreferences(profile = {}, accountId = "owner", all
 }
 
 function ProfileArtworkCropper({ request, busy = false, onCancel, onApply }) {
+  useDialogFocus({ selector: ".profile-artwork-crop-overlay", open: Boolean(request), onClose: onCancel, canClose: !busy });
   const viewportRef = useRef(null);
   const imageRef = useRef(null);
   const dragRef = useRef(null);
@@ -5787,6 +5790,7 @@ function ProfileArtworkCropper({ request, busy = false, onCancel, onApply }) {
 }
 
 function ProfileAppearanceStudio({ values, layoutMode = "desktop", onChange, onClose, onReset, onSaveDefault, onResetDefault, status = "" }) {
+  useDialogFocus({ selector: ".profile-appearance-overlay", onClose });
   if (typeof document === "undefined") return null;
   const updateNumber = (key, value) => onChange?.(key, Number(value));
   const posterPrefix = layoutMode === "tablet" ? "tabletPoster" : "desktopPoster";
@@ -6254,6 +6258,7 @@ const profileImportLibrary = ["performers", "celebrities", "personal"].includes(
   }
 
   function runProfileAction(action) {
+    profilePageRef.current?.querySelector(".profile-actions-menu-button")?.focus({ preventScroll: true });
     setShowProfileActions(false);
     setShowProfileOptions(false);
     setShowProfileArtworkActions(false);
@@ -6934,7 +6939,7 @@ useEffect(() => {
 
             <p className="summary">{m.biography || m.description || m.notes || viewPerson.summary || person.summary}</p>
 
-            <div className="glass-info-grid">
+            <div className="glass-info-grid" role="region" aria-label="Profile metadata" tabIndex={0}>
   {person.library === "celebrities" || person.library === "performers" ? (
     <>
       <div className="glass-info-card">
@@ -7849,7 +7854,11 @@ function CloudLibraryV1() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const uploadRef = useRef(null);
-  const refresh = useCallback(async () => {
+  const refreshGeneration = useRef(0);
+  const [loading, setLoading] = useState(true);
+  const refresh = useCallback(async ({ keepMessage = false } = {}) => {
+    const generation = ++refreshGeneration.current;
+    setLoading(true);
     try {
       const [cloudResponse, filesResponse] = await Promise.all([
         fetch("/api/cloud", { cache: "no-store" }),
@@ -7858,31 +7867,49 @@ function CloudLibraryV1() {
       const cloudData = await cloudResponse.json();
       const filesData = await filesResponse.json();
       if (!cloudResponse.ok || !filesResponse.ok) throw new Error(cloudData.message || filesData.message || "Cloud Library is unavailable.");
-      setCloud(cloudData); setFiles(filesData.files || []); setMessage("");
-    } catch (error) { setMessage(error.message); }
+      if (generation !== refreshGeneration.current) return;
+      setCloud(cloudData); setFiles(filesData.files || []); if (!keepMessage) setMessage("");
+    } catch (error) { if (generation === refreshGeneration.current) setMessage(error.message || "Cloud Library is unavailable. Retry when the server is reachable."); }
+    finally { if (generation === refreshGeneration.current) setLoading(false); }
   }, [folder]);
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { refresh(); return () => { refreshGeneration.current++; }; }, [refresh]);
   const createFolder = async () => {
-    const name = window.prompt("Folder name"); if (!name) return;
-    const response = await fetch("/api/cloud/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: folder, name }) });
-    const data = await response.json(); if (!response.ok) return setMessage(data.message || "Unable to create folder."); refresh();
+    const name = window.prompt("Folder name"); if (!name || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/cloud/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: folder, name }) });
+      const data = await response.json(); if (!response.ok || data.ok === false) throw new Error(data.message || "Unable to create folder.");
+      setMessage("Folder created."); await refresh({ keepMessage: true });
+    } catch (error) { setMessage(error.message || "Unable to create folder. Try again."); }
+    finally { setBusy(false); }
   };
   const uploadFiles = async (selected) => {
-    setBusy(true);
-    for (const file of Array.from(selected || [])) {
-      const response = await fetch("/api/cloud/upload", { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream", "X-Cloud-Path": folder, "X-Cloud-Filename": file.name }, body: file });
-      if (!response.ok) { const data = await response.json().catch(() => ({})); setMessage(data.message || `Unable to upload ${file.name}.`); }
-    }
-    setBusy(false); refresh();
+    const batch = Array.from(selected || []); if (!batch.length || busy) return;
+    setBusy(true); let uploaded = 0; const failures = [];
+    try {
+      for (const file of batch) {
+        setMessage(`Uploading ${uploaded + failures.length + 1} of ${batch.length}: ${file.name}`);
+        try {
+          const response = await fetch("/api/cloud/upload", { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream", "X-Cloud-Path": folder, "X-Cloud-Filename": file.name }, body: file });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || data.ok === false) throw new Error(data.message || "Upload failed. Check the server connection and try again.");
+          uploaded++;
+        } catch (error) { failures.push(`${file.name}: ${error.message || "Upload failed."} Check the connection and retry this file.`); }
+      }
+      setMessage(`${uploaded} of ${batch.length} files uploaded.${failures.length ? " " + failures.join("; ") : ""}`);
+      await refresh({ keepMessage: true });
+    } finally { setBusy(false); }
   };
   const crumbs = folder ? folder.split("/").filter(Boolean) : [];
   return <div className="cloud-v1-page next-v1-page">
     <div className="library-tabs shell-under-header-tabs">{[["drive","My Drive"],["overview","Overview"],["providers","Providers"],["sync","Sync & Devices"],["shared","Shared & Backups"]].map(([id,label]) => <button key={id} className={`library-tab ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{label}</button>)}</div>
-    {message && <div className="next-v1-notice">{message}</div>}
+    {message && <div className="next-v1-notice" role="status" aria-live="polite">{message}</div>}
+    {loading && <p role="status">Loading Cloud files…</p>}
+    <button className="secondary-button" type="button" disabled={busy || loading} onClick={() => refresh()}>Refresh files</button>
     {tab === "drive" && <>
-      <div className="next-v1-commandbar"><div><strong>Cloud Library</strong><span>Private local storage now; provider-ready for your future public hostname.</span></div><div><button className="secondary-button" onClick={createFolder}>New Folder</button><button className="primary-button" disabled={busy} onClick={() => uploadRef.current?.click()}>{busy ? "Uploading…" : "Upload"}</button><input ref={uploadRef} hidden multiple type="file" onChange={(event) => uploadFiles(event.target.files)} /></div></div>
+      <div className="next-v1-commandbar"><div><strong>Cloud Library</strong><span>Private local storage now; provider-ready for your future public hostname.</span></div><div><button className="secondary-button" disabled={busy} onClick={createFolder}>New Folder</button><button className="primary-button" disabled={busy} onClick={() => uploadRef.current?.click()}>{busy ? "Uploading…" : "Upload"}</button><input ref={uploadRef} hidden multiple type="file" onChange={(event) => { const selected = Array.from(event.target.files || []); event.target.value = ""; uploadFiles(selected); }} /></div></div>
       <div className="cloud-v1-breadcrumb"><button onClick={() => setFolder("")}>Cloud</button>{crumbs.map((part, index) => <button key={`${part}-${index}`} onClick={() => setFolder(crumbs.slice(0,index + 1).join("/"))}>/ {part}</button>)}</div>
-      <div className="cloud-v1-file-grid">{files.map((file) => <article key={file.path} className="cloud-v1-file"><button className="cloud-v1-file-open" onClick={() => file.type === "folder" ? setFolder(file.path) : window.open(`/api/cloud/download?path=${encodeURIComponent(file.path)}`, "_blank")}><span>{file.type === "folder" ? "📁" : "📄"}</span><strong>{file.name}</strong><small>{file.type === "folder" ? "Folder" : formatStorageBytes(file.size)}</small></button></article>)}{!files.length && <div className="panel next-v1-empty"><span>☁️</span><h3>This folder is empty</h3><p>Upload files or create a folder. Data stays in Homestead until you connect a provider.</p></div>}</div>
+      <div className="cloud-v1-file-grid">{files.map((file) => <article key={file.path} className="cloud-v1-file"><button className="cloud-v1-file-open" onClick={() => file.type === "folder" ? setFolder(file.path) : window.open(`/api/cloud/download?path=${encodeURIComponent(file.path)}`, "_blank")}><span>{file.type === "folder" ? "📁" : "📄"}</span><strong>{file.name}</strong><small>{file.type === "folder" ? "Folder" : formatStorageBytes(file.size)}</small></button></article>)}{!loading && !message && !files.length && <div className="panel next-v1-empty"><span>☁️</span><h3>This folder is empty</h3><p>Upload files or create a folder. Data stays in Homestead until you connect a provider.</p></div>}</div>
     </>}
     {tab === "overview" && <div className="next-v1-stat-grid"><article><span>💾</span><strong>{formatStorageBytes(cloud.summary?.usedBytes)}</strong><small>Local cloud data</small></article><article><span>📄</span><strong>{cloud.summary?.fileCount || 0}</strong><small>Files</small></article><article><span>🔌</span><strong>{cloud.summary?.providerCount || 0}</strong><small>Providers enabled</small></article><article><span>🤝</span><strong>{cloud.summary?.shareCount || 0}</strong><small>Shares</small></article></div>}
     {tab === "providers" && <div className="cloud-grid">{[{id:"nextcloud",name:"Nextcloud",type:"webdav",icon:"🔵"},{id:"smb",name:"SMB / Network Share",type:"local",icon:"🗄️"},{id:"google-drive",name:"Google Drive",type:"oauth",icon:"🟢"},{id:"onedrive",name:"OneDrive",type:"oauth",icon:"🔷"},{id:"dropbox",name:"Dropbox",type:"oauth",icon:"📦"}].map((item) => { const saved = cloud.providers?.find((provider) => provider.id === item.id); return <article className="cloud-card" key={item.id}><div className="cloud-card-bg">{item.icon}</div><div className="cloud-card-content"><h3>{item.name}</h3><div className="cloud-provider-status">{saved?.enabled ? "Configured" : "Ready to configure"}</div><p>{item.type === "oauth" ? "OAuth callback support will use the configured public origin." : "Connect a private or self-hosted storage root."}</p><button className="secondary-button" onClick={async () => { const endpoint = window.prompt(`${item.name} endpoint or mount path`, saved?.endpoint || saved?.rootPath || ""); if (endpoint === null) return; await fetch(`/api/cloud/providers/${item.id}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ ...item, enabled:Boolean(endpoint), endpoint, rootPath:endpoint }) }); refresh(); }}>Configure</button></div></article>; })}</div>}
@@ -9122,6 +9149,7 @@ function buildTrailerSource(trailer) {
 }
 
 function TrailerPlayerOverlay({ trailer, title, onClose }) {
+  useDialogFocus({ selector: ".trailer-player-overlay", open: Boolean(trailer), onClose: onClose });
   useEffect(() => {
     const escape = (event) => { if (event.key === "Escape") onClose(); };
     document.addEventListener("keydown", escape);
@@ -9130,9 +9158,9 @@ function TrailerPlayerOverlay({ trailer, title, onClose }) {
   if (!trailer) return null;
 
   return (
-    <div className="trailer-player-overlay" role="dialog" aria-modal="true">
+    <div className="trailer-player-overlay" role="dialog" aria-modal="true" aria-label="Trailer player">
       <div className="trailer-player-topbar">
-        <button className="video-player-close" type="button" onClick={onClose}>✕</button>
+        <button className="video-player-close" type="button" aria-label="Close dialog" title="Close" onClick={onClose}>✕</button>
         <div className="video-player-meta">
           <span>{trailer.label || "Trailer"}</span>
           <strong>{title || trailer.title || "Trailer"}</strong>
@@ -10170,6 +10198,16 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
   const fileInputRef = useRef(null);
   const buttonRef = useRef(null);
   const menuRef = useRef(null);
+  const menuId = useId();
+  const closeMenu = () => { buttonRef.current?.focus({ preventScroll: true }); setOpen(false); };
+  useEffect(() => { if (open) menuRef.current?.querySelector("button:not(:disabled)")?.focus({ preventScroll: true }); }, [open]);
+  const handleMenuKey = (event) => {
+    const items = [...menuRef.current.querySelectorAll("button:not(:disabled)")];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "Escape" || event.key === "Tab") { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); } closeMenu(); return; }
+    const next = event.key === "ArrowDown" ? (index + 1) % items.length : event.key === "ArrowUp" ? (index - 1 + items.length) % items.length : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : -1;
+    if (next >= 0) { event.preventDefault(); items[next]?.focus(); }
+  };
   const slots = SHARED_MEDIA_ASSET_SLOTS[library] || [];
 
   const positionMenu = useCallback(() => {
@@ -10191,7 +10229,7 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
     positionMenu();
     const handlePointerDown = (event) => {
       if (buttonRef.current?.contains(event.target) || menuRef.current?.contains(event.target)) return;
-      setOpen(false);
+      closeMenu();
     };
     const handleViewportChange = () => positionMenu();
     document.addEventListener("pointerdown", handlePointerDown);
@@ -10206,10 +10244,10 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
 
   function chooseSlot(slot, label, accept) {
     if (['movies', 'tv', 'books', 'music'].includes(library) && ['gridPoster', 'detailPoster', 'banner', 'logo', 'albumCover', 'authorImage'].includes(slot)) {
-      setArtworkSlot({ slot, label }); setOpen(false); return;
+      setArtworkSlot({ slot, label }); closeMenu(); return;
     }
     setPendingSlot({ slot, label, accept });
-    setOpen(false);
+    closeMenu();
     window.setTimeout(() => fileInputRef.current?.click?.(), 0);
   }
 
@@ -10249,6 +10287,8 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
   const popover = open && typeof document !== "undefined" ? createPortal(
     <div
       ref={menuRef}
+      id={menuId}
+      onKeyDown={handleMenuKey}
       className="shared-media-actions-popover shared-media-actions-popover-portal"
       style={{ top: `${menuPosition.top}px`, left: `${menuPosition.left}px`, width: `${menuPosition.width}px` }}
       role="menu"
@@ -10256,7 +10296,7 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
     >
       {extraActions.length > 0 && <span className="shared-media-actions-heading">Item actions</span>}
       {extraActions.map((action) => (
-        <button key={action.id || action.label} type="button" role="menuitem" onClick={() => { setOpen(false); action.onClick?.(); }} disabled={busy || action.disabled}>
+        <button key={action.id || action.label} type="button" role="menuitem" onClick={() => { closeMenu(); action.onClick?.(); }} disabled={busy || action.disabled}>
           {action.label}
         </button>
       ))}
@@ -10269,7 +10309,7 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
       ))}
       {status && <p className="shared-media-actions-status">{status}</p>}
     </div>,
-    document.body
+    buttonRef.current?.closest('[role="dialog"]') || document.body
   ) : null;
 
   return (
@@ -10279,6 +10319,8 @@ function SharedMediaActionsMenu({ library = "movies", item, onSaved, extraAction
         className="secondary-button shared-media-actions-button"
         type="button"
         onClick={() => setOpen((value) => !value)}
+        aria-haspopup="menu"
+        aria-controls={open ? menuId : undefined}
         aria-expanded={open}
         aria-label="Open item actions"
         title="Item actions"
@@ -10339,6 +10381,7 @@ function MovieFixMatchModal({ movie, onClose, onMatched }) {
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".movie-fix-match-overlay", onClose, canClose: !busy });
   const [preserveArtwork, setPreserveArtwork] = useState(false);
   const [preserveTitle, setPreserveTitle] = useState(false);
   const [rescanEditions, setRescanEditions] = useState(true);
@@ -11137,7 +11180,7 @@ return (
       )}
 
       {remoteDetails?.related?.length > 0 && (
-        <div className="panel movie-related-panel"><h3>Related Movies</h3><div className="movie-related-row">{remoteDetails.related.slice(0, 18).map((item) => { const posterPath = item.posterPath || item.poster_path || ""; const title = item.title || item.name || "Untitled"; return <button type="button" key={`${item.mediaType || "movie"}-${item.id}`} className="movie-related-card" onClick={() => openHomesteadMedia({ ...item, mediaType: item.mediaType || "movie", library: "movies", title })}><img src={posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : getRelatedItemPoster({ ...item, title, library: "movies" }, mediaIndex)} alt="" onError={(event) => { event.currentTarget.src = getRelatedItemPoster({ ...item, title, library: "movies" }, mediaIndex); }} /><strong>{title}</strong><span>{String(item.releaseDate || item.release_date || item.firstAirDate || item.first_air_date || "").slice(0, 4)}</span></button>; })}</div></div>
+        <div className="panel movie-related-panel"><h3>Related Movies</h3><div className="movie-related-row">{remoteDetails.related.slice(0, 18).map((item) => { const posterPath = item.posterPath || item.poster_path || ""; const title = item.title || item.name || "Untitled"; return <button type="button" key={`${item.mediaType || "movie"}-${item.id}`} className="movie-related-card" onClick={() => openHomesteadMedia({ ...item, mediaType: item.mediaType || "movie", library: "movies", title })}><img src={posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : getRelatedItemPoster({ ...item, title, library: "movies" }, mediaIndex)} alt="" onError={(event) => handlePosterFallback(event, getRelatedItemPoster({ ...item, title, library: "movies" }, mediaIndex))} /><strong>{title}</strong><span>{String(item.releaseDate || item.release_date || item.firstAirDate || item.first_air_date || "").slice(0, 4)}</span></button>; })}</div></div>
       )}
       <RelatedContentShelf relatedContent={relatedContent} currentTitle={currentMovie.title} mediaIndex={mediaIndex} />
       {activeOnlineExtra && <TrailerPlayerOverlay trailer={activeOnlineExtra} title={currentMovie.title} onClose={() => setActiveOnlineExtra(null)} />}
@@ -11199,6 +11242,7 @@ function TVFixMatchModal({ show, onClose, onMatched }) {
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".movie-fix-match-overlay", onClose, canClose: !busy });
   const [preserveArtwork, setPreserveArtwork] = useState(false);
   const [preserveTitle, setPreserveTitle] = useState(false);
   const localId = getMetadataLocalId(show) || show?.localId || show?.id;
@@ -12059,7 +12103,7 @@ return (
           </section>
         )}
         {remoteDetails?.related?.length > 0 && (
-          <section className="panel movie-related-panel"><h3>Related TV</h3><div className="movie-related-row">{remoteDetails.related.slice(0, 18).map((item) => { const posterPath = item.posterPath || item.poster_path || ""; const title = item.name || item.title || "Untitled"; return <button type="button" key={`${item.mediaType || "tv"}-${item.id}`} className="movie-related-card" onClick={() => openHomesteadMedia({ ...item, mediaType: item.mediaType || "tv", library: "tv", title })}><img src={posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : getRelatedItemPoster({ ...item, title, library: "tv" }, mediaIndex)} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = getRelatedItemPoster({ ...item, title, library: "tv" }, mediaIndex); }} /><strong>{title}</strong><span>{String(item.firstAirDate || item.first_air_date || item.releaseDate || "").slice(0, 4)}</span></button>; })}</div></section>
+          <section className="panel movie-related-panel"><h3>Related TV</h3><div className="movie-related-row">{remoteDetails.related.slice(0, 18).map((item) => { const posterPath = item.posterPath || item.poster_path || ""; const title = item.name || item.title || "Untitled"; return <button type="button" key={`${item.mediaType || "tv"}-${item.id}`} className="movie-related-card" onClick={() => openHomesteadMedia({ ...item, mediaType: item.mediaType || "tv", library: "tv", title })}><img src={posterPath ? `https://image.tmdb.org/t/p/w342${posterPath}` : getRelatedItemPoster({ ...item, title, library: "tv" }, mediaIndex)} alt="" loading="lazy" onError={(event) => handlePosterFallback(event, getRelatedItemPoster({ ...item, title, library: "tv" }, mediaIndex))} /><strong>{title}</strong><span>{String(item.firstAirDate || item.first_air_date || item.releaseDate || "").slice(0, 4)}</span></button>; })}</div></section>
         )}
         <RelatedContentShelf relatedContent={relatedContent} currentTitle={displayShow.title} mediaIndex={mediaIndex} />
         {activeOnlineExtra && <TrailerPlayerOverlay trailer={activeOnlineExtra} title={displayShow.title} onClose={() => setActiveOnlineExtra(null)} />}
@@ -13885,7 +13929,7 @@ function CollectionOrderEditor({ collection, onSave, onCancel, onReset }) {
         {items.map((item, index) => (
           <div className="custom-collection-order-row" key={`${item.library}:${item.sourceId || item.title}:${index}`}>
             <span className="custom-collection-order-number">{index + 1}</span>
-            <img src={item.poster || "/placeholder-poster.jpg"} alt="" onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }} />
+            <img src={item.poster || "/placeholder-poster.jpg"} alt="" onError={handlePosterFallback} />
             <span className="custom-collection-order-copy"><strong>{item.title}</strong><small>{item.library === "movies" ? "Movie" : item.library === "books" ? "Book" : "TV Show"}</small></span>
             <span className="custom-collection-order-actions">
               <button type="button" disabled={index === 0} onClick={() => moveItem(index, -1)}>↑</button>
@@ -14076,7 +14120,7 @@ function CollectionAppearanceEditor({ collection, onSave, onCancel }) {
       </div>
       <div className="collection-appearance-editor-grid">
         <div className="collection-appearance-preview">
-          <img src={preview} alt="Collection poster preview" onError={(event) => { event.currentTarget.src = "/placeholder-banner.jpg"; }} />
+          <img src={preview} alt="Collection poster preview" onError={(event) => handlePosterFallback(event, "/placeholder-banner.jpg")} />
         </div>
         <div className="collection-appearance-fields">
           <label>Collection title<input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -14891,7 +14935,7 @@ function SharedImportedWatchOrderView({ order = null, collection = null, items =
                     disabled={!playable && !isOwned}
                   >
                     <span className="shared-timeline-index">{String(row.queueIndex + 1).padStart(2, "0")}</span>
-                    <img src={poster} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }} />
+                    <img src={poster} alt="" loading="lazy" onError={handlePosterFallback} />
                     <span className="contained-watch-order-copy">
                       <small>{sectionTitle}</small>
                       <strong>{title}</strong>
@@ -15762,14 +15806,14 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
 
       <div className="collection-two-column-workspace">
         <aside className={`collection-overview-column ${collection.banner ? "has-banner" : ""}`}>
-          {collection.banner && <img className="collection-overview-banner" src={collection.banner} alt="" aria-hidden="true" referrerPolicy="no-referrer" />}
+          {collection.banner && <img className="collection-overview-banner" src={collection.banner} onError={(event) => handlePosterFallback(event, "/placeholder-banner.jpg")} alt="" aria-hidden="true" referrerPolicy="no-referrer" />}
           <div className="collection-overview-shade" />
           <div className="collection-overview-summary">
             <img
               className="collection-overview-poster"
               src={collection.poster || "/placeholder-poster.jpg"}
               alt={`${collection.name || "Collection"} poster`}
-              onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }}
+              onError={handlePosterFallback}
             />
             <div className="collection-overview-copy">
               <p className="eyebrow">{collection.source === "custom" ? "Custom Collection" : "Shared Collection"}</p>
@@ -15798,7 +15842,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
                   if (item.library === "books") onSelectBook?.(item.sourceId, item.title);
                 }}
               >
-                <img src={item.poster || "/placeholder-poster.jpg"} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }} />
+                <img src={item.poster || "/placeholder-poster.jpg"} alt="" loading="lazy" onError={handlePosterFallback} />
                 <span><strong>{item.title}</strong><small>{item.library === "movies" ? "Movie" : item.library === "books" ? "Book" : item.library === "youtube" ? "YouTube" : "TV Show"}{item.year ? ` · ${item.year}` : ""}</small></span>
               </button>
             ))}
@@ -16582,6 +16626,13 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
 ), [tabFilteredShows, tvSearchText, tvSort]);
 
   const [selectedShow, setSelectedShow] = useState(null);
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("homestead-page-context", { detail: {
+      library: "tv", title: selectedShow?.title || selectedSharedCollection?.name || "TV Shows",
+      appearanceScope: selectedShow ? `tv:${selectedShow.id}` : selectedSharedCollection ? `collection:${selectedSharedCollection.id}` : "all",
+    } }));
+  }, [selectedShow?.id, selectedShow?.title, selectedSharedCollection?.id, selectedSharedCollection?.name]);
+
 
   useEffect(() => {
     if (dashboardOpen?.type !== "tv") return;
@@ -18374,7 +18425,7 @@ function RelatedContentShelf({ relatedContent = [], currentTitle = "", mediaInde
               type="button"
               onClick={() => openHomesteadMedia(item)}
             >
-              <img src={getRelatedItemPoster(item, mediaIndex)} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }} />
+              <img src={getRelatedItemPoster(item, mediaIndex)} alt="" loading="lazy" onError={handlePosterFallback} />
               <div>
                 <strong>{getRelatedItemTitle(item)}</strong>
                 <span>{getRelatedItemSubtitle(item)}</span>
@@ -18397,6 +18448,7 @@ function RelatedContentShelf({ relatedContent = [], currentTitle = "", mediaInde
 }
 
 function MediaPersonDetailPage({ seed, setupConfig, mediaIndex, requests, onBack, onOpenMedia, onOpenCelebrity, onCreateCelebrity }) {
+  useDialogFocus({ selector: ".media-person-overlay-card", open: true, onClose: onBack });
   const [details, setDetails] = useState(() => ({ person: seed || {}, appearances: seed?.knownFor || seed?.known_for || [] }));
   const [status, setStatus] = useState(seed?.id ? "Loading appearances…" : "Person details unavailable.");
   const [activeBackdrop, setActiveBackdrop] = useState("");
@@ -19198,6 +19250,7 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
 
 
   const [showWidgetCustomizer, setShowWidgetCustomizer] = useState(false);
+  useDialogFocus({ selector: ".home-appearance-overlay", open: showWidgetCustomizer, onClose: () => setShowWidgetCustomizer(false) });
   const dashboardWidgetOptions = [
     { id: "libraryStats", label: "Library Stats", description: "Show quick counts for Movies, TV, Books, and Music." },
     { id: "continueWatching", label: "Continue Watching", description: "Resume movies and TV from the home dashboard." },
@@ -19966,6 +20019,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
   const [method, setMethod] = useState("");
   const [draft, setDraft] = useState(EMPTY_RECIPE_DRAFT);
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".recipe-wizard-overlay", onClose, canClose: !busy });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [savedRecipe, setSavedRecipe] = useState(null);
@@ -20143,7 +20197,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
           {step === "complete" && <div className="recipe-wizard-complete"><span>✓</span><h3>{savedRecipe?.title || draft.title}</h3><p>{message}</p></div>}
 
           {(message && step !== "complete") && <p className="recipe-wizard-message">{message}</p>}
-          {error && <p className="recipe-wizard-error">{error}</p>}
+          {error && <p className="recipe-wizard-error" role="alert">{error}</p>}
         </div>
 
         <footer className="recipe-wizard-actions">
@@ -20159,6 +20213,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
 }
 
 function RecipeDetailsOverlay({ recipe, cookingMode = false, onClose, onToggleFavorite, onEdit }) {
+  useDialogFocus({ selector: ".recipe-detail-overlay", open: Boolean(recipe), onClose: onClose });
   useEffect(() => {
     if (!recipe) return undefined;
     const closeOnEscape = (event) => { if (event.key === "Escape") onClose?.(); };
@@ -20182,6 +20237,7 @@ function RecipeDetailsOverlay({ recipe, cookingMode = false, onClose, onToggleFa
   return createPortal(
     <div className={`recipe-detail-overlay ${cookingMode ? "recipe-cooking-mode" : ""}`} role="dialog" aria-modal="true" aria-labelledby="recipe-detail-title" onClick={(event) => { if (event.target === event.currentTarget) onClose?.(); }}>
       <section className="recipe-detail-card">
+        <nav className="recipe-detail-nav" aria-label="Recipe navigation"><button type="button" className="secondary-button" onClick={onClose}>← Back</button>{isQuickInstruction && <button type="button" className="secondary-button recipe-detail-edit" aria-label={`Edit ${recipe.title}`} title="Edit Quick Instruction" onClick={() => onEdit?.(recipe)}>✎ Edit</button>}</nav>
         <header className="recipe-detail-header">
           <div>
             <p>{isQuickInstruction ? "Quick Instructions" : "Homestead Recipes"}</p>
@@ -20190,8 +20246,6 @@ function RecipeDetailsOverlay({ recipe, cookingMode = false, onClose, onToggleFa
           </div>
           <div className="recipe-detail-header-actions">
             <button type="button" className={`recipe-favorite-button ${recipe.favorite ? "active" : ""}`} aria-label={recipe.favorite ? `Remove ${recipe.title} from favorites` : `Add ${recipe.title} to favorites`} title={recipe.favorite ? "Remove from Favorites" : "Add to Favorites"} onClick={() => onToggleFavorite?.(recipe)}>{recipe.favorite ? "♥" : "♡"}</button>
-            {isQuickInstruction && <button type="button" className="secondary-button recipe-detail-edit" aria-label={`Edit ${recipe.title}`} title="Edit Quick Instruction" onClick={() => onEdit?.(recipe)}>✎ Edit</button>}
-            <button type="button" className="secondary-button recipe-detail-close" aria-label="Close recipe details" title="Close" onClick={onClose}>×</button>
           </div>
         </header>
 
@@ -20262,6 +20316,7 @@ function QuickInstructionEditor({ recipe = null, onClose, onSaved }) {
   const editing = Boolean(recipe?.id);
   const [draft, setDraft] = useState(() => quickInstructionEditorDraft(recipe));
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".recipe-wizard-overlay", onClose, canClose: !busy });
   const [error, setError] = useState("");
   const updateStep = (index, field, value) => setDraft((current) => ({ ...current, quickSteps: current.quickSteps.map((step, stepIndex) => stepIndex === index ? { ...step, [field]: value } : step) }));
   const choosePoster = (file) => {
@@ -20291,9 +20346,9 @@ function QuickInstructionEditor({ recipe = null, onClose, onSaved }) {
     } catch (requestError) { setError(requestError.message || `Could not ${editing ? "update" : "save"} these instructions.`); }
     finally { setBusy(false); }
   };
-  return createPortal(<div className="recipe-wizard-overlay" role="dialog" aria-modal="true" onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose?.(); }}>
+  return createPortal(<div className="recipe-wizard-overlay" role="dialog" aria-modal="true" aria-label="Quick instruction editor" onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose?.(); }}>
     <section className="quick-instruction-editor" onClick={(event) => event.stopPropagation()}>
-      <header><div><p>Everyday food memory</p><h2>{editing ? "Edit Quick Instruction" : "New Quick Instruction"}</h2><span>For packaged foods, favorite shortcuts, and repeatable kitchen routines.</span></div><button type="button" className="secondary-button" onClick={onClose}>×</button></header>
+      <header><div><p>Everyday food memory</p><h2>{editing ? "Edit Quick Instruction" : "New Quick Instruction"}</h2><span>For packaged foods, favorite shortcuts, and repeatable kitchen routines.</span></div><button type="button" className="secondary-button" aria-label="Close editor" title="Close" disabled={busy} onClick={onClose}>×</button></header>
       <div className="quick-instruction-form">
         <div className="quick-instruction-poster wide">
           <div className="quick-instruction-poster-preview">{draft.imageDataUrl || draft.image ? <img src={draft.imageDataUrl || draft.image} alt="Quick Instruction poster preview" /> : <span aria-hidden="true">🍲</span>}</div>
@@ -20308,7 +20363,7 @@ function QuickInstructionEditor({ recipe = null, onClose, onSaved }) {
         <label className="recipe-favorite-check"><input type="checkbox" checked={draft.favorite} onChange={(event) => setDraft((current) => ({ ...current, favorite: event.target.checked }))} /><span><strong>Favorite</strong><small>Keep near the top.</small></span></label>
         <label className="recipe-favorite-check"><input type="checkbox" checked={draft.householdVisible} onChange={(event) => setDraft((current) => ({ ...current, householdVisible: event.target.checked }))} /><span><strong>Share with household</strong><small>Visible to signed-in family members.</small></span></label>
       </div>
-      {error && <p className="recipe-wizard-error">{error}</p>}
+      {error && <p className="recipe-wizard-error" role="alert">{error}</p>}
       <footer><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={busy} onClick={save}>{busy ? "Saving…" : editing ? "Update Instructions" : "Save Instructions"}</button></footer>
     </section>
   </div>, document.body);
@@ -20317,6 +20372,7 @@ function QuickInstructionEditor({ recipe = null, onClose, onSaved }) {
 function RecipeCategoryEditor({ category, onClose, onSaved, onDeleted }) {
   const [draft, setDraft] = useState(() => ({ name: category?.name || "", icon: category?.icon || "🍽️", description: category?.description || "" }));
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".recipe-wizard-overlay", onClose, canClose: !busy });
   const [error, setError] = useState("");
   async function save() {
     if (!draft.name.trim()) return setError("Enter a category name.");
@@ -20341,11 +20397,11 @@ function RecipeCategoryEditor({ category, onClose, onSaved, onDeleted }) {
       onDeleted?.(category.id);
     } catch (requestError) { setError(requestError.message || "Could not delete that category."); setBusy(false); }
   }
-  return createPortal(<div className="recipe-wizard-overlay" role="dialog" aria-modal="true" onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose?.(); }}>
+  return createPortal(<div className="recipe-wizard-overlay" role="dialog" aria-modal="true" aria-label="Recipe category editor" onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose?.(); }}>
     <section className="recipe-category-editor">
-      <header><div><p>Recipe organization</p><h2>{category ? "Edit Category" : "Create Category"}</h2></div><button type="button" className="secondary-button" onClick={onClose}>×</button></header>
+      <header><div><p>Recipe organization</p><h2>{category ? "Edit Category" : "Create Category"}</h2></div><button type="button" className="secondary-button" aria-label="Close editor" title="Close" disabled={busy} onClick={onClose}>×</button></header>
       <div className="recipe-category-form"><label><span>Icon</span><input value={draft.icon} maxLength="16" onChange={(event) => setDraft((current) => ({ ...current, icon: event.target.value }))} /></label><label><span>Name</span><input value={draft.name} maxLength="80" autoFocus onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label><label className="wide"><span>Description</span><textarea rows="3" value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} /></label></div>
-      {error && <p className="recipe-wizard-error">{error}</p>}
+      {error && <p className="recipe-wizard-error" role="alert">{error}</p>}
       <footer>{category && <button type="button" className="danger-button" disabled={busy} onClick={remove}>Delete Category</button>}<span /><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={busy || !draft.name.trim()} onClick={save}>{busy ? "Saving…" : "Save Category"}</button></footer>
     </section>
   </div>, document.body);
@@ -20453,7 +20509,7 @@ function RecipesPage({ setActiveLibrary, setupConfig }) {
         {recipe.image ? <img className="recipe-row-image" src={recipe.image} alt="" loading="lazy" /> : <div className="recipe-row-image recipe-row-image-fallback">{recipe.entryType === "quick-instruction" ? "⏱" : "🍲"}</div>}<div className="recipe-row-copy"><h4>{recipe.title}</h4><p>{recipe.entryType === "quick-instruction" ? [recipe.appliance, recipe.temperature, `${(recipe.quickSteps || []).length} steps`].filter(Boolean).join(" · ") : [recipe.category || "Uncategorized", recipe.prepTime || recipe.cookTime, recipe.servings].filter(Boolean).join(" · ")}</p>{recipe.description && <small>{recipe.description}</small>}<div className="recipe-tags">{(recipe.tags || []).slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div>{recipe.sourceUrl && <a href={recipe.sourceUrl} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>View original source ↗</a>}</div><button type="button" className={`recipe-favorite-button ${recipe.favorite ? "active" : ""}`} aria-label={recipe.favorite ? `Remove ${recipe.title} from favorites` : `Add ${recipe.title} to favorites`} onClick={(event) => { event.stopPropagation(); toggleFavorite(recipe); }}>{recipe.favorite ? "♥" : "♡"}</button>
       </article>)}</div> : <div className="recipe-empty-state"><span>{recipeView === "quick" ? "⏱" : selectedCategoryDetails?.icon || (selectedCategory === "favorites" ? "♡" : "🍲")}</span><h4>{recipeView === "quick" ? "No quick instructions yet" : "No recipes here yet"}</h4><p>{recipeView === "quick" ? "Add the exact routine you want to remember." : "Use the global Add button to bring in a recipe."}</p></div>}
     </section>
-    <RecipeDetailsOverlay recipe={selectedRecipe} cookingMode={focusMode} onClose={() => setSelectedRecipeId("")} onToggleFavorite={toggleFavorite} onEdit={(recipe) => { setSelectedRecipeId(""); setQuickEditorOpen(recipe); }} />
+    <RecipeDetailsOverlay recipe={selectedRecipe} cookingMode={focusMode} onClose={() => setSelectedRecipeId("")} onToggleFavorite={toggleFavorite} onEdit={(recipe) => setQuickEditorOpen(recipe)} />
     {wizardOpen && <RecipeWizard categories={categories} onClose={() => setWizardOpen(false)} onSaved={loadRecipes} />}
     {quickEditorOpen && <QuickInstructionEditor recipe={quickEditorOpen.id ? quickEditorOpen : null} onClose={() => setQuickEditorOpen(null)} onSaved={loadRecipes} />}
     {categoryEditor && <RecipeCategoryEditor category={categoryEditor.category} onClose={() => setCategoryEditor(null)} onSaved={() => { setCategoryEditor(null); loadRecipes(); }} onDeleted={(id) => { if (selectedCategory === id) setSelectedCategory("all"); setCategoryEditor(null); loadRecipes(); }} />}
@@ -20867,6 +20923,7 @@ function YouTubeCollectionsPanel({ creators = [], onOpenVideo }) {
 }
 
 function HomesteadVideoPlayerOverlay({ file, title, subtitle = "", pills = [], onClose, progressKey = "", progressPayload = {}, mediaIndex, collectionItem, library = "movies", watchlist, setWatchlist, onEnded }) {
+  useDialogFocus({ selector: ".homestead-global-player-overlay", open: Boolean(file), onClose: onClose });
   if (!file) return null;
   const savedProgress = progressKey ? getWatchProgress()[progressKey] : null;
   const savedTime = Number(savedProgress?.currentTime || 0);
@@ -20939,6 +20996,7 @@ function YouTubeSeriesBannerUpload({ seriesId, onSaved }) {
 function YouTubeSeriesAppearanceEditor({ seriesId, values = {}, onSaved, onClose, onArtworkSaved, onBannerSaved }) {
   const [draft, setDraft] = useState({ backgroundPosition: values.backgroundPosition || "center", opacity: Number(values.opacity ?? 0.72), darkness: Number(values.darkness ?? 0.48), blur: Number(values.blur ?? 0) });
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".youtube-series-appearance-overlay", onClose, canClose: !busy });
   useEffect(() => {
     const close = (event) => { if (event.key === "Escape") onClose?.(); };
     window.addEventListener("keydown", close);
@@ -20955,7 +21013,7 @@ function YouTubeSeriesAppearanceEditor({ seriesId, values = {}, onSaved, onClose
     } catch (error) { alert(error.message || "Appearance save failed."); }
     finally { setBusy(false); }
   };
-  return <div className="settings-modal-overlay youtube-series-appearance-overlay" role="dialog" aria-modal="true" aria-label="Series appearance" onClick={onClose}><section className="settings-modal-card youtube-series-appearance-card" onClick={(event) => event.stopPropagation()}><div className="settings-modal-header"><div><h2>Series Appearance</h2><p>Only this YouTube series page changes.</p></div><button className="secondary-button" type="button" onClick={onClose}>✕</button></div><div className="settings-modal-body"><div className="youtube-series-artwork-controls"><YouTubeSeriesPosterUpload seriesId={seriesId} onSaved={onArtworkSaved} /><YouTubeSeriesBannerUpload seriesId={seriesId} onSaved={onBannerSaved} /></div><label className="settings-field"><span>Banner position</span><select value={draft.backgroundPosition} onChange={(event) => setDraft((current) => ({ ...current, backgroundPosition: event.target.value }))}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label><label className="settings-field"><span>Banner opacity {Math.round(draft.opacity * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={draft.opacity} onChange={(event) => setDraft((current) => ({ ...current, opacity: Number(event.target.value) }))} /></label><label className="settings-field"><span>Darkness {Math.round(draft.darkness * 100)}%</span><input type="range" min="0" max="0.95" step="0.05" value={draft.darkness} onChange={(event) => setDraft((current) => ({ ...current, darkness: Number(event.target.value) }))} /></label><label className="settings-field"><span>Blur {draft.blur}px</span><input type="range" min="0" max="30" step="1" value={draft.blur} onChange={(event) => setDraft((current) => ({ ...current, blur: Number(event.target.value) }))} /></label><div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>Cancel</button><button className="primary-button" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save Appearance"}</button></div></div></section></div>;
+  return <div className="settings-modal-overlay youtube-series-appearance-overlay" role="dialog" aria-modal="true" aria-label="Series appearance" onClick={onClose}><section className="settings-modal-card youtube-series-appearance-card" onClick={(event) => event.stopPropagation()}><div className="settings-modal-header"><div><h2>Series Appearance</h2><p>Only this YouTube series page changes.</p></div><button className="secondary-button" type="button" aria-label="Close dialog" title="Close" onClick={onClose}>✕</button></div><div className="settings-modal-body"><div className="youtube-series-artwork-controls"><YouTubeSeriesPosterUpload seriesId={seriesId} onSaved={onArtworkSaved} /><YouTubeSeriesBannerUpload seriesId={seriesId} onSaved={onBannerSaved} /></div><label className="settings-field"><span>Banner position</span><select value={draft.backgroundPosition} onChange={(event) => setDraft((current) => ({ ...current, backgroundPosition: event.target.value }))}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label><label className="settings-field"><span>Banner opacity {Math.round(draft.opacity * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={draft.opacity} onChange={(event) => setDraft((current) => ({ ...current, opacity: Number(event.target.value) }))} /></label><label className="settings-field"><span>Darkness {Math.round(draft.darkness * 100)}%</span><input type="range" min="0" max="0.95" step="0.05" value={draft.darkness} onChange={(event) => setDraft((current) => ({ ...current, darkness: Number(event.target.value) }))} /></label><label className="settings-field"><span>Blur {draft.blur}px</span><input type="range" min="0" max="30" step="1" value={draft.blur} onChange={(event) => setDraft((current) => ({ ...current, blur: Number(event.target.value) }))} /></label><div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>Cancel</button><button className="primary-button" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save Appearance"}</button></div></div></section></div>;
 }
 
 function YouTubeSeriesDetail({ series, artwork = "", banner = "", appearance = {}, onArtworkSaved, onBannerSaved, onAppearanceSaved, onBack, mediaIndex, watchlist, setWatchlist }) {
@@ -21375,6 +21433,7 @@ function BookCard({ book, onClick }) {
 }
 
 function BookReader({ file, book, onClose, compact = false }) {
+  useDialogFocus({ selector: ".book-reader-overlay", open: !compact && Boolean(file), onClose });
   const readerRef = useRef(null);
   const [readerLoading, setReaderLoading] = useState(false);
   const [readerError, setReaderError] = useState('');
@@ -21510,7 +21569,7 @@ function BookReader({ file, book, onClose, compact = false }) {
   }, [compact]);
 
   return (
-    <div className={compact ? "book-reader-inline" : "book-reader-overlay"}>
+    <div className={compact ? "book-reader-inline" : "book-reader-overlay"} role={compact ? undefined : "dialog"} aria-modal={compact ? undefined : "true"} aria-label={compact ? undefined : "Book reader"}>
       <div className="book-reader-toolbar">
         <button className="secondary-button" onClick={onClose}>
           {compact ? 'Close Read Along' : 'Close'}
@@ -22667,12 +22726,15 @@ useEffect(() => {
   setHideSidebar,
 ]);
 
-if (musicFixMatchItem) return <ItemFixMatchModal library="music" item={musicFixMatchItem} onClose={() => setMusicFixMatchItem(null)} onSaved={(metadataMatch) => {
+const fixMatchDialog = musicFixMatchItem && <ItemFixMatchModal library="music" item={musicFixMatchItem} onClose={() => setMusicFixMatchItem(null)} onSaved={(metadataMatch) => {
   const fixedItem = musicFixMatchItem;
   setMusicFixMatchItem(null);
   setMusicMetadataRevision((value) => value + 1);
   if (fixedItem?.mediaType !== "album") openUnifiedArtistPage({ ...fixedItem, metadataMatch });
 }} />;
+
+// Keep the origin mounted so closing Fix Match restores focus and scroll.
+return <>{(() => {
 
 if (selectedDiscoveredSong) {
   const localTrack = findLocalTrackForDiscoveredSong(selectedDiscoveredSong);
@@ -23983,6 +24045,7 @@ onClick={() => {
 )}
      </div>
   );
+})()}{fixMatchDialog}</>;
 }
 
 const BOOK_EDITION_LINKS_KEY = "homestead-book-edition-links-v1";
@@ -24035,6 +24098,7 @@ function bookEditionLabel(book = {}, file = {}, index = 0) {
 }
 
 function BookEditionChooser({ book, editions = [], onClose, onChoose }) {
+  useDialogFocus({ selector: ".book-edition-overlay", open: Boolean(book), onClose: onClose });
   if (!book || !editions.length) return null;
   return (
     <div className="book-edition-overlay" role="dialog" aria-modal="true" aria-label={`Choose an edition of ${book.title}`} onClick={onClose}>
@@ -24056,6 +24120,7 @@ function BookEditionChooser({ book, editions = [], onClose, onChoose }) {
 }
 
 function BookEditionManager({ book, books = [], links = {}, onLink, onUnlink, onClose }) {
+  useDialogFocus({ selector: ".book-edition-overlay", open: Boolean(book), onClose: onClose });
   const [query, setQuery] = useState("");
   if (!book) return null;
   const currentIdentity = normalizeBookWorkIdentity(book, links);
@@ -24086,6 +24151,7 @@ function BookEditionManager({ book, books = [], links = {}, onLink, onUnlink, on
 }
 
 function BookDetailOverlay({ book, editionCount = 0, onClose, onRead, onListen, onAuthor, onManageEditions }) {
+  useDialogFocus({ selector: ".book-detail-overlay", open: Boolean(book), onClose: onClose });
   const [fixMatchOpen, setFixMatchOpen] = useState(false);
   if (!book) return null;
   const hasEbook = Boolean(book.ebookFiles?.length);
@@ -24095,7 +24161,7 @@ function BookDetailOverlay({ book, editionCount = 0, onClose, onRead, onListen, 
       <article className="book-detail-card" onClick={(event) => event.stopPropagation()}>
         <button className="book-detail-close" type="button" onClick={onClose} aria-label="Close book details">✕</button>
         <div className="book-detail-poster-wrap">
-          <img src={book.metadataMatch?.detailPoster || book.poster || "/media/books/default-poster.jpg"} alt={book.title} />
+          <img src={book.metadataMatch?.detailPoster || book.poster || "/media/books/default-poster.jpg"} alt={book.title} onError={handlePosterFallback} />
         </div>
         <div className="book-detail-copy">
           <p className="eyebrow">Homestead Books</p>
@@ -24126,6 +24192,7 @@ function BookDetailOverlay({ book, editionCount = 0, onClose, onRead, onListen, 
 }
 
 function BookAuthorOverlay({ author, books = [], onClose, onOpenBook }) {
+  useDialogFocus({ selector: ".book-detail-overlay", open: Boolean(author), onClose: onClose });
   if (!author) return null;
   return (
     <div className="book-detail-overlay" role="dialog" aria-modal="true" aria-label={`${author} books`} onClick={onClose}>
@@ -26781,6 +26848,7 @@ function LibraryImportModal({ activeLibrary, setupConfig, onClose }) {
   const [files, setFiles] = useState([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".library-import-overlay", onClose, canClose: !busy });
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -33771,6 +33839,8 @@ function ImageViewer({ viewer, onClose, setViewer, slideshow, setSlideshow }) {
     onClose?.();
   };
 
+  useDialogFocus({ selector: ".image-viewer-backdrop", open: isOpen, onClose: closeViewer });
+
   const goPrev = () => {
     setViewer((current) => {
       if (!current?.files?.length) return current;
@@ -33821,6 +33891,7 @@ function ImageViewer({ viewer, onClose, setViewer, slideshow, setSlideshow }) {
     document.body.style.overflow = "hidden";
 
     const handleKeyDown = (event) => {
+      if (event.target.closest("button, input, select, textarea, a, video, audio, [contenteditable]")) return;
       if (event.key === "Escape") closeViewer();
       if (event.key === "ArrowLeft") goPrev();
       if (event.key === "ArrowRight") goNext();
@@ -33894,7 +33965,7 @@ function ImageViewer({ viewer, onClose, setViewer, slideshow, setSlideshow }) {
   };
 
   return createPortal(
-    <div className={`image-viewer-backdrop image-viewer-transition-${transition}`} onClick={closeViewer}>
+    <div className={`image-viewer-backdrop image-viewer-transition-${transition}`} role="dialog" aria-modal="true" aria-label="Media viewer" onClick={closeViewer}>
       <div className={`image-viewer-shell ${isFullscreen ? "image-viewer-shell-fullscreen" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div className="image-viewer-topbar">
           <div>
@@ -36371,6 +36442,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
 
 function ActivityCenter({ open, onClose, onNewIntake, onCountChange }) {
+  useDialogFocus({ selector: ".activity-workspace", open: open, onClose: onClose });
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -36646,6 +36718,7 @@ function ActivityCenter({ open, onClose, onNewIntake, onCountChange }) {
 }
 
 function AddActionMenu({ activeLibrary, onClose, setActiveForm, openAdultProfileModal, openAdultImportMediaModal, onOpenLibraryImport, onOpenUniversalIntake, onOpenTvAction, contextActions = [], onContextAction, canManageLibraryScanning = false }) {
+  useDialogFocus({ selector: ".add-menu-backdrop", open: true, onClose: onClose });
 useEffect(() => {
   const closeOnEscape = (event) => {
     if (event.key === "Escape") onClose();
@@ -38293,7 +38366,7 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
         {tabs.map((item) => <button key={item.id} className={`library-tab ${tab === item.id ? "active" : ""}`} type="button" onClick={() => setTab(item.id)}>{item.icon} {item.label}</button>)}
       </div>
 
-      {tab !== "tcg" && <label className="inventory-v1-search inventory-v1-search-standalone"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search inventory, UPC, notes…" /></label>}
+      {tab !== "tcg" && <label className="inventory-v1-search inventory-v1-search-standalone"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Search inventory" placeholder="Search inventory, UPC, notes…" /></label>}
 
       {tab === "home" && <>
         <div className="inventory-v1-stats">
@@ -46306,6 +46379,7 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
   useEffect(() => () => previewBuffer.current.cancel(), []);
   const commitPreview = () => previewBuffer.current.flush();
   const closeEditor = () => { commitPreview(); onClose(); };
+  useDialogFocus({ selector: ".public-media-custom-appearance", onClose: closeEditor });
   const resetEditor = () => { previewBuffer.current.cancel(); onReset(); };
   values = { ...values, ...previewValues };
   const setNumber = (key, value) => {
@@ -46465,6 +46539,7 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
 }
 
 function MovieDetailAppearanceStudio({ values, onChange, onClose, onReset }) {
+  useDialogFocus({ selector: ".media-appearance-overlay", open: true, onClose: onClose });
   const setNumber = (key, value) => onChange({ ...values, [key]: Number(value) });
   return typeof document !== "undefined" ? createPortal(
     <div className="media-appearance-overlay" role="dialog" aria-modal="true" aria-label="Movie detail appearance">
@@ -47415,6 +47490,9 @@ function HomesteadApp({ sessionUser, onLogout }) {
 
     return () => window.removeEventListener("resize", syncMobileSidebar);
   }, []);
+
+  useDialogFocus({ selector: ".spotlight-search-overlay", open: searchOpen, onClose: () => { setSearchOpen(false); setQuery(""); } });
+  useDialogFocus({ selector: ".kiosk-navigation-drawer", open: kioskNavigationOpen, onClose: () => setKioskNavigationOpen(false) });
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -49013,6 +49091,8 @@ const floatingActions = {
 {hideSidebar && !kioskMode && (
   <button
     className="mobile-menu-button"
+    aria-label="Open navigation"
+    title="Open navigation"
     type="button"
     onClick={() => setHideSidebar(false)}
   >
@@ -49334,7 +49414,7 @@ const floatingActions = {
             src={pageContext.hero.poster || "/placeholder-poster.jpg"}
             alt=""
             referrerPolicy="no-referrer"
-            onError={(event) => { event.currentTarget.src = "/placeholder-poster.jpg"; }}
+            onError={handlePosterFallback}
           />
           <div className="collection-app-hero-copy">
             <p className="eyebrow">Shared Collection</p>
@@ -49433,7 +49513,7 @@ const floatingActions = {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search Homestead and enabled plugins..."
-          autoFocus
+          aria-label="Search Homestead"
         />
 
         <GlobalSearchResults

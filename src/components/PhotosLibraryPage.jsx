@@ -1,3 +1,4 @@
+import { handlePosterFallback } from "../utils/image-fallback.js";
 import { useEffect, useMemo, useState } from "react";
 import { photoUrl } from "./PhotoLibraryPicker.jsx";
 
@@ -34,7 +35,7 @@ export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", a
       {!albums.length && <p>No photo albums found. Add a folder mapping for this library and scan it.</p>}
     </div> : <>
       <div className="photos-detail-grid">{photos.slice(0, visible).map((photo, index) => <button className="photos-detail-photo" key={`${photo.path || photo.sourcePath}-${index}`} onClick={() => openImageViewer ? openImageViewer(photos, index) : setFallbackPhoto(photo)}>
-        <img src={photoUrl(photo)} alt={photo.name || "Photo"} loading="lazy" decoding="async" /><span>{photo.name}</span>
+        <img src={photoUrl(photo)} alt={photo.name || "Photo"} loading="lazy" decoding="async" onError={handlePosterFallback} /><span>{photo.name}</span>
       </button>)}</div>
       {!photos.length && <p>This album has no photos yet.</p>}
       {photos.length > visible && <button className="secondary-button" onClick={() => setVisible(visible + 120)}>Show More Photos ({photos.length - visible} remaining)</button>}

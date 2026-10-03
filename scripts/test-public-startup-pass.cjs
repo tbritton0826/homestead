@@ -1,3 +1,4 @@
+// DOM focus behavior is tested separately in qa-dialog-focus.html; these VM tests cover existing data/render behavior.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),React=require('react');
 const root=path.resolve(__dirname,'..'),app=fs.readFileSync(path.join(root,'src/App.jsx'),'utf8').replace(/\r\n/g,'\n');
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -64,7 +65,7 @@ async function run(){
  async function readerCase({cancel=false,reject=false,pdf=false}={}) {
   let effects=[],states=[],resolveLoad,rejectLoad,imports=0,books=0,destroyed=0;
   const book={ready:Promise.resolve(),renderTo:()=>({display:async()=>{},on(){},destroy(){}}),locations:{generate:async()=>{}},destroy(){destroyed++}};
-  const sandbox={React,useRef:()=>({current:{}}),useState:initial=>[initial,value=>states.push(value)],useEffect:fn=>effects.push(fn),getPlayableMediaUrl:()=>'/fixture.epub',getWatchProgress:()=>({}),saveWatchProgress(){},window:{addEventListener(){},removeEventListener(){}},loadEpub:()=>{imports++;return new Promise((resolve,rejectFn)=>{resolveLoad=()=>resolve({default:()=>{books++;return book}});rejectLoad=()=>rejectFn(Error('reader offline'))})}};
+  const sandbox={React,useDialogFocus:()=>{},useRef:()=>({current:{}}),useState:initial=>[initial,value=>states.push(value)],useEffect:fn=>effects.push(fn),getPlayableMediaUrl:()=>'/fixture.epub',getWatchProgress:()=>({}),saveWatchProgress(){},window:{addEventListener(){},removeEventListener(){}},loadEpub:()=>{imports++;return new Promise((resolve,rejectFn)=>{resolveLoad=()=>resolve({default:()=>{books++;return book}});rejectLoad=()=>rejectFn(Error('reader offline'))})}};
   const Reader=vm.runInNewContext(readerCode.code+'; BookReader',sandbox);Reader({file:{name:pdf?'fixture.pdf':'fixture.epub',path:'/fixture'},book:{id:'fixture'},onClose(){}});const cleanup=effects[0]();if(cancel)cleanup();if(reject)rejectLoad();else resolveLoad?.();await tick();
   if(pdf)assert.equal(imports,0,'PDF does not download EPUB');else if(cancel)assert.equal(books,0);else if(reject)assert(states.includes('reader offline'));else assert.equal(books,1);
   if(!cancel)cleanup?.();if(books)assert.equal(destroyed,1);

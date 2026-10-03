@@ -1,0 +1,53 @@
+/* Focus, long-content, and viewport fixes confirmed during final QA. */
+:is(.app-shell, .profile-page, [role="dialog"]) :is(button, a[href], input, select, textarea, [tabindex]):focus-visible {
+  outline: 3px solid #b7c6ff;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px #101827;
+}
+:is(.app-ribbon-title, .book-detail-copy, .music-detail-content, .youtube-creator-hero-content, .profile-name-row, .recipe-detail-header) { min-width: 0; overflow-wrap: anywhere; }
+:is(.movie-library-grid, .tv-grid, .book-grid, .music-grid, .youtube-grid) h3 { overflow-wrap: anywhere; }
+:is(.book-detail-meta, .book-detail-actions) { flex-wrap: wrap; }
+.image-viewer-backdrop { overflow: hidden; overscroll-behavior: none; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+.image-viewer-shell { overflow: hidden; max-width: 100%; max-height: 100%; }
+.image-viewer-topbar > div:first-child { min-width: 0; }
+.image-viewer-topbar strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(.image-viewer-close, .image-viewer-nav) { min-width: 44px; min-height: 44px; }
+@media (max-width: 900px) {
+  :is(.media-appearance-overlay, .book-detail-overlay, .photo-picker-overlay, .item-picker-overlay) { padding-top: max(12px, env(safe-area-inset-top)); padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}
+
+/* Backing is limited to captions when a user chooses transparent cards. */
+.public-media-custom-appearance :is(.tv-card-overlay, .person-card-overlay) {
+  background-color: rgb(0 0 0 / clamp(0, calc((0.55 - var(--media-card-opacity, 0.86)) * 2), 0.72));
+  border-radius: 8px;
+}
+.recipe-detail-card { grid-template-rows: auto auto minmax(0, 1fr); }
+.recipe-detail-nav { padding: 12px 22px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 0; }
+.recipe-detail-nav > button { min-height: 44px; flex-shrink: 0; }
+@media (max-width: 900px) {
+  .profile-page .profile-main { grid-template-columns: minmax(0, 1fr); }
+  .profile-page .profile-header { min-width: 0; max-width: 100%; }
+  .profile-page .glass-info-grid { display: flex; flex-wrap: nowrap; margin: 0; width: 100%; gap: 10px; max-width: 100%; overscroll-behavior-x: contain; scrollbar-width: thin; padding: 3px; }
+  .profile-page .glass-info-grid > .glass-info-card { flex: 0 0 148px; min-width: 0; }
+  .profile-page .glass-info-card strong { overflow-wrap: anywhere; }
+}
+
+@media (max-width: 720px) {
+  .recipe-detail-overlay { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .recipe-detail-card { height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  .recipe-detail-nav { padding: 12px; }
+}
+.recipe-category-select h3 { overflow-wrap: anywhere; }
+
+/* Intrinsic grid tracks previously cropped TV controls and long titles. */
+.tv-page { grid-template-columns: minmax(0, 1fr); }
+.tv-show-info { min-width: 0; overflow-wrap: anywhere; }
+.tv-show-info h1, .episode-info h4 { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .tv-detail-page .tv-show-hero-content { grid-template-columns: minmax(0, 1fr); }
+}
+
+.collection-overview-copy { overflow-wrap: anywhere; }
+
+/* Family pet names and overview values can contain long unbroken metadata. */
+.family-page { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }

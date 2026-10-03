@@ -9,6 +9,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..').spli
 const baselineSource=process.env.HOMESTEAD_PROFILE_APP_SOURCE ? fs.readFileSync(process.env.HOMESTEAD_PROFILE_APP_SOURCE,'utf8') : null;
 const productionDist=process.env.HOMESTEAD_PROFILE_DIST ? path.resolve(process.env.HOMESTEAD_PROFILE_DIST) : null;
 const visualAudit=process.env.HOMESTEAD_PROFILE_VISUAL === "1";
+const qaEdges = process.env.HOMESTEAD_QA_EDGES === "1";
 const counts=visualAudit ? {movies:16,tv:12,books:12,music:12} : {movies:2000,tv:1000,books:500,music:500};
 const libraries={};
 for(const [library,count] of Object.entries(counts)) {
@@ -18,7 +19,7 @@ for(const [library,count] of Object.entries(counts)) {
  }));
 }
 const profileCount=Number(process.env.HOMESTEAD_PROFILE_PROFILES || 0);
-for(const library of ['personal','celebrities','performers']) libraries[library]=Object.fromEntries(Array.from({length:profileCount},(_,i)=>{const id='fixture-'+library+'-'+i;return [id,{id,name:'Fixture '+library+' '+i,profileDir:'/media/'+library+'/'+id,metadataPath:'/media/'+library+'/'+id+'/metadata.json'}]}));
+for(const library of ['personal','celebrities','performers']) libraries[library]=Object.fromEntries(Array.from({length:profileCount},(_,i)=>{const id='fixture-'+library+'-'+i;return [id,{id,name:qaEdges && i===0?'A long profile name '+ 'UnbrokenProfile'.repeat(12):'Fixture '+library+' '+i,profileDir:'/media/'+library+'/'+id,metadataPath:'/media/'+library+'/'+id+'/metadata.json'}]}));
 const youtube={creators:Object.fromEntries(Array.from({length:visualAudit?12:300},(_,i)=>[`creator-${i}`,{id:`creator-${i}`,name:`Creator ${i}`,poster:`/media/profiling/art/youtube/${i}.jpg`,videos:[]} ])),series:{}};
 libraries.youtube=youtube.creators;
 if (visualAudit) {
@@ -26,6 +27,23 @@ if (visualAudit) {
  libraries.photos={fixture:{id:'fixture-photos',name:'Fixture photo album',files:[{name:'Family memory.png',type:'image',path:'/media/profiling/art/family/memory.png'}]}};
  libraries.pets={fixture:{id:'fixture-pet',name:'Fixture pet',poster:'/media/profiling/art/pets/poster.png',banner:'/media/profiling/art/pets/banner.png',metadata:{name:'Fixture pet',species:'Dog',breed:'Mixed',weight:30},files:[]}};
  for (const book of Object.values(libraries.books)) book.files[0].path='/media/profiling/fixture.epub';
+}
+if (qaEdges) {
+ for (const library of ['movies','tv','books','music']) {
+  const records=Object.values(libraries[library]);
+  const long=`A ${library} title with a very long name, multiple subtitles, and extended metadata that should remain readable on small screens ` + 'UnbrokenMetadata'.repeat(12);
+  Object.assign(records[0],{name:long,title:long,artist:long}); Object.assign(records[0].metadata,{title:long,artist:long,authors:[long],genres:[long,'Drama']});
+  records[1].poster=''; records[1].banner=''; records[1].metadata={};
+  records[2].poster='/__qa/broken.png'; records[2].banner='/__qa/broken.png';
+  if(library==='music') records[0].files[0].artist=long;
+  if(library==='tv') { const episode={...records[0].files[0],name:'Fixture.S01E01.An exceptionally long episode name '+ 'UnbrokenEpisode'.repeat(12)+'.mp4',title:'An exceptionally long episode name '+ 'UnbrokenEpisode'.repeat(12),season:1,episode:1}; records[0].episodes=[episode]; records[0].files=[episode]; }
+  records[0].metadata.tags=[long];
+ }
+ Object.assign(youtube.creators['creator-0'],{name:'A creator with a long name '+ 'UnbrokenCreator'.repeat(15)});
+ youtube.creators['creator-1'].poster=''; youtube.creators['creator-2'].poster='/__qa/broken.png';
+ libraries.photos.fixture.files.push({name:'White background.svg',type:'image',path:'/__qa/white.svg'});
+ libraries.photos.fixture.files.push({name:'Broken thumbnail.png',type:'image',path:'/__qa/broken.png'});
+ libraries.pets.fixture.name='A pet with a long name '+ 'UnbrokenName'.repeat(12); libraries.pets.fixture.metadata.name=libraries.pets.fixture.name;
 }
 const perfScript=`(() => {
  let stats; const fresh=()=>({renders:{},commits:[],longTasks:[],inputs:[],frames:[],writes:0,started:performance.now(),work:{},profileLists:{},gridFirstMs:null}); stats=fresh();
@@ -61,8 +79,22 @@ const {default:JSZip}=await import('jszip');
 const zip=new JSZip();zip.file('mimetype','application/epub+zip',{compression:'STORE'});zip.file('META-INF/container.xml','<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');zip.file('content.opf','<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">fixture</dc:identifier><dc:title>Startup reader fixture</dc:title><dc:language>en</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>');zip.file('chapter.xhtml','<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Fixture</title></head><body><h1>Startup reader fixture</h1><p>A local EPUB verifies first-use loading and reopening.</p></body></html>');const fixtureEpub=await zip.generateAsync({type:'nodebuffer'});
 const {QRCodeWriter,BarcodeFormat}=await import('@zxing/library');const {default:sharp}=await import('sharp');
 const qr=new QRCodeWriter().encode('fixture-code',BarcodeFormat.QR_CODE,256,256,new Map());const pixels=Buffer.alloc(256*256);for(let y=0;y<256;y++)for(let x=0;x<256;x++)pixels[y*256+x]=qr.get(x,y)?0:255;const fixtureCode=await sharp(pixels,{raw:{width:256,height:256,channels:1}}).png().toBuffer();
+let qaUploadMode = "success", qaProviderMode = "empty"; const qaUploads = [];
 const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost');
+ if(qaEdges && url.pathname==='/__qa/dialog-test'){res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(root+'/scripts/qa-dialog-focus.html'));return;}
+ if(qaEdges && url.pathname==='/__qa/dialog-focus.js'){res.setHeader('Content-Type','application/javascript');res.end(fs.readFileSync(root+'/src/utils/dialog-focus.js'));return;}
+
+ if(qaEdges && url.pathname==='/__qa/state' && req.method==='POST') { const chunks=[];for await(const c of req)chunks.push(c);const next=JSON.parse(Buffer.concat(chunks));qaUploadMode=next.upload||qaUploadMode;qaProviderMode=next.provider||qaProviderMode;res.end('configured');return; }
+ if(qaEdges && (url.pathname==='/__qa/white.svg' || url.pathname==='/api/file' && url.searchParams.get('path')==='/__qa/white.svg')) {res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="white"/></svg>');return;}
+ if(qaEdges && (url.pathname==='/__qa/broken.png' || url.pathname==='/api/file' && url.searchParams.get('path')==='/__qa/broken.png')){res.statusCode=404;res.end('Missing fixture artwork');return;}
+ if(qaEdges && url.pathname==='/api/cloud/upload') { const chunks=[];for await(const c of req)chunks.push(c);await new Promise(r=>setTimeout(r,1000));res.setHeader('Content-Type','application/json');if(qaUploadMode==='network'){req.socket.destroy();return;}if(qaUploadMode==='error'){res.statusCode=503;res.end(JSON.stringify({ok:false,message:'Simulated upload failure. Retry with the same file.'}));return;}qaUploads.push({name:req.headers['x-cloud-filename'],path:req.headers['x-cloud-filename'],type:'file',size:Buffer.concat(chunks).length});res.end(JSON.stringify({ok:true}));return; }
+ if(qaEdges && url.pathname==='/api/cloud/files'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,files:qaUploads}));return;}
+ if(qaEdges && (/\/api\/(?:books|music|movies|tv)\/auto-match\/search$/.test(url.pathname) || url.pathname==='/api/books/metadata/search' || url.pathname==='/api/metadata/search')){await new Promise(r=>setTimeout(r,qaProviderMode==='timeout'?2000:500));res.setHeader('Content-Type','application/json');if(['error','timeout'].includes(qaProviderMode)){res.statusCode=504;res.end(JSON.stringify({ok:false,message:'Simulated provider timeout. Please retry.'}));}else res.end(JSON.stringify({ok:true,candidates:[],results:[]}));return;}
+ if(qaEdges && url.pathname==='/api/collections/custom' && req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,collections:[{id:'qa-collection',name:'A long collection '+ 'UnbrokenCollection'.repeat(12),poster:'/__qa/broken.png',banner:'/__qa/broken.png',items:[{library:'movies',sourceId:'profile-movies-0',title:Object.values(libraries.movies)[0].title}]}]}));return;}
+ if(qaEdges && url.pathname==='/api/recipes' && req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,recipes:[{id:'qa-instruction',title:'QA quick instruction with a long recipe title',entryType:'quick-instruction',appliance:'Oven',temperature:'180 C',quickSteps:[{text:'Place fixture food in the oven.',timerSeconds:60}],directions:[],ingredients:[]}]}));return;}
+ if(qaEdges && url.pathname==='/api/recipes/categories' && req.method==='GET'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,categories:[{id:'qa-category',name:'A long category '+ 'UnbrokenCategory'.repeat(12)}]}));return;}
+
  if(url.pathname==='/__profile/fail-next' && req.method==='POST'){failNextFeature=true;res.end('armed');return;}
  if(failNextFeature && /src\/components\/(CalendarView|ModelViewer)\.jsx$/.test(url.pathname)){failNextFeature=false;res.statusCode=503;res.end('Deliberate fixture import failure');return;}
  if(url.pathname==='/__feature-check'){res.setHeader('Content-Type','text/html');res.end('<html><body><div id="root"></div><script type="module" src="/scripts/profile-feature-safety.jsx"></script></body></html>');return;}
@@ -76,7 +108,7 @@ const server=http.createServer(async(req,res)=>{
   const id=url.searchParams.get('profileId') || url.pathname.split('/').find(part=>part.startsWith('fixture-'));
   const library=id.split('-')[1];const i=id.split('-').at(-1);
   await new Promise(resolve=>setTimeout(resolve,80));res.setHeader('Content-Type','application/json');
-  const profile={id,name:'Fixture '+library+' '+i,library,...(visualAudit?{poster:'/media/profiling/art/profiles/poster.png',banner:'/media/profiling/art/profiles/banner.png'}:{}),metadata:{bio:'Enriched synthetic profile '+i}};
+  const profile={id,name:qaEdges && i==='0'?'A long profile name '+ 'UnbrokenProfile'.repeat(12):'Fixture '+library+' '+i,library,...(visualAudit?{poster:qaEdges && i==='1'?'':qaEdges && i==='2'?'/__qa/broken.png':'/media/profiling/art/profiles/poster.png',banner:qaEdges && i==='1'?'':qaEdges && i==='2'?'/__qa/broken.png':'/media/profiling/art/profiles/banner.png'}:{}),metadata:{bio:'Enriched synthetic profile '+i,...(qaEdges && i==='0'?{occupation:'A long occupation '+ 'UnbrokenOccupation'.repeat(12)}:{})}};
   res.end(JSON.stringify(url.pathname.startsWith('/api/')?{ok:true,profile}:url.pathname.includes('candidates')?{}:profile));return;
  }
  if(url.pathname==='/data/media-index.json'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({libraries}));return;}

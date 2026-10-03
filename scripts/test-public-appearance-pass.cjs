@@ -1,3 +1,4 @@
+// DOM focus behavior is tested separately in qa-dialog-focus.html; these VM tests cover existing data/render behavior.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -218,7 +219,7 @@ async function run() {
   const { transformWithOxc } = await import('vite');
   await transformWithOxc(app, 'App.jsx', { jsx: { runtime: 'classic' } });
   const studioCode = await transformWithOxc(source('MediaLibraryAppearanceStudio'), 'studio.jsx', { jsx: { runtime: 'classic' } });
-  const studio = vm.runInNewContext(studioCode.code + '\nMediaLibraryAppearanceStudio', { ...helpers, ...(await import('../src/utils/appearance-preview.js')), React, document: { body: {} }, createPortal: (node) => node, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: (initial) => ({ current: initial }), useEffect: () => {}, useCallback: (fn) => fn, getAppearanceLibraryLabel: (lib) => lib, titleFromId: (value) => value, PhotoLibraryPicker: () => null, LibraryAutoMatchPanel: () => null });
+  const studio = vm.runInNewContext(studioCode.code + '\nMediaLibraryAppearanceStudio', { ...helpers, ...(await import('../src/utils/appearance-preview.js')), React, useDialogFocus: () => {}, document: { body: {} }, createPortal: (node) => node, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: (initial) => ({ current: initial }), useEffect: () => {}, useCallback: (fn) => fn, getAppearanceLibraryLabel: (lib) => lib, titleFromId: (value) => value, PhotoLibraryPicker: () => null, LibraryAutoMatchPanel: () => null });
   const dialog = studio({ library: 'movies', values: { ...plain(functions.MEDIA_LIBRARY_APPEARANCE_DEFAULTS), overlayColor: '#123456', overlayOpacity: .5, overlayBlur: 7 }, onChange: () => {}, onClose: () => {}, onReset: () => {}, status: 'Not saved: offline' });
   assert(dialog.props.className.includes('public-media-custom-appearance'));
   assert.equal(dialog.props.style['--media-overlay-color'], '#123456');

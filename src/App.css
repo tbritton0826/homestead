@@ -10650,9 +10650,9 @@ iframe {
   }
 
   .profile-page .glass-info-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-    gap: 6px !important;
-    margin-top: 8px !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
   }
 
   .profile-page .glass-info-card {
@@ -19550,9 +19550,9 @@ body,
 
 @media (max-width: 700px) {
 .profile-page .glass-info-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
-    gap: 6px !important;
-    margin-top: 9px !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 9px;
   }
 
   .profile-page .glass-info-card {
@@ -19693,7 +19693,7 @@ body,
 
 @media (max-width: 390px) {
 .profile-page .glass-info-grid {
-    gap: 5px !important;
+    gap: 5px;
   }
 
   .profile-page .glass-info-card {
@@ -22973,11 +22973,10 @@ button.profile-plugin-decoration:hover { filter: brightness(1.14); transform: tr
   }
 
   .profile-page .glass-info-grid {
-    margin: 88px 0 0 -128px !important;
-    width: calc(100vw - 20px) !important;
-    display: grid !important;
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
-    gap: 6px !important;
+    width: calc(100vw - 20px);
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
   }
 
   .profile-page .glass-info-card {
@@ -23056,10 +23055,6 @@ button.profile-plugin-decoration:hover { filter: brightness(1.14); transform: tr
 @media (max-width: 390px) and (orientation: portrait) {
 .profile-page .profile-info {
     padding-left: 120px !important;
-  }
-
-  .profile-page .glass-info-grid {
-    margin-left: -120px !important;
   }
 
   .profile-page .glass-info-card strong {
@@ -30920,11 +30915,12 @@ body:has(.video-player-overlay) {
   }
 
   .profile-page .glass-info-grid {
-    margin: 0 !important;
-    width: 100% !important;
-    display: grid !important;
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    gap: 7px !important;
+    margin: 0;
+    width: 100%;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 10px;
+    overflow-x: auto;
   }
 
   .profile-page .glass-info-card {
@@ -30935,7 +30931,7 @@ body:has(.video-player-overlay) {
   }
 
   .profile-page .glass-info-card span {
-    font-size: .54rem !important;
+    font-size: .68rem !important;
   }
 
   .profile-page .glass-info-card strong {
@@ -31012,8 +31008,7 @@ body:has(.video-player-overlay) {
     height: 78px !important;
   }
 
-  .profile-page .glass-info-grid,
-.profile-page .profile-stats-actions-rail > .stats {
+  .profile-page .profile-stats-actions-rail > .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }
