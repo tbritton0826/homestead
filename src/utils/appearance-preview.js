@@ -32,6 +32,7 @@ export function appearanceNumericVariables(values) {
     sidebarBackgroundOpacity: ['--sidebar-background-opacity', ''], sidebarBackgroundBlur: ['--sidebar-background-blur', 'px'],
   };
   const result = Object.fromEntries(Object.entries(fields).filter(([key]) => values[key] != null).map(([key, [name, unit]]) => [name, String(values[key]) + unit]));
+  if (values.posterWidth != null && values.posterHeight != null) result["--media-poster-ratio"] = `${values.posterWidth} / ${values.posterHeight}`;
   for (const prefix of ['movie', 'tv']) {
     result['--'+prefix+'-detail-poster-width'] = (values.detailPosterWidth ?? 300) + 'px';
     result['--'+prefix+'-detail-poster-opacity'] = values.detailPosterOpacity ?? 1;

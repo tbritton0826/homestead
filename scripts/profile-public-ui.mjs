@@ -8,7 +8,8 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..').spli
 
 const baselineSource=process.env.HOMESTEAD_PROFILE_APP_SOURCE ? fs.readFileSync(process.env.HOMESTEAD_PROFILE_APP_SOURCE,'utf8') : null;
 const productionDist=process.env.HOMESTEAD_PROFILE_DIST ? path.resolve(process.env.HOMESTEAD_PROFILE_DIST) : null;
-const counts={movies:2000,tv:1000,books:500,music:500};
+const visualAudit=process.env.HOMESTEAD_PROFILE_VISUAL === "1";
+const counts=visualAudit ? {movies:16,tv:12,books:12,music:12} : {movies:2000,tv:1000,books:500,music:500};
 const libraries={};
 for(const [library,count] of Object.entries(counts)) {
  libraries[library]=Object.fromEntries(Array.from({length:count},(_,i)=>{
@@ -18,8 +19,14 @@ for(const [library,count] of Object.entries(counts)) {
 }
 const profileCount=Number(process.env.HOMESTEAD_PROFILE_PROFILES || 0);
 for(const library of ['personal','celebrities','performers']) libraries[library]=Object.fromEntries(Array.from({length:profileCount},(_,i)=>{const id='fixture-'+library+'-'+i;return [id,{id,name:'Fixture '+library+' '+i,profileDir:'/media/'+library+'/'+id,metadataPath:'/media/'+library+'/'+id+'/metadata.json'}]}));
-const youtube={creators:Object.fromEntries(Array.from({length:300},(_,i)=>[`creator-${i}`,{id:`creator-${i}`,name:`Creator ${i}`,poster:`/media/profiling/art/youtube/${i}.jpg`,videos:[]} ])),series:{}};
+const youtube={creators:Object.fromEntries(Array.from({length:visualAudit?12:300},(_,i)=>[`creator-${i}`,{id:`creator-${i}`,name:`Creator ${i}`,poster:`/media/profiling/art/youtube/${i}.jpg`,videos:[]} ])),series:{}};
 libraries.youtube=youtube.creators;
+if (visualAudit) {
+ libraries.family={fixture:{id:'fixture-family',name:'Fixture family archive',files:[{name:'Family memory.png',path:'/media/profiling/art/family/memory.png'}]}};
+ libraries.photos={fixture:{id:'fixture-photos',name:'Fixture photo album',files:[{name:'Family memory.png',type:'image',path:'/media/profiling/art/family/memory.png'}]}};
+ libraries.pets={fixture:{id:'fixture-pet',name:'Fixture pet',poster:'/media/profiling/art/pets/poster.png',banner:'/media/profiling/art/pets/banner.png',metadata:{name:'Fixture pet',species:'Dog',breed:'Mixed',weight:30},files:[]}};
+ for (const book of Object.values(libraries.books)) book.files[0].path='/media/profiling/fixture.epub';
+}
 const perfScript=`(() => {
  let stats; const fresh=()=>({renders:{},commits:[],longTasks:[],inputs:[],frames:[],writes:0,started:performance.now(),work:{},profileLists:{},gridFirstMs:null}); stats=fresh();
  performance.setResourceTimingBufferSize(10000);
@@ -46,7 +53,7 @@ const plugin={name:'public-ui-profile',enforce:'pre',transform(code,id){
  if(id.endsWith('/src/main.jsx')) code=code.replace("import { StrictMode }", "import { StrictMode, Profiler }").replace('<App />','<Profiler id="App" onRender={(...args)=>window.__profileCommit?.(...args)}><App /></Profiler>');
  if(id.endsWith('/src/App.jsx')) code+='\nexport { BookReader, LiveTvPlayer };';
  return code;
- },transformIndexHtml(html){return html.replace('</head>',`<script>${perfScript}</script></head>`);}};
+ },transformIndexHtml(html){if(visualAudit)return html;return html.replace('</head>',`<script>${perfScript}</script></head>`);}};
 const vite=productionDist?null:await createServer({root,server:{middlewareMode:true,hmr:false},plugins:[plugin]});
 let failNextFeature = false;
 const fixtureDirectory=process.env.HOMESTEAD_PROFILE_FIXTURES;
@@ -69,7 +76,7 @@ const server=http.createServer(async(req,res)=>{
   const id=url.searchParams.get('profileId') || url.pathname.split('/').find(part=>part.startsWith('fixture-'));
   const library=id.split('-')[1];const i=id.split('-').at(-1);
   await new Promise(resolve=>setTimeout(resolve,80));res.setHeader('Content-Type','application/json');
-  const profile={id,name:'Fixture '+library+' '+i,library,metadata:{bio:'Enriched synthetic profile '+i}};
+  const profile={id,name:'Fixture '+library+' '+i,library,...(visualAudit?{poster:'/media/profiling/art/profiles/poster.png',banner:'/media/profiling/art/profiles/banner.png'}:{}),metadata:{bio:'Enriched synthetic profile '+i}};
   res.end(JSON.stringify(url.pathname.startsWith('/api/')?{ok:true,profile}:url.pathname.includes('candidates')?{}:profile));return;
  }
  if(url.pathname==='/data/media-index.json'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({libraries}));return;}
@@ -77,15 +84,15 @@ const server=http.createServer(async(req,res)=>{
  if((url.pathname.startsWith('/media/profiling/art/') || url.pathname==='/placeholder-poster.jpg' || url.pathname==='/placeholder-banner.jpg' || (url.pathname==='/api/file' && url.searchParams.get('path')?.startsWith('/media/profiling/art/')))){res.setHeader('Content-Type','image/png');res.end(fs.readFileSync(root+'/public/homestead-icon.png'));return;}
  if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/data/')||url.pathname.startsWith('/media/')){
   const chunks=[];for await(const chunk of req)chunks.push(chunk);
-  const upstream=await fetch('http://127.0.0.1:7313'+req.url,{method:req.method,headers:{'Content-Type':req.headers['content-type']||'application/json','X-Homestead-Device-Id':req.headers['x-homestead-device-id']||''},...(chunks.length?{body:Buffer.concat(chunks)}:{})});
+  const upstream=await fetch('http://127.0.0.1:7313'+req.url,{method:req.method,headers:{'Content-Type':req.headers['content-type']||'application/json',...Object.fromEntries(Object.entries(req.headers).filter(([name])=>name.startsWith('x-homestead-')))},...(chunks.length?{body:Buffer.concat(chunks)}:{})});
   res.statusCode=upstream.status;res.setHeader('Content-Type',upstream.headers.get('content-type')||'application/json');
-  if(url.pathname==='/api/setup-config'&&req.method==='GET'){const config=await upstream.json();res.end(JSON.stringify({...config,completed:true,serverName:'Homestead · synthetic profiling',familySublibraries:{...config.familySublibraries,calendar:true},enabledLibraries:{home:true,media:true,movies:true,tv:true,tvshows:true,books:true,music:true,youtube:true,photos:true,family:true,liveTV:true}}));}
+  if(url.pathname==='/api/setup-config'&&req.method==='GET'){const config=await upstream.json();res.end(JSON.stringify({...config,completed:true,serverName:visualAudit?'Homestead · visual fixtures':'Homestead · synthetic profiling',...(visualAudit?{adultVisibility:'visible',adultSublibraries:{performers:true,adultPhotos:true,adultVideos:true,adultTVChannels:true}}:{}),familySublibraries:{...config.familySublibraries,calendar:true,...(visualAudit?{familyArchive:true,familyProfiles:true,familyTree:true,pets:true,recipes:true}:{})},enabledLibraries:{home:true,media:true,movies:true,tv:true,tvshows:true,books:true,music:true,youtube:true,photos:true,family:true,liveTV:true,...(visualAudit?{adult:true,inventory:true,cloud:true,ai:true}:{})}}));}
   else res.end(Buffer.from(await upstream.arrayBuffer()));return;
  }
  if(productionDist){
   const requested=path.resolve(productionDist,'.'+decodeURIComponent(url.pathname));
   if(requested.startsWith(productionDist+path.sep) && fs.existsSync(requested) && fs.statSync(requested).isFile()){res.setHeader('Content-Type',requested.endsWith('.js')?'application/javascript':requested.endsWith('.css')?'text/css':'application/octet-stream');res.end(fs.readFileSync(requested));return;}
-  res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(path.join(productionDist,'index.html'),'utf8').replace('</head>', '<script>'+perfScript+'</script></head>'));return;
+  res.setHeader('Content-Type','text/html');res.end(fs.readFileSync(path.join(productionDist,'index.html'),'utf8').replace('</head>', visualAudit ? '</head>' : '<script>'+perfScript+'</script></head>'));return;
  }
  vite.middlewares(req,res);
 });

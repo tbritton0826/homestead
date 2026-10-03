@@ -7,7 +7,16 @@ const root = path.resolve(__dirname, '..');
 const plain = value => JSON.parse(JSON.stringify(value));
 async function run() {
   const { createAppearancePreviewBuffer, appearanceNumericVariables } = await import('../src/utils/appearance-preview.js');
+  // Verify the production minifier retains standards-based blur for token-driven surfaces.
+  const { transform: minifyCss } = require('lightningcss');
+  const compiledCss = minifyCss({filename:'appearance.css',code:Buffer.from(fs.readFileSync(path.join(root,'src/App.css'),'utf8')),minify:true,targets:{chrome:111<<16,safari:16<<16,firefox:114<<16}}).code.toString();
+  for (const surface of ['panel','card','overlay']) {
+    assert(compiledCss.includes('backdrop-filter:blur(var(--media-'+surface+'-blur'),surface+' blur survives production CSS minification');
+    assert(new RegExp('[;{]backdrop-filter:blur\\(var\\(--media-'+surface+'-blur').test(compiledCss),surface+' retains an unprefixed declaration for modern Chromium');
+  }
   const { handlePosterFallback } = await import('../src/utils/image-fallback.js');
+  assert.equal(appearanceNumericVariables({posterWidth:240,posterHeight:320})['--media-poster-ratio'],'240 / 320','live width/height preview preserves the chosen artwork ratio');
+  assert.equal(appearanceNumericVariables({posterWidth:120,posterHeight:480})['--media-poster-ratio'],'120 / 480','portrait extremes retain their ratio when mobile width is capped');
   let commits=[], previews=[], timers=[];
   const buffer=createAppearancePreviewBuffer({ preview:changes=>previews.push({...changes}), commit:changes=>commits.push({...changes}), setTimer:fn=>(timers.push(fn),timers.length), clearTimer:()=>{} });
   buffer.change('posterWidth',192); const stale=timers.at(-1);

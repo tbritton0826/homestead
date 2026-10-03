@@ -8,6 +8,7 @@ const FullCalendar = lazyFeature(() => import("./components/CalendarView.jsx"), 
 import "./App.css";
 import "./MediaPolish.css";
 import "./AdultPolish.css";
+import "./PublicVisualPolish.css";
 import { canonicalLength, normalizeDisplayInput, setActiveDisplayPreferences, getDisplayPreferences, getHomesteadDateFormat, getHomesteadHeightFormat, getHomesteadWeightFormat, parseHomesteadDateParts, parseHomesteadHeightInches, parseHomesteadWeightLbs, formatHomesteadDate, formatHomesteadDateTime, formatHomesteadTime, formatHomesteadPreciseDate, formatHomesteadHeight, formatHomesteadWeight, formatHomesteadMeasurement, formatHomesteadMeasurements, formatHomesteadField } from "./utils/display-format.js";
 import PhotosPage from "./components/PhotosLibraryPage.jsx";
 import AdultVideoCard from "./components/AdultVideoCard.jsx";
@@ -22866,23 +22867,12 @@ if (selectedDiscoveredAlbum) {
         </div>
 
 <div
-  className="family-hero-content"
-  style={{
-    display: "flex",
-    gap: "2rem",
-    alignItems: "center",
-  }}
+  className="family-hero-content music-detail-content"
 >
   <img
     src={discoveredAlbumCover}
     alt=""
-    style={{
-      width: "220px",
-      height: "220px",
-      objectFit: "cover",
-      borderRadius: "1rem",
-      flexShrink: 0,
-    }}
+    className="music-detail-artwork"
   />
 
   <div>
@@ -23018,6 +23008,7 @@ if (selectedDiscoveredArtist) {
         <img
   src={discoveredArtistBanner || "/media/music/banner.jpg"}
   alt=""
+  onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
 />
 
         <div className="global-nav-buttons">
@@ -23049,24 +23040,13 @@ if (selectedDiscoveredArtist) {
         </div>
 
 <div
-  className="family-hero-content"
-  style={{
-    display: "flex",
-    gap: "2rem",
-    alignItems: "center",
-  }}
+  className="family-hero-content music-detail-content"
 >
 {discoveredArtistImage && (
   <img
     src={discoveredArtistImage}
     alt={selectedDiscoveredArtist.name}
-    style={{
-      width: "220px",
-      height: "220px",
-      objectFit: "cover",
-      borderRadius: "1rem",
-      flexShrink: 0,
-    }}
+    className="music-detail-artwork"
   />
 )}
 
@@ -23374,7 +23354,7 @@ if (selectedArtist) {
   return (
     <div className="library-page">
       <section className="family-hero music-artist-hero">
-        <img src={selectedArtist.banner || "/media/music/banner.jpg"} alt="" />
+        <img src={selectedArtist.banner || "/media/music/banner.jpg"} alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
 
         <div className="global-nav-buttons">
           <button
@@ -25032,7 +25012,7 @@ const pets = Object.values(scannedPets).map((petFolder) => {
       <div className="family-page">
         <FamilySectionTabs activeLibrary="pets" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
         <section className="family-hero">
-          <img src={selectedPet.banner} alt="" />
+          <img src={selectedPet.banner} alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
           <div className="family-hero-content">
             <button className="secondary-button" onClick={() => setSelectedPet(null)}>
               ← Back to Pets
@@ -25161,7 +25141,7 @@ const pets = Object.values(scannedPets).map((petFolder) => {
       <FamilySectionTabs activeLibrary="pets" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
 
       <section className="family-hero">
-        <img src="/media/pets/banner.jpg" alt="" />
+        <img src="/media/pets/banner.jpg" alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
         <div className="family-hero-content">
           <h1>Pets</h1>
           <p>Pet profiles, meals, health records, photos, documents, and notes.</p>
@@ -25247,7 +25227,7 @@ const memories = familyPhotos.slice(0, 8).map((file, index) => ({
     <div className="family-page">
       <FamilySectionTabs activeLibrary="family-home" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
       <section className="family-hero">
-        <img src="/media/family/banner.jpg" alt="" />
+        <img src="/media/family/banner.jpg" alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
 
         <div className="family-hero-content">
           <h1>Family Archive</h1>
@@ -31234,7 +31214,7 @@ function toggleLibrarySetting(id) {
 }
 
 return (
-  <div className="generic-page">
+  <div className="generic-page settings-page">
     <div className="tabs">
       <TabButton active={settingsTab === "server"} onClick={() => setSettingsTab("server")}>
         Server
@@ -46417,6 +46397,7 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
             <label><span>Banner position</span><select value={values.bannerPosition || "center"} onChange={(event) => onChange({ ...values, bannerPosition: event.target.value })}>{["center", "top", "bottom", "left", "right"].map((position) => <option key={position} value={position}>{titleFromId(position)}</option>)}</select></label>
             <label><span>Banner fit</span><select value={values.bannerFit || "cover"} onChange={(event) => onChange({ ...values, bannerFit: event.target.value })}><option value="cover">Fill / crop</option><option value="contain">Show entire photo</option></select></label>
           </>}
+          {library !== "photos" && <label><span>Artwork fit</span><select value={values.posterFit || "cover"} onChange={(event) => onChange({ ...values, posterFit: event.target.value })}><option value="cover">Fill / crop</option><option value="contain">Show entire image</option></select></label>}
           <label><span>Poster width</span><input type="range" min="120" max="320" step="2" value={values.posterWidth} onChange={(e) => setNumber("posterWidth", e.target.value)} /><strong>{values.posterWidth}px</strong></label>
           <label><span>Poster height</span><input type="range" min="180" max="480" step="2" value={values.posterHeight} onChange={(e) => setNumber("posterHeight", e.target.value)} /><strong>{values.posterHeight}px</strong></label>
           <label><span>Poster transparency</span><input type="range" min="0.2" max="1" step="0.01" value={values.posterOpacity ?? 1} onChange={(e) => setNumber("posterOpacity", e.target.value)} /><strong>{Math.round((values.posterOpacity ?? 1) * 100)}%</strong></label>
@@ -49127,6 +49108,7 @@ const floatingActions = {
   style={supportsLibraryAppearance(activeLibrary) ? {
     "--media-grid-poster-width": `${effectiveMediaAppearance.posterWidth}px`,
     "--media-grid-poster-height": `${effectiveMediaAppearance.posterHeight}px`,
+    "--media-poster-ratio": `${effectiveMediaAppearance.posterWidth} / ${effectiveMediaAppearance.posterHeight}`,
     "--media-poster-opacity": effectiveMediaAppearance.posterOpacity ?? 1,
     "--photo-poster-fit": effectiveMediaAppearance.posterFit || "cover",
     "--photo-poster-radius": `${effectiveMediaAppearance.posterRadius ?? 14}px`,
@@ -49239,6 +49221,7 @@ const floatingActions = {
         </div>
       )}
 
+      <div className="app-ribbon-actions" role="group" aria-label="Page actions">
       {activePlugin?.hostIntegration?.headerActions
         ?.filter((action) => {
           const actionSections = Array.isArray(action?.sections) ? action.sections : [];
@@ -49331,6 +49314,8 @@ const floatingActions = {
       >
         🔍
       </button>
+
+      </div>
 
       {pageContext.library === activeLibrary && pageContext.hero?.type === "collection" && pageContext.hero?.render !== false && (
         <section className="collection-app-hero-body">
