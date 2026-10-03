@@ -7621,7 +7621,11 @@ function readAppearanceConfig(req) {
   };
 }
 function safeAppearanceScopeId(value = "") {
-  return String(value || "").trim().replace(/[^a-z0-9_.:-]+/gi, "-").slice(0, 180);
+  // These identifiers are JSON keys, not filesystem paths. Preserve identity:
+  // replacing punctuation or truncating would merge unrelated page/album scopes.
+  const scopeId = String(value || "").trim();
+  if (scopeId.length > 512) throw new Error("Appearance scope identifier is too long.");
+  return ["__proto__", "constructor", "prototype"].includes(scopeId) ? "" : scopeId;
 }
 function appearanceDeviceId(req) {
   return safeAppearanceScopeId(req.get("x-homestead-device-id") || req.body?.deviceId || req.query?.deviceId || "default-device") || "default-device";
@@ -7666,17 +7670,18 @@ app.patch("/api/appearance/config", homesteadAccess.requireSession, (req, res) =
     const current = readAppearanceConfig(req);
     const deviceId = appearanceDeviceId(req);
     const split = splitAppearanceValues(values);
+    const replaceOverrides = req.body?.replace === true;
     const currentDevice = current.devices?.[deviceId] && typeof current.devices[deviceId] === "object"
       ? current.devices[deviceId]
       : { userDefaults: {}, libraries: {}, pages: {}, plugins: {} };
     const nextDeviceBucket = bucket === "userDefaults"
-      ? { ...(currentDevice.userDefaults || {}), ...split.device }
-      : { ...(currentDevice[bucket] || {}), [scopeId]: { ...(currentDevice[bucket]?.[scopeId] || {}), ...split.device } };
+      ? { ...(replaceOverrides ? {} : currentDevice.userDefaults || {}), ...split.device }
+      : { ...(currentDevice[bucket] || {}), [scopeId]: { ...(replaceOverrides ? {} : currentDevice[bucket]?.[scopeId] || {}), ...split.device } };
     const next = {
       ...current,
       [bucket]: bucket === "userDefaults"
-        ? { ...current.userDefaults, ...split.shared }
-        : { ...current[bucket], [scopeId]: { ...(current[bucket]?.[scopeId] || {}), ...split.shared } },
+        ? { ...(replaceOverrides ? {} : current.userDefaults), ...split.shared }
+        : { ...current[bucket], [scopeId]: { ...(replaceOverrides ? {} : current[bucket]?.[scopeId] || {}), ...split.shared } },
       devices: { ...(current.devices || {}), [deviceId]: { ...currentDevice, [bucket]: nextDeviceBucket } },
       schemaVersion: 2,
       updatedAt: new Date().toISOString(),

@@ -17,7 +17,7 @@ assert.match(server, /schemaVersion: 2[\s\S]*devices: \{\}/);
 assert.match(server, /APPEARANCE_DEVICE_FIELDS/);
 assert.match(server, /x-homestead-device-id/i);
 assert.match(app, /homestead-appearance-device-id-v1/);
-assert.match(app, /device\.libraries\?\.\[library\]/);
+assert.match(app, /getScopedAppearanceOverrides/);
 assert.match(app, /accountAppearanceStorageKey/);
 
 assert.match(server, /\/api\/recipes\/categories/);

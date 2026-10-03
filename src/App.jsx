@@ -24,7 +24,8 @@ import ArtworkPicker from "./components/ArtworkPicker.jsx";
 import TransferQueue from "./components/TransferQueue.jsx";
 import useLibraryScrollReset from "./hooks/useLibraryScrollReset.js";
 import { chooseOwnedArtist, mergeRequestSnapshot, requestContentKey, readableEbooks } from "./utils/media-polish.js";
-import { resolvePhotoAlbumAppearance, updatePhotoAlbumAppearance, resetPhotoAlbumAppearance } from "./utils/photo-appearance.js";
+import { resolvePhotoAlbumAppearance } from "./utils/photo-appearance.js";
+import { appearanceScope, appearanceScopeKey, getScopedAppearanceOverrides, withScopedAppearanceOverrides, explicitAppearanceChanges, normalizeLegacyAppearance, appearanceCacheKey, cacheAppearanceScope, clearAppearanceScopeCache, loadAppearanceCache, appearanceDialogVariables, createAppearanceSaveQueue } from "./utils/appearance-state.js";
 
 
 import ModelViewer from "./components/ModelViewer";
@@ -5496,18 +5497,23 @@ function readStoredProfileAppearance(key = "") {
   }
 }
 
-function readDefaultProfileAppearancePreferences() {
-  const configuredDefault = readStoredProfileAppearance(PROFILE_APPEARANCE_DEFAULT_KEY);
-  if (configuredDefault) return normalizeProfileAppearancePreferences(configuredDefault);
-
-  const legacyShared = readStoredProfileAppearance(PROFILE_APPEARANCE_LEGACY_KEY);
-  if (legacyShared) {
-    const migrated = normalizeProfileAppearancePreferences(legacyShared);
-    try { localStorage.setItem(PROFILE_APPEARANCE_DEFAULT_KEY, JSON.stringify(migrated)); } catch {}
-    return migrated;
-  }
-
-  return { ...PROFILE_APPEARANCE_DEFAULTS };
+function profileDefaultAppearanceStorageKey(accountId = "owner") {
+  return `${PROFILE_APPEARANCE_DEFAULT_KEY}:${encodeURIComponent(accountId)}`;
+}
+function readDefaultProfileAppearanceOverrides(accountId = "owner", allowLegacy = false) {
+  const key = profileDefaultAppearanceStorageKey(accountId);
+  const saved = readStoredProfileAppearance(key);
+  if (saved) return saved;
+  if (!allowLegacy) return {};
+  const legacy = readStoredProfileAppearance(PROFILE_APPEARANCE_DEFAULT_KEY) || readStoredProfileAppearance(PROFILE_APPEARANCE_LEGACY_KEY);
+  if (!legacy) return {};
+  const overrides = normalizeLegacyAppearance(normalizeProfileAppearancePreferences(legacy), PROFILE_APPEARANCE_DEFAULTS);
+  try { localStorage.setItem(key, JSON.stringify(overrides)); localStorage.removeItem(PROFILE_APPEARANCE_DEFAULT_KEY); localStorage.removeItem(PROFILE_APPEARANCE_LEGACY_KEY); }
+  catch (error) { console.warn("Could not migrate account profile defaults", error); }
+  return overrides;
+}
+function readDefaultProfileAppearancePreferences(accountId = "owner", allowLegacy = false) {
+  return normalizeProfileAppearancePreferences(readDefaultProfileAppearanceOverrides(accountId, allowLegacy));
 }
 
 function getProfileAppearanceIdentity(profile = {}) {
@@ -5524,16 +5530,24 @@ function getProfileAppearanceIdentity(profile = {}) {
   return `${library}:${safeIdentity}`;
 }
 
-function getProfileAppearanceStorageKey(profile = {}) {
-  return `${PROFILE_APPEARANCE_PROFILE_KEY_PREFIX}:${getProfileAppearanceIdentity(profile)}`;
+function getProfileAppearanceStorageKey(profile = {}, accountId = "owner") {
+  return `${PROFILE_APPEARANCE_PROFILE_KEY_PREFIX}:${encodeURIComponent(accountId)}:${getProfileAppearanceIdentity(profile)}`;
 }
-
-function readProfileAppearancePreferences(profile = {}) {
-  const profileKey = getProfileAppearanceStorageKey(profile);
-  const savedProfile = readStoredProfileAppearance(profileKey);
-  return savedProfile
-    ? normalizeProfileAppearancePreferences(savedProfile)
-    : readDefaultProfileAppearancePreferences();
+function readProfileAppearanceOverrides(profile = {}, accountId = "owner", allowLegacy = false) {
+  const key = getProfileAppearanceStorageKey(profile, accountId);
+  const saved = readStoredProfileAppearance(key);
+  if (saved) return saved;
+  if (!allowLegacy) return {};
+  const legacyKey = `${PROFILE_APPEARANCE_PROFILE_KEY_PREFIX}:${getProfileAppearanceIdentity(profile)}`;
+  const legacy = readStoredProfileAppearance(legacyKey);
+  if (!legacy) return {};
+  const overrides = normalizeLegacyAppearance(normalizeProfileAppearancePreferences(legacy), readDefaultProfileAppearancePreferences(accountId, allowLegacy));
+  try { localStorage.setItem(key, JSON.stringify(overrides)); localStorage.removeItem(legacyKey); }
+  catch (error) { console.warn("Could not migrate account profile appearance", error); }
+  return overrides;
+}
+function readProfileAppearancePreferences(profile = {}, accountId = "owner", allowLegacy = false) {
+  return normalizeProfileAppearancePreferences({ ...readDefaultProfileAppearanceOverrides(accountId, allowLegacy), ...readProfileAppearanceOverrides(profile, accountId, allowLegacy) });
 }
 
 function ProfileArtworkCropper({ request, busy = false, onCancel, onApply }) {
@@ -5770,7 +5784,7 @@ function ProfileArtworkCropper({ request, busy = false, onCancel, onApply }) {
   );
 }
 
-function ProfileAppearanceStudio({ values, layoutMode = "desktop", onChange, onClose, onReset, onSaveDefault }) {
+function ProfileAppearanceStudio({ values, layoutMode = "desktop", onChange, onClose, onReset, onSaveDefault, onResetDefault, status = "" }) {
   if (typeof document === "undefined") return null;
   const updateNumber = (key, value) => onChange?.(key, Number(value));
   const posterPrefix = layoutMode === "tablet" ? "tabletPoster" : "desktopPoster";
@@ -5797,7 +5811,7 @@ function ProfileAppearanceStudio({ values, layoutMode = "desktop", onChange, onC
           <div><p>Adult Profiles</p><h2>Profile Appearance</h2></div>
           <button type="button" className="profile-tool-close" onClick={onClose} aria-label="Close">×</button>
         </header>
-        <p className="profile-appearance-intro">Customize profile panels, cards, tabs, photos, the Appearance overlay, colors, and gallery density. Changes update live and apply to all adult profile pages in this browser.</p>
+        <p className="profile-appearance-intro">Customize profile panels, cards, tabs, photos, the Appearance overlay, colors, and gallery density. Changes update live for this profile and your account in this browser.</p>
         <div className="profile-appearance-grid">
           <label><span>Panel transparency</span><input type="range" min="0" max="1" step="0.01" value={1 - values.panelOpacity} onInput={(event) => updateNumber("panelOpacity", 1 - Number(event.currentTarget.value))} onChange={(event) => updateNumber("panelOpacity", 1 - Number(event.currentTarget.value))} /><strong>{Math.round((1 - values.panelOpacity) * 100)}%</strong></label>
           <label><span>Panel blur</span><input type="range" min="0" max="32" step="1" value={values.panelBlur} onInput={(event) => updateNumber("panelBlur", event.currentTarget.value)} onChange={(event) => updateNumber("panelBlur", event.currentTarget.value)} /><strong>{values.panelBlur}px</strong></label>
@@ -5840,9 +5854,11 @@ function ProfileAppearanceStudio({ values, layoutMode = "desktop", onChange, onC
           <label><span>Anatomy alignment</span><select value={values.anatomyJustify} onInput={(event) => onChange?.("anatomyJustify", event.currentTarget.value)} onChange={(event) => onChange?.("anatomyJustify", event.currentTarget.value)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><strong>{values.anatomyJustify}</strong></label>
           <label><span>Stats vertical offset</span><input type="range" min="-360" max="32" step="1" value={values.anatomyStatsOffset} onInput={(event) => updateNumber("anatomyStatsOffset", event.currentTarget.value)} onChange={(event) => updateNumber("anatomyStatsOffset", event.currentTarget.value)} /><strong>{values.anatomyStatsOffset > 0 ? `+${values.anatomyStatsOffset}px` : `${values.anatomyStatsOffset}px`}</strong></label>
         </div>
+        {status && <p role="status">{status}</p>}
         <footer className="profile-appearance-footer">
           <button type="button" className="secondary-button" onClick={onReset}>Reset This Profile</button>
-          <button type="button" className="secondary-button" onClick={onSaveDefault}>Save as Default for New Profiles</button>
+          <button type="button" className="secondary-button" onClick={onSaveDefault}>Save as My Profile Defaults</button>
+          <button type="button" className="secondary-button" onClick={onResetDefault}>Reset My Profile Defaults</button>
           <button type="button" className="primary-button" onClick={onClose}>Done</button>
         </footer>
       </section>
@@ -5943,7 +5959,7 @@ function ProfileFamilyPanel({ profile, candidates = [], onMetadataSaved, onNavig
   </div>;
 }
 
-function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected, people, setActiveLibrary, onOpenPluginCard, setupConfig, accountPreferences = {} }) {
+function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected, people, setActiveLibrary, onOpenPluginCard, setupConfig, accountPreferences = {}, accountUserId = "owner", allowLegacyAppearance = false }) {
   const [tab, setTab] = useState("biography");
   const [bioText, setBioText] = useState("");
   const [livePerson, setLivePerson] = useState(person);
@@ -5964,12 +5980,12 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
   const [profilePosterLayoutMode, setProfilePosterLayoutMode] = useState(() => (
     typeof window !== "undefined" && window.matchMedia?.("(max-width: 900px) and (orientation: portrait)").matches ? "tablet" : "desktop"
   ));
-  const profileAppearanceStorageKey = getProfileAppearanceStorageKey(person);
+  const profileAppearanceStorageKey = getProfileAppearanceStorageKey(person, accountUserId);
   const [profileAppearanceState, setProfileAppearanceState] = useState(() => ({
     key: profileAppearanceStorageKey,
-    values: readProfileAppearancePreferences(person),
+    values: readProfileAppearanceOverrides(person, accountUserId, allowLegacyAppearance),
   }));
-  const profileAppearance = profileAppearanceState.values;
+  const profileAppearance = normalizeProfileAppearancePreferences({ ...readDefaultProfileAppearanceOverrides(accountUserId, allowLegacyAppearance), ...(profileAppearanceState.key === profileAppearanceStorageKey ? profileAppearanceState.values : readProfileAppearanceOverrides(person, accountUserId, allowLegacyAppearance)) });
   const profilePosterAppearance = profilePosterLayoutMode === "tablet"
     ? {
         scale: profileAppearance.tabletPosterScale,
@@ -5986,7 +6002,7 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
   const setProfileAppearance = (updater) => {
     setProfileAppearanceState((current) => ({
       ...current,
-      values: typeof updater === "function" ? updater(current.values) : updater,
+      values: { ...current.values, ...explicitAppearanceChanges(normalizeProfileAppearancePreferences({ ...readDefaultProfileAppearanceOverrides(accountUserId, allowLegacyAppearance), ...current.values }), updater) },
     }));
   };
   const profilePageRef = useRef(null);
@@ -6041,9 +6057,9 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
       ? current
       : {
           key: profileAppearanceStorageKey,
-          values: readProfileAppearancePreferences(person),
+          values: readProfileAppearanceOverrides(person, accountUserId, allowLegacyAppearance),
         });
-  }, [profileAppearanceStorageKey, person]);
+  }, [profileAppearanceStorageKey, person, accountUserId, allowLegacyAppearance]);
 
   useEffect(() => {
     setLivePerson(person);
@@ -6079,7 +6095,10 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
 
   useEffect(() => {
     if (profileAppearanceState.key !== profileAppearanceStorageKey) return;
-    try { localStorage.setItem(profileAppearanceStorageKey, JSON.stringify(profileAppearanceState.values)); } catch {}
+    try {
+      if (Object.keys(profileAppearanceState.values).length) localStorage.setItem(profileAppearanceStorageKey, JSON.stringify(profileAppearanceState.values));
+      else localStorage.removeItem(profileAppearanceStorageKey);
+    } catch (error) { console.error("Profile appearance cache save failed", error); setProfileMediaActionStatus("Profile appearance preview is active but could not be saved in this browser."); }
   }, [profileAppearanceState, profileAppearanceStorageKey]);
 
   const updateProfileAppearance = (key, value) => {
@@ -6088,9 +6107,10 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
 
   const saveCurrentAppearanceAsDefault = () => {
     try {
-      localStorage.setItem(PROFILE_APPEARANCE_DEFAULT_KEY, JSON.stringify(profileAppearance));
-      setProfileMediaActionStatus("Saved this appearance as the default for new profiles. Existing profiles keep their own settings.");
-    } catch {
+      localStorage.setItem(profileDefaultAppearanceStorageKey(accountUserId), JSON.stringify(normalizeLegacyAppearance(profileAppearance, PROFILE_APPEARANCE_DEFAULTS)));
+      setProfileMediaActionStatus("Saved your profile appearance defaults. Profiles inherit values they have not overridden.");
+    } catch (error) {
+      console.error("Account profile appearance default save failed", error);
       setProfileMediaActionStatus("Unable to save the default profile appearance in this browser.");
     }
   };
@@ -6775,7 +6795,15 @@ useEffect(() => {
           layoutMode={profilePosterLayoutMode}
           onChange={updateProfileAppearance}
           onClose={() => setProfileAppearanceOpen(false)}
-          onReset={() => setProfileAppearance(readDefaultProfileAppearancePreferences())}
+          onReset={() => {
+            try { localStorage.removeItem(profileAppearanceStorageKey); setProfileAppearanceState({ key: profileAppearanceStorageKey, values: {} }); setProfileMediaActionStatus("Profile appearance reset. Your account defaults are active."); }
+            catch (error) { console.error("Profile appearance reset failed", error); setProfileMediaActionStatus("Profile appearance could not be reset in this browser."); }
+          }}
+          status={profileMediaActionStatus}
+          onResetDefault={() => {
+            try { localStorage.removeItem(profileDefaultAppearanceStorageKey(accountUserId)); setProfileMediaActionStatus("Account profile defaults reset. Explicit profile overrides are preserved."); }
+            catch (error) { console.error("Account profile defaults reset failed", error); setProfileMediaActionStatus("Account profile defaults could not be reset in this browser."); }
+          }}
           onSaveDefault={saveCurrentAppearanceAsDefault}
         />
       )}
@@ -46224,20 +46252,12 @@ function appearancePageScopeId(library = "", pageScope = "") {
 }
 
 function resolveUserAppearance(config = EMPTY_USER_APPEARANCE_CONFIG, library = "", pageScope = "", legacy = {}, deviceId = "default-device") {
-  const pageId = appearancePageScopeId(library, pageScope);
-  const pluginId = String(library || "").startsWith("plugin:") ? String(library).slice(7) : "";
-  const device = config.devices?.[deviceId] || {};
+  // Legacy snapshots are migrated once into overrides, never used as a resolver fallback.
   return {
     ...getMediaLibraryAppearanceDefaults(library),
-    ...(legacy && typeof legacy === "object" ? legacy : {}),
-    ...(config.userDefaults || {}),
-    ...(config.libraries?.[library] || {}),
-    ...(pluginId ? config.plugins?.[pluginId] || {} : {}),
-    ...(pageId ? config.pages?.[pageId] || {} : {}),
-    ...(device.userDefaults || {}),
-    ...(device.libraries?.[library] || {}),
-    ...(pluginId ? device.plugins?.[pluginId] || {} : {}),
-    ...(pageId ? device.pages?.[pageId] || {} : {}),
+    ...getScopedAppearanceOverrides(config, appearanceScope(library, "", "global"), deviceId),
+    ...getScopedAppearanceOverrides(config, appearanceScope(library), deviceId),
+    ...(pageScope ? getScopedAppearanceOverrides(config, appearanceScope(library, pageScope, "page"), deviceId) : {}),
   };
 }
 
@@ -46286,9 +46306,9 @@ function getAppearanceArtworkCandidates(mediaIndex = {}, activeLibrary = "movies
   return candidates.slice(0, 240);
 }
 
-function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onReset, mediaIndex, initialTab = "library", albumId = "", albumName = "", scopeMode = "library", onScopeModeChange, pageLabel = "" }) {
+function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onReset, mediaIndex, initialTab = "library", albumId = "", albumName = "", scopeMode = "library", onScopeModeChange, pageLabel = "", status = "", busy = false, ready = true, pageSupported = false, uploadScope = "" }) {
   const setNumber = (key, value) => onChange({ ...values, [key]: Number(value) });
-  const label = albumId ? albumName || "Photo Album" : getAppearanceLibraryLabel(library);
+  const label = scopeMode === "global" ? "All Libraries" : albumId ? albumName || "Photo Album" : getAppearanceLibraryLabel(library);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [appearanceTab, setAppearanceTab] = useState(initialTab);
@@ -46318,7 +46338,7 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
       const target = valueKey === "sidebarBackgroundImage" ? "sidebar" : valueKey === "headerBackgroundImage" ? "header" : valueKey === "ribbonBackgroundImage" ? "ribbon" : valueKey === "bannerImage" ? "banner" : valueKey === "albumPoster" ? "poster" : "library";
       const response = await fetch("/api/appearance/background", {
         method: "POST",
-        headers: { "Content-Type": "application/octet-stream", "X-Homestead-Content-Type": file.type || "application/octet-stream", "X-Homestead-Library": library, "X-Homestead-Background-Target": target, "X-Homestead-Appearance-Scope": albumId ? `album:${albumId}` : "" },
+        headers: { "Content-Type": "application/octet-stream", "X-Homestead-Content-Type": file.type || "application/octet-stream", "X-Homestead-Library": library, "X-Homestead-Background-Target": target, "X-Homestead-Appearance-Scope": uploadScope },
         body: file,
       });
       const data = await response.json();
@@ -46333,16 +46353,18 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
     }
   };
   return typeof document !== "undefined" ? createPortal(
-    <div className="media-appearance-overlay" role="dialog" aria-modal="true" aria-label={`${label} appearance`}>
+    <div className="media-appearance-overlay public-media-custom-appearance" style={appearanceDialogVariables(values)} role="dialog" aria-modal="true" aria-label={`${label} appearance`}>
       <button className="media-appearance-backdrop" type="button" aria-label="Close appearance" onClick={onClose} />
       <section className="media-appearance-card">
         <header>
-          <div><p className="eyebrow">{albumId ? "Album Settings" : scopeMode === "page" ? "Page Settings" : "Library Settings"}</p><h2>{scopeMode === "page" && pageLabel ? pageLabel : label}</h2><span>{albumId ? "Changes apply only to this album. Reset restores inherited library settings." : scopeMode === "page" ? "Saved for this user and this page. Reset restores inherited library settings." : "Saved for this user and inherited by every page in this library."}</span></div>
+          <div><p className="eyebrow">{albumId ? "Album Settings" : scopeMode === "global" ? "Global Settings" : scopeMode === "page" ? "Page Settings" : "Library Settings"}</p><h2>{scopeMode === "page" && pageLabel ? pageLabel : label}</h2><span>{albumId ? "Changes apply only to this album. Reset restores inherited library settings." : scopeMode === "global" ? "Account defaults inherited by every library. Reset removes these overrides." : scopeMode === "page" ? "Saved for this user and this page. Reset restores inherited library settings." : "Saved for this user and inherited by every page in this library."}</span></div>
           <button className="secondary-button" type="button" onClick={onClose}>Close</button>
         </header>
+        <fieldset disabled={busy || !ready} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {!albumId && onScopeModeChange && <div className="media-appearance-scope-toggle" role="group" aria-label="Appearance scope">
+          <button type="button" className={scopeMode === "global" ? "active" : ""} onClick={() => onScopeModeChange("global")}>All Libraries</button>
           <button type="button" className={scopeMode === "library" ? "active" : ""} onClick={() => onScopeModeChange("library")}>Whole Library</button>
-          <button type="button" className={scopeMode === "page" ? "active" : ""} onClick={() => onScopeModeChange("page")}>This Page</button>
+          <button type="button" className={scopeMode === "page" ? "active" : ""} disabled={!pageSupported} onClick={() => onScopeModeChange("page")}>This Page</button>
         </div>}
         <nav className="media-appearance-tabs" aria-label={`${label} settings sections`}>
           <button type="button" className={appearanceTab === "library" ? "active" : ""} onClick={() => setAppearanceTab("library")}>{albumId ? "Album" : "Library"}</button>
@@ -46426,9 +46448,11 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
           <div className="movie-auto-match-status"><strong>{autoMatchStatus?.state || "Loading…"}</strong><span>{autoMatchStatus?.message || "Reading status…"}</span>{autoMatchStatus && <small>{autoMatchStatus.matched || 0} matched · {autoMatchStatus.ambiguous || 0} review · {autoMatchStatus.remaining || 0} remaining</small>}</div>
           <button className="primary-button" type="button" disabled={autoMatchBusy} onClick={async () => { setAutoMatchBusy(true); try { const response = await fetch(`/api/${autoMatchLibrary}/auto-match/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 100, force: true }) }); const status = await response.json(); setAutoMatchStatus(status); if (response.ok && status.matched > 0) window.dispatchEvent(new CustomEvent("homestead-metadata-match-updated")); } finally { setAutoMatchBusy(false); } }}>{autoMatchBusy ? "Matching…" : `Scan unmatched ${autoMatchLabel} names now`}</button>
         </section>}
+        </fieldset>
+        {status && <div className="next-v1-notice" role="status">{status}</div>}
         {backgroundUploadStatus && <div className="next-v1-notice">{backgroundUploadStatus}</div>}
         {photoPickerTarget && <PhotoLibraryPicker mediaIndex={mediaIndex} libraryKey={library === "adultPhotos" ? "adultPhotos" : "photos"} initialAlbum={albumId} onClose={() => setPhotoPickerTarget("")} onSelect={(url) => onChange((current) => ({ ...current, [photoPickerTarget]: url }))} title={`Choose ${albumId ? label + " album" : label} appearance photo`} />}
-        <footer><button className="secondary-button" type="button" onClick={onReset}>Reset {label}</button><button className="primary-button" type="button" onClick={onClose}>Done</button></footer>
+        <footer><button className="secondary-button" type="button" disabled={busy || !ready || backgroundUploadBusy} onClick={onReset}>Reset {label}</button><button className="primary-button" type="button" onClick={onClose}>Done</button></footer>
       </section>
     </div>, document.body
   ) : null;
@@ -46931,57 +46955,216 @@ function HomesteadApp({ sessionUser, onLogout }) {
   const [mediaAppearanceInitialTab, setMediaAppearanceInitialTab] = useState("library");
   const [mediaAppearanceScope, setMediaAppearanceScope] = useState("library");
   const appearanceDeviceId = useMemo(() => getAppearanceDeviceId(), []);
-  const [userAppearanceConfig, setUserAppearanceConfig] = useState(EMPTY_USER_APPEARANCE_CONFIG);
+  const appearanceUserId = String(sessionUser?.id || "owner");
+  const readAppearanceBrowserCache = () => {
+    try { return loadAppearanceCache(localStorage, appearanceUserId, appearanceDeviceId, EMPTY_USER_APPEARANCE_CONFIG); }
+    catch (error) { console.warn("Appearance browser cache unavailable", error); return EMPTY_USER_APPEARANCE_CONFIG; }
+  };
+  const [userAppearanceConfig, setUserAppearanceConfig] = useState(readAppearanceBrowserCache);
+  const appearanceConfigRef = useRef(userAppearanceConfig);
+  const appearanceAccountRef = useRef(appearanceUserId);
+  appearanceAccountRef.current = appearanceUserId;
   const [userAppearanceReady, setUserAppearanceReady] = useState(false);
-  const appearanceSaveTimer = useRef(0);
+  const [appearanceStatuses, setAppearanceStatuses] = useState({});
+  const [appearanceResetScope, setAppearanceResetScope] = useState("");
+  const appearanceSaveQueue = useRef(null);
+  if (!appearanceSaveQueue.current) appearanceSaveQueue.current = createAppearanceSaveQueue();
   const [photoAlbumId, setPhotoAlbumId] = useState("");
   const [adultPhotoAlbums, setAdultPhotoAlbums] = useState([]);
   const isPhotoLibrary = activeLibrary === "photos" || activeLibrary === "adultPhotos";
-  const [mediaLibraryAppearance, setMediaLibraryAppearance] = useState(() => loadStoredAppearance("homestead-media-library-appearance:movies", getMediaLibraryAppearanceDefaults("movies")));
-  const [mediaAppearanceLoadedLibrary, setMediaAppearanceLoadedLibrary] = useState("movies");
   const activePhotoAlbum = isPhotoLibrary ? (activeLibrary === "adultPhotos" ? adultPhotoAlbums : Object.values(mediaIndex?.libraries?.photos || {})).find((album) => String(album.id) === photoAlbumId) : null;
   const photoAppearanceAlbumId = activePhotoAlbum ? photoAlbumId : "";
-  const effectiveMediaAppearance = isPhotoLibrary ? resolvePhotoAlbumAppearance(mediaLibraryAppearance, photoAppearanceAlbumId) : mediaLibraryAppearance;
   const activeAppearancePageScope = pageContext.library === activeLibrary ? pageContext.appearanceScope || "" : "";
-  const changeScopedAppearance = useCallback((update) => {
-    setMediaLibraryAppearance((current) => {
-      const next = isPhotoLibrary
-        ? updatePhotoAlbumAppearance(current, photoAppearanceAlbumId, update)
-        : typeof update === "function" ? update(current) : update;
-      if (!photoAppearanceAlbumId) {
-        window.clearTimeout(appearanceSaveTimer.current);
-        appearanceSaveTimer.current = window.setTimeout(() => {
-          const pluginId = String(activeLibrary || "").startsWith("plugin:") ? String(activeLibrary).slice(7) : "";
-          const usePage = mediaAppearanceScope === "page" && Boolean(activeAppearancePageScope);
-          const bucket = usePage ? "pages" : pluginId ? "plugins" : "libraries";
-          const scopeId = usePage ? appearancePageScopeId(activeLibrary, activeAppearancePageScope) : pluginId || activeLibrary;
-          fetch("/api/appearance/config", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json", "X-Homestead-Device-Id": appearanceDeviceId },
-            body: JSON.stringify({ bucket, scopeId, values: next, deviceId: appearanceDeviceId }),
-          }).then((response) => response.json()).then((data) => {
-            if (data?.ok && data.config) setUserAppearanceConfig(data.config);
-          }).catch(() => {});
-        }, 240);
+  const mediaLibraryAppearance = useMemo(() => resolveUserAppearance(userAppearanceConfig, activeLibrary, activeAppearancePageScope, {}, appearanceDeviceId), [userAppearanceConfig, activeLibrary, activeAppearancePageScope, appearanceDeviceId]);
+  const photoLibraryAppearance = useMemo(() => {
+    const albumCovers = { ...mediaLibraryAppearance.albumCovers };
+    if (isPhotoLibrary) {
+      const prefix = activeLibrary + ":album:";
+      for (const id of new Set([...Object.keys(userAppearanceConfig.pages || {}), ...Object.keys(userAppearanceConfig.devices?.[appearanceDeviceId]?.pages || {})])) {
+        if (!id.startsWith(prefix)) continue;
+        const overrides = getScopedAppearanceOverrides(userAppearanceConfig, { bucket: "pages", scopeId: id }, appearanceDeviceId);
+        if (Object.hasOwn(overrides, "albumPoster")) albumCovers[id.slice(prefix.length)] = overrides.albumPoster;
       }
-      return next;
+    }
+    return { ...mediaLibraryAppearance, albumCovers };
+  }, [mediaLibraryAppearance, isPhotoLibrary, activeLibrary, userAppearanceConfig, appearanceDeviceId]);
+  const effectiveMediaAppearance = useMemo(() => photoAppearanceAlbumId
+    ? { ...resolvePhotoAlbumAppearance(photoLibraryAppearance, photoAppearanceAlbumId), ...getScopedAppearanceOverrides(userAppearanceConfig, appearanceScope(activeLibrary, "", "library", photoAppearanceAlbumId), appearanceDeviceId) }
+    : isPhotoLibrary ? photoLibraryAppearance : mediaLibraryAppearance,
+  [photoAppearanceAlbumId, photoLibraryAppearance, userAppearanceConfig, activeLibrary, appearanceDeviceId, isPhotoLibrary, mediaLibraryAppearance]);
+  const editingAppearanceScope = appearanceScope(activeLibrary, activeAppearancePageScope, mediaAppearanceScope, photoAppearanceAlbumId);
+  const editingAppearanceKey = appearanceScopeKey(editingAppearanceScope);
+  const appearanceStudioValues = photoAppearanceAlbumId ? effectiveMediaAppearance : mediaAppearanceScope === "global"
+    ? { ...getMediaLibraryAppearanceDefaults(activeLibrary), ...getScopedAppearanceOverrides(userAppearanceConfig, editingAppearanceScope, appearanceDeviceId) }
+    : resolveUserAppearance(userAppearanceConfig, activeLibrary, mediaAppearanceScope === "page" ? activeAppearancePageScope : "", {}, appearanceDeviceId);
+  const updateAppearanceConfig = (config) => { appearanceConfigRef.current = config; setUserAppearanceConfig(config); };
+  const setAppearanceStatus = (key, message) => setAppearanceStatuses((current) => ({ ...current, [key]: message }));
+  const persistAppearanceScope = async (scope, values, current = () => true) => {
+    const response = await fetch("/api/appearance/config", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-Homestead-Device-Id": appearanceDeviceId },
+      body: JSON.stringify({ ...scope, values, deviceId: appearanceDeviceId, replace: true }),
     });
-  }, [activeLibrary, activeAppearancePageScope, appearanceDeviceId, isPhotoLibrary, mediaAppearanceScope, photoAppearanceAlbumId]);
+    const data = await response.json();
+    if (!response.ok || !data?.ok || !data.config) throw new Error(data.message || "Could not save appearance settings.");
+    if (!current() || appearanceAccountRef.current !== appearanceUserId) return;
+    const saved = getScopedAppearanceOverrides(data.config, scope, appearanceDeviceId);
+    updateAppearanceConfig(withScopedAppearanceOverrides(appearanceConfigRef.current, scope, saved, appearanceDeviceId));
+    try { cacheAppearanceScope(localStorage, appearanceUserId, appearanceDeviceId, scope, saved); }
+    catch (error) { console.warn("Appearance saved on server but browser cache failed", scope, error); setAppearanceStatus(appearanceScopeKey(scope), "Saved on server; browser cache unavailable."); return; }
+    setAppearanceStatus(appearanceScopeKey(scope), "Saved.");
+  };
+  const changeScopedAppearance = (update) => {
+    if (!userAppearanceReady || appearanceResetScope === editingAppearanceKey) return;
+    const changes = explicitAppearanceChanges(appearanceStudioValues, update);
+    if (!Object.keys(changes).length) return;
+    const values = { ...getScopedAppearanceOverrides(appearanceConfigRef.current, editingAppearanceScope, appearanceDeviceId), ...changes };
+    updateAppearanceConfig(withScopedAppearanceOverrides(appearanceConfigRef.current, editingAppearanceScope, values, appearanceDeviceId));
+    setAppearanceStatus(editingAppearanceKey, "Saving…");
+    const scope = editingAppearanceScope, key = editingAppearanceKey;
+    appearanceSaveQueue.current.schedule(key, async (current) => {
+      try { await persistAppearanceScope(scope, values, current); }
+      catch (error) {
+        console.error("Appearance save failed", scope, error);
+        if (current() && appearanceAccountRef.current === appearanceUserId) setAppearanceStatus(key, "Not saved: " + error.message + " Your preview is retained. Change a setting or press Done to retry.");
+        throw error;
+      }
+    });
+  };
+  const resetScopedAppearance = async () => {
+    const scope = editingAppearanceScope, key = editingAppearanceKey;
+    const previous = getScopedAppearanceOverrides(appearanceConfigRef.current, scope, appearanceDeviceId);
+    const previousCache = readStoredProfileAppearance(appearanceCacheKey(appearanceUserId, appearanceDeviceId, scope));
+    const clearResetCache = () => {
+      clearAppearanceScopeCache(localStorage, appearanceUserId, appearanceDeviceId, scope);
+      // Obsolete resolved snapshots must never become migration input after Reset.
+      localStorage.removeItem(accountAppearanceStorageKey(activeLibrary, appearanceUserId));
+      if (sessionUser?.role === "owner") localStorage.removeItem(`homestead-media-library-appearance:${activeLibrary}`);
+    };
+    setAppearanceResetScope(key); setAppearanceStatus(key, "Resetting…");
+    // Invalidates queued/in-flight callbacks before removing cache or UI overrides.
+    const reset = appearanceSaveQueue.current.reset(key, async (current) => {
+      const response = await fetch(`/api/appearance/config?bucket=${encodeURIComponent(scope.bucket)}&scopeId=${encodeURIComponent(scope.scopeId)}&deviceId=${encodeURIComponent(appearanceDeviceId)}`, { method: "DELETE", headers: { Accept: "application/json", "X-Homestead-Device-Id": appearanceDeviceId } });
+      const data = await response.json();
+      if (!response.ok || !data?.ok) throw new Error(data.message || "Could not reset appearance settings.");
+      if (!current() || appearanceAccountRef.current !== appearanceUserId) return;
+      updateAppearanceConfig(withScopedAppearanceOverrides(appearanceConfigRef.current, scope, {}, appearanceDeviceId));
+      try { clearResetCache(); }
+      catch (error) { console.warn("Appearance reset on server but browser cache failed", scope, error); setAppearanceStatus(key, "Reset on server; browser cache could not be cleared."); return; }
+      setAppearanceStatus(key, "Reset. Inherited appearance is active.");
+    });
+    try { clearResetCache(); }
+    catch (error) { console.warn("Could not clear appearance cache before reset", scope, error); }
+    updateAppearanceConfig(withScopedAppearanceOverrides(appearanceConfigRef.current, scope, {}, appearanceDeviceId));
+    try { await reset; }
+    catch (error) {
+      console.error("Appearance reset failed", scope, error);
+      if (appearanceAccountRef.current === appearanceUserId) {
+        updateAppearanceConfig(withScopedAppearanceOverrides(appearanceConfigRef.current, scope, previous, appearanceDeviceId));
+        if (previousCache) {
+          try { cacheAppearanceScope(localStorage, appearanceUserId, appearanceDeviceId, scope, previousCache); }
+          catch (cacheError) { console.warn("Could not restore appearance cache after failed reset", cacheError); }
+        }
+        setAppearanceStatus(key, "Reset failed: " + error.message + " Previous appearance restored.");
+      }
+    } finally { if (appearanceAccountRef.current === appearanceUserId) setAppearanceResetScope(""); }
+  };
+  const closeAppearanceStudio = async () => {
+    try {
+      if (String(appearanceStatuses[editingAppearanceKey] || "").startsWith("Not saved:")) await persistAppearanceScope(editingAppearanceScope, getScopedAppearanceOverrides(appearanceConfigRef.current, editingAppearanceScope, appearanceDeviceId));
+      else await appearanceSaveQueue.current.flush(editingAppearanceKey);
+      setMediaAppearanceOpen(false);
+    } catch (error) { console.error("Appearance save retry failed", editingAppearanceScope, error); setAppearanceStatus(editingAppearanceKey, "Not saved: " + error.message + " Your preview is retained. Press Done to retry."); }
+  };
   useEffect(() => { setMediaAppearanceOpen(false); }, [photoAlbumId]);
-
   useEffect(() => {
     let cancelled = false;
-    setUserAppearanceReady(false);
+    setUserAppearanceReady(false); setAppearanceStatuses({}); setAppearanceResetScope("");
+    updateAppearanceConfig(readAppearanceBrowserCache());
     fetch("/api/appearance/config", { cache: "no-store", headers: { Accept: "application/json", "X-Homestead-Device-Id": appearanceDeviceId } })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Appearance unavailable")))
-      .then((data) => {
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) throw new Error(data.message || "Appearance unavailable");
         if (cancelled) return;
-        setUserAppearanceConfig(data?.config || EMPTY_USER_APPEARANCE_CONFIG);
-        setUserAppearanceReady(true);
+        let config = data.config || EMPTY_USER_APPEARANCE_CONFIG;
+        const migrations = [];
+        // Old caches are read only during migration, never after Reset or resolution.
+        const libraries = new Set([...Object.keys(config.libraries || {}), ...PUBLIC_MEDIA_APPEARANCE_LIBRARIES]);
+        for (const library of libraries) {
+          const scope = appearanceScope(library);
+          const legacyKey = accountAppearanceStorageKey(library, appearanceUserId);
+          const oldKey = sessionUser?.role === "owner" ? `homestead-media-library-appearance:${library}` : "";
+          const raw = readStoredProfileAppearance(legacyKey) || (oldKey ? readStoredProfileAppearance(oldKey) : null);
+          let values = getScopedAppearanceOverrides(config, scope, appearanceDeviceId);
+          if (!Object.keys(values).length && raw && !readStoredProfileAppearance(appearanceCacheKey(appearanceUserId, appearanceDeviceId, scope))) values = normalizeLegacyAppearance(raw, resolveUserAppearance(withScopedAppearanceOverrides(config, scope, {}, appearanceDeviceId), library, "", {}, appearanceDeviceId));
+          const albums = { ...raw?.albumAppearance, ...values.albumAppearance }, covers = { ...raw?.albumCovers, ...values.albumCovers };
+          for (const albumId of new Set([...Object.keys(albums), ...Object.keys(covers)])) {
+            const target = appearanceScope(library, "", "library", albumId);
+            const saved = getScopedAppearanceOverrides(config, target, appearanceDeviceId);
+            if (!Object.keys(saved).length) {
+              const overrides = { ...albums[albumId], ...(covers[albumId] ? { albumPoster: covers[albumId] } : {}) };
+              config = withScopedAppearanceOverrides(config, target, overrides, appearanceDeviceId);
+              migrations.push([target, overrides]);
+            }
+          }
+          const parent = resolveUserAppearance(withScopedAppearanceOverrides(config, scope, {}, appearanceDeviceId), library, "", {}, appearanceDeviceId);
+          const snapshotFields = Object.keys(MEDIA_LIBRARY_APPEARANCE_DEFAULTS).filter((key) => !["albumAppearance", "albumCovers"].includes(key));
+          const clean = snapshotFields.every((key) => Object.hasOwn(values, key)) ? normalizeLegacyAppearance(values, parent) : { ...values };
+          delete clean.albumAppearance; delete clean.albumCovers;
+          if (JSON.stringify(clean) !== JSON.stringify(getScopedAppearanceOverrides(config, scope, appearanceDeviceId))) {
+            config = withScopedAppearanceOverrides(config, scope, clean, appearanceDeviceId); migrations.push([scope, clean]);
+          }
+        }
+        for (const scope of [appearanceScope("", "", "global"), ...Object.keys(config.plugins || {}).map((scopeId) => ({ bucket: "plugins", scopeId }))]) {
+          const library = scope.bucket === "plugins" ? "plugin:" + scope.scopeId : activeLibrary;
+          const values = getScopedAppearanceOverrides(config, scope, appearanceDeviceId);
+          const fields = Object.keys(MEDIA_LIBRARY_APPEARANCE_DEFAULTS).filter((key) => !["albumAppearance", "albumCovers"].includes(key));
+          if (!fields.every((key) => Object.hasOwn(values, key))) continue;
+          const parent = scope.bucket === "userDefaults" ? getMediaLibraryAppearanceDefaults(library) : resolveUserAppearance(withScopedAppearanceOverrides(config, scope, {}, appearanceDeviceId), library, "", {}, appearanceDeviceId);
+          const overrides = normalizeLegacyAppearance(values, parent);
+          config = withScopedAppearanceOverrides(config, scope, overrides, appearanceDeviceId); migrations.push([scope, overrides]);
+        }
+        // Older releases saved full page snapshots. Drop only values equal to
+        // their current parent; custom values remain explicit for compatibility.
+        const snapshotFields = Object.keys(MEDIA_LIBRARY_APPEARANCE_DEFAULTS).filter((key) => !["albumAppearance", "albumCovers"].includes(key));
+        for (const scopeId of new Set([...Object.keys(config.pages || {}), ...Object.keys(config.devices?.[appearanceDeviceId]?.pages || {})])) {
+          const scope = { bucket: "pages", scopeId }, values = getScopedAppearanceOverrides(config, scope, appearanceDeviceId);
+          if (!snapshotFields.every((key) => Object.hasOwn(values, key))) continue;
+          const library = scopeId.startsWith("plugin:") ? scopeId.split(":").slice(0, 2).join(":") : scopeId.split(":")[0];
+          const overrides = normalizeLegacyAppearance(values, resolveUserAppearance(config, library, "", {}, appearanceDeviceId));
+          config = withScopedAppearanceOverrides(config, scope, overrides, appearanceDeviceId); migrations.push([scope, overrides]);
+        }
+        updateAppearanceConfig(config);
+        // Save children first, then remove legacy nested maps. Failure preserves legacy data.
+        for (const [scope, values] of migrations) { if (cancelled) return; await persistAppearanceScope(scope, values, () => !cancelled); }
+        if (!cancelled) {
+          updateAppearanceConfig(appearanceConfigRef.current);
+          const confirmed = appearanceConfigRef.current;
+          const cachedScopes = [appearanceScope("", "", "global")];
+          for (const bucket of ["libraries", "pages", "plugins"]) {
+            for (const scopeId of new Set([...Object.keys(confirmed[bucket] || {}), ...Object.keys(confirmed.devices?.[appearanceDeviceId]?.[bucket] || {})])) cachedScopes.push({ bucket, scopeId });
+          }
+          try {
+            // Remove stale entries from other sessions before caching the confirmed scopes.
+            const cached = loadAppearanceCache(localStorage, appearanceUserId, appearanceDeviceId, EMPTY_USER_APPEARANCE_CONFIG);
+            for (const bucket of ["libraries", "pages", "plugins"]) {
+              for (const scopeId of new Set([...Object.keys(cached[bucket] || {}), ...Object.keys(cached.devices?.[appearanceDeviceId]?.[bucket] || {})])) clearAppearanceScopeCache(localStorage, appearanceUserId, appearanceDeviceId, { bucket, scopeId });
+            }
+            for (const scope of cachedScopes) cacheAppearanceScope(localStorage, appearanceUserId, appearanceDeviceId, scope, getScopedAppearanceOverrides(confirmed, scope, appearanceDeviceId));
+            for (const library of libraries) {
+              localStorage.removeItem(accountAppearanceStorageKey(library, appearanceUserId));
+              if (sessionUser?.role === "owner") localStorage.removeItem(`homestead-media-library-appearance:${library}`);
+            }
+          } catch (error) { console.warn("Appearance loaded on server but browser cache failed", error); setAppearanceStatus("load", "Appearance loaded from server; browser cache unavailable."); }
+          setUserAppearanceReady(true);
+        }
       })
-      .catch(() => { if (!cancelled) setUserAppearanceReady(true); });
-    return () => { cancelled = true; };
-  }, [appearanceDeviceId, sessionUser?.id]);
+      .catch((error) => {
+        console.error("Appearance load/migration failed", error);
+        if (!cancelled) { setAppearanceStatus("load", "Appearance could not be loaded or migrated: " + error.message + " Reload to retry. Your cached preview is retained."); }
+      });
+    return () => { cancelled = true; appearanceSaveQueue.current.cancelAll(); };
+  }, [appearanceDeviceId, appearanceUserId]);
 
   useEffect(() => {
     const receivePageContext = (event) => {
@@ -47010,26 +47193,8 @@ function HomesteadApp({ sessionUser, onLogout }) {
   useEffect(() => {
     setPhotoAlbumId("");
     setPageContext({ library: activeLibrary, title: "", appearanceScope: "", addActions: [], filterSort: false, filterSortActive: false, filterSortCount: 0, backAction: "", backLabel: "", appearanceAction: "", stats: [], headerActions: [], hero: null });
-    setMediaAppearanceScope("library");
-    if (!supportsLibraryAppearance(activeLibrary)) return;
-    const legacy = loadAccountStoredAppearance(activeLibrary, sessionUser?.id || "owner", getMediaLibraryAppearanceDefaults(activeLibrary));
-    setMediaLibraryAppearance(resolveUserAppearance(userAppearanceConfig, activeLibrary, "", legacy, appearanceDeviceId));
-    setMediaAppearanceLoadedLibrary(activeLibrary);
-    setLibraryActionsOpen(false);
-    setMediaAppearanceOpen(false);
-    setMediaAppearanceInitialTab("library");
-  }, [activeLibrary, appearanceDeviceId, sessionUser?.id, userAppearanceReady]);
-
-  useEffect(() => {
-    if (!supportsLibraryAppearance(activeLibrary) || !userAppearanceReady) return;
-    const legacy = loadAccountStoredAppearance(activeLibrary, sessionUser?.id || "owner", getMediaLibraryAppearanceDefaults(activeLibrary));
-    setMediaLibraryAppearance(resolveUserAppearance(userAppearanceConfig, activeLibrary, activeAppearancePageScope, legacy, appearanceDeviceId));
-  }, [activeAppearancePageScope, activeLibrary, appearanceDeviceId, sessionUser?.id, userAppearanceReady]);
-
-  useEffect(() => {
-    if (!supportsLibraryAppearance(activeLibrary) || mediaAppearanceLoadedLibrary !== activeLibrary) return;
-    localStorage.setItem(accountAppearanceStorageKey(activeLibrary, sessionUser?.id || "owner"), JSON.stringify(mediaLibraryAppearance));
-  }, [activeLibrary, mediaLibraryAppearance, mediaAppearanceLoadedLibrary, sessionUser?.id]);
+    setMediaAppearanceScope("library"); setLibraryActionsOpen(false); setMediaAppearanceOpen(false); setMediaAppearanceInitialTab("library");
+  }, [activeLibrary]);
 
   function openAdultProfileModal(defaultType = "") {
     setShowAddModal(false);
@@ -48691,6 +48856,8 @@ if (selected) {
   return (
     <>
       <ProfilePage
+        accountUserId={String(sessionUser?.id || "owner")}
+        allowLegacyAppearance={sessionUser?.role === "owner"}
         person={selectedProfile}
         setSelected={setSelected}
         setActiveLibrary={setActiveLibrary}
@@ -49144,33 +49311,18 @@ const floatingActions = {
     library={activeLibrary}
     albumId={photoAppearanceAlbumId}
     albumName={activePhotoAlbum?.name || ""}
-    values={effectiveMediaAppearance}
+    values={appearanceStudioValues}
+    status={[appearanceStatuses.load, appearanceStatuses[editingAppearanceKey]].filter(Boolean).join(" ")}
+    busy={appearanceResetScope === editingAppearanceKey}
+    ready={userAppearanceReady}
+    pageSupported={Boolean(activeAppearancePageScope)}
+    uploadScope={photoAppearanceAlbumId ? `album:${photoAppearanceAlbumId}` : mediaAppearanceScope === "global" ? "global" : mediaAppearanceScope === "page" ? editingAppearanceScope.scopeId : ""}
     onChange={changeScopedAppearance}
-    onClose={() => setMediaAppearanceOpen(false)}
+    onClose={closeAppearanceStudio}
     scopeMode={mediaAppearanceScope}
     pageLabel={pageContext.title || active?.name || "This Page"}
-    onScopeModeChange={(mode) => {
-      setMediaAppearanceScope(mode);
-      const legacy = loadAccountStoredAppearance(activeLibrary, sessionUser?.id || "owner", getMediaLibraryAppearanceDefaults(activeLibrary));
-      setMediaLibraryAppearance(resolveUserAppearance(userAppearanceConfig, activeLibrary, mode === "page" ? activeAppearancePageScope : "", legacy, appearanceDeviceId));
-    }}
-    onReset={() => {
-      if (photoAppearanceAlbumId) {
-        setMediaLibraryAppearance((current) => resetPhotoAlbumAppearance(current, photoAppearanceAlbumId));
-        return;
-      }
-      const pluginId = String(activeLibrary || "").startsWith("plugin:") ? String(activeLibrary).slice(7) : "";
-      const usePage = mediaAppearanceScope === "page" && Boolean(activeAppearancePageScope);
-      const bucket = usePage ? "pages" : pluginId ? "plugins" : "libraries";
-      const scopeId = usePage ? appearancePageScopeId(activeLibrary, activeAppearancePageScope) : pluginId || activeLibrary;
-      fetch(`/api/appearance/config?bucket=${encodeURIComponent(bucket)}&scopeId=${encodeURIComponent(scopeId)}&deviceId=${encodeURIComponent(appearanceDeviceId)}`, { method: "DELETE", headers: { Accept: "application/json", "X-Homestead-Device-Id": appearanceDeviceId } })
-        .then((response) => response.json()).then((data) => {
-          if (!data?.ok) return;
-          setUserAppearanceConfig(data.config || EMPTY_USER_APPEARANCE_CONFIG);
-          const legacy = loadAccountStoredAppearance(activeLibrary, sessionUser?.id || "owner", getMediaLibraryAppearanceDefaults(activeLibrary));
-          setMediaLibraryAppearance(resolveUserAppearance(data.config || EMPTY_USER_APPEARANCE_CONFIG, activeLibrary, usePage ? activeAppearancePageScope : "", legacy, appearanceDeviceId));
-        }).catch(() => {});
-    }}
+    onScopeModeChange={setMediaAppearanceScope}
+    onReset={resetScopedAppearance}
     mediaIndex={activeLibrary === "adultPhotos" ? { ...mediaIndex, libraries: { ...mediaIndex?.libraries, adultPhotos: Object.fromEntries(adultPhotoAlbums.map((album) => [album.id, album])) } } : mediaIndex}
     initialTab={mediaAppearanceInitialTab}
   />

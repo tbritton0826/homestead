@@ -85,7 +85,7 @@ async function lifecycle() {
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
-const app = fs.readFileSync(path.join(root, "src/App.jsx"), "utf8");
+const app = fs.readFileSync(path.join(root, "src/App.jsx"), "utf8").replace(/\r\n/g, "\n");
 const server = fs.readFileSync(path.join(root, "server.cjs"), "utf8");
 const photos = fs.readFileSync(path.join(root, "src/components/PhotosLibraryPage.jsx"), "utf8");
 const picker = fs.readFileSync(path.join(root, "src/components/PhotoLibraryPicker.jsx"), "utf8");
@@ -98,9 +98,9 @@ assert.equal(lookup(saved, "books", { id: "unmatched", name: "High Heat" }), nul
 assert.equal(lookup(saved, "books", "high-heat"), null, "legacy title alias cannot cross authors");
 for (const text of ["photos-poster-card", "albumCovers", "bannerImage", "onAlbumChange", "setNavBackAction", "openImageViewer", "slice(0, visible)"]) assert(photos.includes(text), text);
 for (const text of ["page * 60", 'type="button"', "Escape", "sourcePath", "encodeURIComponent(raw)"]) assert(picker.includes(text), text);
-for (const text of ['setPhotoPickerTarget("backgroundImage")', 'setPhotoPickerTarget("sidebarBackgroundImage")', 'setPhotoPickerTarget("bannerImage")', '<LibraryAutoMatchPanel library="music"', '<LibraryAutoMatchPanel library="books"', "mediaAppearanceLoadedLibrary !== activeLibrary"]) assert(app.includes(text), text);
+for (const text of ['setPhotoPickerTarget("backgroundImage")', 'setPhotoPickerTarget("sidebarBackgroundImage")', 'setPhotoPickerTarget("bannerImage")', '<LibraryAutoMatchPanel library={library}', 'const isBookOrMusic = library === "books" || library === "music"', "getScopedAppearanceOverrides"]) assert(app.includes(text), text);
 assert(css.includes(".photos-poster-image"));
-assert(server.includes('["sidebar", "banner", "library", "poster"].includes(requestedTarget)'));
+assert(server.includes('["sidebar", "header", "ribbon", "banner", "library", "poster"].includes(requestedTarget)'));
 assert(server.includes("libraryAutoMatch.start(library, { automatic: true })"));
 assert(server.includes("fs.watchFile(path.join(dataDir, \"media-index.json\")"));
 lifecycle().then(() => console.log("Auto Match identity, High Heat author safety, review persistence, race protection, Photos/pickers: PASSED")).catch((error) => { console.error(error); process.exitCode = 1; });
