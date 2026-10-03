@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Dialog focus regression</title><body>
+<h1>Existing-dialog focus regression</h1><button id="run">Run focus checks</button><pre id="result" role="status">Not run</pre>
+<script type="module">
+import { activateDialogFocus, dialogFocusable } from '/__qa/dialog-focus.js';
+const run = document.querySelector('#run'), output = document.querySelector('#result');
+run.onclick = () => {
+ let cleanups=[]; const scene=document.createElement('div');document.body.append(scene);
+ const assert=(condition,message)=>{if(!condition)throw Error(message);};
+ const key=(name,shift=false)=>window.dispatchEvent(new KeyboardEvent('keydown',{key:name,shiftKey:shift,bubbles:true,cancelable:true}));
+ try {
+  scene.innerHTML='<button id="origin">Origin</button><aside inert id="preinert">Originally inert</aside><section role="dialog" id="parent"><button id="first">First</button><button disabled>Disabled</button><button hidden>Hidden</button><fieldset disabled><button>Disabled fieldset</button></fieldset><button tabindex="-1">Negative tabindex</button><button id="last">Last</button></section>';
+  const origin=scene.querySelector('#origin'),parent=scene.querySelector('#parent'),first=scene.querySelector('#first'),last=scene.querySelector('#last');origin.focus();
+  let escaped=0;const stop=activateDialogFocus(parent,()=>escaped++,origin);cleanups.push(stop);
+  assert(document.activeElement===first,'Initial focus moves inside');assert(origin.inert,'Background branch is inert');
+  assert(dialogFocusable(parent).length===2,'Disabled, hidden, negative tabindex and disabled fieldsets are excluded');
+  last.focus();key('Tab');assert(document.activeElement===first,'Forward Tab wraps');key('Tab',true);assert(document.activeElement===last,'Reverse Tab wraps');
+  const child=document.createElement('section');child.setAttribute('role','dialog');child.innerHTML='<button>Child close</button>';document.body.append(child);
+  let childEscaped=0;const childStop=activateDialogFocus(child,()=>childEscaped++,last);cleanups.push(()=>{childStop();child.remove();});
+  assert(parent.closest('[inert]'),'Parent dialog is inert during nested dialog');key('Escape');assert(childEscaped===1&&escaped===0,'Escape only reaches top dialog');
+  cleanups.pop()();assert(document.activeElement===last,'Nested close restores parent origin');assert(!parent.closest('[inert]'),'Parent becomes interactive');
+  key('Escape');assert(escaped===1,'Parent Escape runs once');cleanups.pop()();assert(document.activeElement===origin,'Final close returns focus');assert(!origin.inert,'Background restored');assert(scene.querySelector('#preinert').inert,'Preexisting inert value preserved');
+  for(let i=0;i<10;i++){const done=activateDialogFocus(parent,()=>{},origin);done();}assert(!origin.inert,'Repeated opens leave no inert state');
+  const empty=document.createElement('section');scene.append(empty);const done=activateDialogFocus(empty,()=>{},origin);assert(document.activeElement===empty,'Empty dialog is focusable');key('Tab');assert(document.activeElement===empty,'Empty dialog contains Tab');done();empty.remove();
+  output.textContent='PASS: focus entry, forward/reverse wrap, hidden/disabled filtering, nested Escape, parent/background restoration, preexisting inert, 10 repeated opens, empty dialog.';
+ } catch(error) { output.textContent='FAIL: '+error.message; }
+ finally { for(const cleanup of cleanups.reverse())cleanup();scene.remove();run.focus(); }
+};
+</script></body></html>

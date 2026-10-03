@@ -1,0 +1,351 @@
+{
+  "baselineMount": {
+    "renders": {
+      "HomesteadApp": 6,
+      "MoviesPage": 4
+    },
+    "reactMs": {
+      "count": 3,
+      "total": 440,
+      "p95": 403,
+      "max": 403
+    },
+    "longTasksMs": {
+      "count": 3,
+      "total": 604,
+      "p95": 470,
+      "max": 470
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 232,
+      "total": 4688,
+      "p95": 17,
+      "max": 467
+    },
+    "storageWrites": 2,
+    "domNodes": 8168,
+    "gridImages": 2000,
+    "loadedImages": 2000,
+    "artRequests": 161
+  },
+  "afterMount": {
+    "renders": {
+      "HomesteadApp": 6,
+      "MoviesPage": 4
+    },
+    "reactMs": {
+      "count": 3,
+      "total": 242,
+      "p95": 225,
+      "max": 225
+    },
+    "longTasksMs": {
+      "count": 1,
+      "total": 232,
+      "p95": 232,
+      "max": 232
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 228,
+      "total": 4037,
+      "p95": 17,
+      "max": 217
+    },
+    "storageWrites": 2,
+    "domNodes": 650,
+    "gridImages": 120,
+    "loadedImages": 24,
+    "artRequests": 24
+  },
+  "baselineSliders": {
+    "renders": {
+      "HomesteadApp": 30,
+      "MediaLibraryAppearanceStudio": 28,
+      "MoviesPage": 28
+    },
+    "reactMs": {
+      "count": 15,
+      "total": 684,
+      "p95": 146,
+      "max": 146
+    },
+    "longTasksMs": {
+      "count": 13,
+      "total": 1555,
+      "p95": 160,
+      "max": 160
+    },
+    "inputToFrameMs": {
+      "count": 10,
+      "total": 1092,
+      "p95": 194,
+      "max": 194
+    },
+    "frameMs": {
+      "count": 318,
+      "total": 6857,
+      "p95": 67,
+      "max": 234
+    },
+    "storageWrites": 4,
+    "domNodes": 8334,
+    "gridImages": 2000,
+    "loadedImages": 2000,
+    "artRequests": 161
+  },
+  "afterSliders": {
+    "renders": {
+      "MediaLibraryAppearanceStudio": 24,
+      "HomesteadApp": 4,
+      "MoviesPage": 4
+    },
+    "reactMs": {
+      "count": 12,
+      "total": 88,
+      "p95": 19,
+      "max": 19
+    },
+    "longTasksMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "inputToFrameMs": {
+      "count": 10,
+      "total": 127,
+      "p95": 17,
+      "max": 17
+    },
+    "frameMs": {
+      "count": 319,
+      "total": 5322,
+      "p95": 17,
+      "max": 17
+    },
+    "storageWrites": 1,
+    "domNodes": 816,
+    "gridImages": 120,
+    "loadedImages": 24,
+    "artRequests": 24
+  },
+  "baselineSearch": {
+    "renders": {
+      "HomesteadApp": 38,
+      "MoviesPage": 36
+    },
+    "reactMs": {
+      "count": 19,
+      "total": 3296,
+      "p95": 281,
+      "max": 281
+    },
+    "longTasksMs": {
+      "count": 19,
+      "total": 3662,
+      "p95": 299,
+      "max": 299
+    },
+    "inputToFrameMs": {
+      "count": 6,
+      "total": 1243,
+      "p95": 299,
+      "max": 299
+    },
+    "frameMs": {
+      "count": 250,
+      "total": 7658,
+      "p95": 150,
+      "max": 300
+    },
+    "storageWrites": 0,
+    "domNodes": 8326,
+    "gridImages": 2000,
+    "loadedImages": 2000,
+    "artRequests": 161
+  },
+  "afterSearch": {
+    "renders": {
+      "HomesteadApp": 28,
+      "MoviesPage": 28
+    },
+    "reactMs": {
+      "count": 14,
+      "total": 945,
+      "p95": 163,
+      "max": 163
+    },
+    "longTasksMs": {
+      "count": 6,
+      "total": 820,
+      "p95": 165,
+      "max": 165
+    },
+    "inputToFrameMs": {
+      "count": 6,
+      "total": 116,
+      "p95": 29,
+      "max": 29
+    },
+    "frameMs": {
+      "count": 221,
+      "total": 4404,
+      "p95": 17,
+      "max": 184
+    },
+    "storageWrites": 0,
+    "domNodes": 808,
+    "gridImages": 120,
+    "loadedImages": 24,
+    "artRequests": 24
+  },
+  "finalAlpha": {
+    "renders": {},
+    "reactMs": {
+      "count": 16,
+      "total": 56,
+      "p95": 10,
+      "max": 10
+    },
+    "longTasksMs": {
+      "count": 1,
+      "total": 52,
+      "p95": 52,
+      "max": 52
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 440,
+      "total": 7424,
+      "p95": 17,
+      "max": 67
+    },
+    "storageWrites": 0,
+    "domNodes": 8168,
+    "gridImages": 2000,
+    "loadedImages": 1580,
+    "artRequests": 18
+  },
+  "books": {
+    "renders": {
+      "HomesteadApp": 6,
+      "BooksPage": 6
+    },
+    "reactMs": {
+      "count": 3,
+      "total": 57,
+      "p95": 41,
+      "max": 41
+    },
+    "longTasksMs": {
+      "count": 1,
+      "total": 54,
+      "p95": 54,
+      "max": 54
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 467,
+      "total": 7841,
+      "p95": 17,
+      "max": 50
+    },
+    "storageWrites": 2,
+    "domNodes": 1366,
+    "gridImages": 120,
+    "loadedImages": 25,
+    "artRequests": 18
+  },
+  "music": {
+    "renders": {
+      "HomesteadApp": 6,
+      "MusicPage": 4
+    },
+    "reactMs": {
+      "count": 3,
+      "total": 335,
+      "p95": 185,
+      "max": 185
+    },
+    "longTasksMs": {
+      "count": 2,
+      "total": 356,
+      "p95": 201,
+      "max": 201
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 449,
+      "total": 7825,
+      "p95": 17,
+      "max": 184
+    },
+    "storageWrites": 4,
+    "domNodes": 774,
+    "gridImages": 120,
+    "loadedImages": 30,
+    "artRequests": 18
+  },
+  "youtube": {
+    "renders": {
+      "HomesteadApp": 4,
+      "YouTubePage": 8
+    },
+    "reactMs": {
+      "count": 4,
+      "total": 64,
+      "p95": 30,
+      "max": 30
+    },
+    "longTasksMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 2007,
+      "total": 33568,
+      "p95": 17,
+      "max": 34
+    },
+    "storageWrites": 2,
+    "domNodes": 1634,
+    "gridImages": 300,
+    "loadedImages": 30,
+    "artRequests": 18
+  }
+}

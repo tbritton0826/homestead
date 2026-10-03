@@ -1,3 +1,5 @@
+import { handlePosterFallback } from "../utils/image-fallback.js";
+import useDialogFocus from "../hooks/useDialogFocus.js";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -41,6 +43,7 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
   const [titleValue, setTitleValue] = useState(item?.title || "");
   const [authorValue, setAuthorValue] = useState(item?.author || "");
   const [editingExisting, setEditingExisting] = useState(Boolean(existingMatch));
+  useDialogFocus({ selector: ".book-match-v2-overlay", open: Boolean(item), onClose, canClose: status !== "saving" });
 
   async function search(nextQuery = query, nextProvider = provider) {
     const cleaned = text(nextQuery);
@@ -304,8 +307,8 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
 
         {status !== "review" && status !== "saving" && (
           <div className="book-match-v2-search">
-            <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") search(); }} placeholder="Title, author, or ISBN" autoFocus />
-            <select value={provider} onChange={(event) => { setProvider(event.target.value); search(query, event.target.value); }}>
+            <input aria-label="Title, author, or ISBN" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") search(); }} placeholder="Title, author, or ISBN" />
+            <select aria-label="Metadata provider" value={provider} onChange={(event) => { setProvider(event.target.value); search(query, event.target.value); }}>
               <option value="all">All sources</option>
               <option value="openlibrary">Open Library editions</option>
               <option value="googlebooks">Google Books editions</option>
@@ -314,13 +317,13 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
           </div>
         )}
 
-        {message && <div className={`book-match-v2-message ${status === "error" ? "error" : ""}`}>{message}</div>}
+        {message && <div role={status === "error" ? "alert" : "status"} className={`book-match-v2-message ${status === "error" ? "error" : ""}`}>{message}</div>}
 
         {(status === "results" || status === "searching" || status === "error") && (
           <div className="book-match-v2-results">
             {results.map((candidate) => (
               <article className="book-match-v2-result" key={resultKey(candidate)}>
-                <div className="book-match-v2-result-poster">{candidate.poster ? <img src={candidate.poster} alt="" /> : <span>📚</span>}</div>
+                <div className="book-match-v2-result-poster">{candidate.poster ? <img src={candidate.poster} alt="" onError={handlePosterFallback} /> : <span>📚</span>}</div>
                 <div>
                   <h3>{candidate.title}</h3>
                   {candidate.subtitle && <p>{candidate.subtitle}</p>}
@@ -347,10 +350,10 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
           <div className="book-match-v2-review">
             <aside>
               <div className="book-match-v2-selected-cover">
-                {selectedArtwork?.url ? <img src={selectedArtwork.url} alt="Selected book cover" /> : <span>No cover selected</span>}
+                {selectedArtwork?.url ? <img src={selectedArtwork.url} alt="Selected book cover" onError={handlePosterFallback} /> : <span>No cover selected</span>}
               </div>
               <label className="secondary-button book-match-v2-upload">Upload Cover<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { addUploadedArtwork(event.target.files?.[0]); event.target.value = ""; }} /></label>
-              <div className="book-match-v2-url"><input value={manualUrl} onChange={(event) => setManualUrl(event.target.value)} placeholder="Direct image or webpage URL" /><button className="secondary-button" type="button" onClick={addManualArtworkUrl}>Use URL</button></div>
+              <div className="book-match-v2-url"><input aria-label="Cover image URL" value={manualUrl} onChange={(event) => setManualUrl(event.target.value)} placeholder="Direct image or webpage URL" /><button className="secondary-button" type="button" onClick={addManualArtworkUrl}>Use URL</button></div>
             </aside>
             <main>
               <button className="book-match-v2-back" type="button" onClick={() => { setEditingExisting(false); setStatus("results"); setMessage(""); if (!results.length) search(query, provider); }}>← Change Edition / Match</button>
@@ -363,7 +366,7 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
                 {isbnFor(review) && <span>ISBN {isbnFor(review)}</span>}
                 {review.pageCount && <span>{review.pageCount} pages</span>}
               </div>
-              <div className="book-match-v2-reference-source"><input value={referenceUrl} onChange={(event) => setReferenceUrl(event.target.value)} placeholder="Official publisher or reference webpage URL" /><button className="secondary-button" type="button" onClick={enhanceFromWebpage}>Enhance from Webpage</button></div>
+              <div className="book-match-v2-reference-source"><input aria-label="Publisher or reference webpage URL" value={referenceUrl} onChange={(event) => setReferenceUrl(event.target.value)} placeholder="Official publisher or reference webpage URL" /><button className="secondary-button" type="button" onClick={enhanceFromWebpage}>Enhance from Webpage</button></div>
               <section className="book-match-v2-metadata-fields" aria-label="Book metadata to save">
                 <label>
                   <span>Title</span>
@@ -390,7 +393,7 @@ export default function BookMetadataMatchModal({ item, onClose, onSaved }) {
               <div className="book-match-v2-artwork-grid">
                 {artwork.map((option, index) => (
                   <button className={selectedArtwork === option ? "selected" : ""} type="button" key={`${option.source}-${option.coverId || option.editionId || index}`} onClick={() => setSelectedArtwork(option)}>
-                    <img src={option.url} alt="" />
+                    <img src={option.url} alt="" onError={handlePosterFallback} />
                     <span><strong>{option.exactEdition ? "Exact edition cover" : option.source || "Cover"}</strong><small>{option.label || option.isbn || "Alternate cover"}</small></span>
                   </button>
                 ))}

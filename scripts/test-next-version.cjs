@@ -55,7 +55,7 @@ async function request(method, url, { body = {}, headers = {} } = {}) {
   assert(appSource.includes("+ Add profile"));
   assert(appSource.includes("View source"));
   assert(appSource.includes("getHomesteadMetadataMatchFromIndex"));
-  assert(appSource.includes("const shouldBuildSharedCollections = true;"));
+  assert(appSource.includes('const shouldBuildSharedCollections = movieView === "collections" || Boolean(selectedSharedCollectionId) || dashboardOpen?.type === "watch-order";'));
   assert(appSource.includes('ensureGroup(seed.name, "smart", seed.description, seed.id)'));
   assert(appSource.includes("Filename Auto Match V1"));
   assert(appSource.includes("sidebarBackgroundImage"));

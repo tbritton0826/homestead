@@ -36,7 +36,11 @@ const helperEnd = server.indexOf("function decodeScheduleDataUrl", helperStart);
 assert.ok(helperStart >= 0 && helperEnd > helperStart, "Calendar source helpers are missing.");
 const context = {
   AbortSignal,
-  Date,
+  // Freeze only the fixture clock; expired NFL games are correctly filtered in production.
+  Date: class FixtureDate extends Date {
+    constructor(...args) { super(...(args.length ? args : ["2026-09-01T00:00:00Z"])); }
+    static now() { return Date.parse("2026-09-01T00:00:00Z"); }
+  },
   URL,
   crypto,
   CALENDAR_ARR_SERVICES: new Set(["radarr", "sonarr", "lidarr", "readarr"]),
@@ -78,6 +82,7 @@ assert.equal(parsed[1].allDay, true);
   assert.match(requestedUrl, /\/api\/v3\/calendar\?/);
   assert.match(arrEvents[0].title, /Example Show · S02E04 · The Episode/);
   if (process.env.HOMESTEAD_LIVE_NFL_TEST === "1") {
+    context.Date = Date;
     context.fetch = fetch;
     const liveEvents = await helpers.fetchNflCalendarEvents({ id: "calendar-source-live", type: "nfl", name: "Bills", team: "buf", color: "#355dff" });
     assert.ok(liveEvents.length >= 1, "The official NFL schedule page returned no upcoming timed games.");

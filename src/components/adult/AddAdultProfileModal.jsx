@@ -1,3 +1,4 @@
+import useDialogFocus from "../../hooks/useDialogFocus.js";
 import DisplayFieldInput from "../DisplayFieldInput.jsx";
 import { normalizeDisplayInput, formatHomesteadDate, formatHomesteadField } from "../../utils/display-format.js";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -154,6 +155,7 @@ export default function AddAdultProfileModal({ open, defaultType = "", initialMe
   const [metadataStatus, setMetadataStatus] = useState("");
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  useDialogFocus({ selector: ".adult-profile-modal", open: open, onClose, canClose: !saving });
   const [error, setError] = useState("");
   const initialCandidateFetchRef = useRef("");
 

@@ -1,0 +1,1302 @@
+{
+  "fixture": {
+    "records": {
+      "movies": 2000,
+      "tv": 1000,
+      "books": 500,
+      "music": 500,
+      "youtube": 300
+    },
+    "visibleCards": 120,
+    "search": "Sample (six native input events)",
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "profiles": {
+      "perLibrary": 30,
+      "metadataResponseDelayMs": 80
+    },
+    "baseline": "9a6ea75",
+    "notes": [
+      "Development interaction samples use React StrictMode and Profiler; production startup uses uninstrumented built JS.",
+      "Single browser samples, not a statistical performance guarantee.",
+      "Baseline script-resource reporting also included JSON names; only actual JS filenames should be compared.",
+      "The existing app restores active libraries from browser storage; fixture feature URLs explicitly select features."
+    ]
+  },
+  "before": {
+    "movies": {
+      "renders": {
+        "HomesteadApp": 40,
+        "MoviesPage": 10
+      },
+      "reactMs": {
+        "count": 21,
+        "total": 447,
+        "p95": 93,
+        "max": 153
+      },
+      "longTasksMs": {
+        "count": 5,
+        "total": 512,
+        "p95": 155,
+        "max": 155
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 1741,
+        "total": 29624,
+        "p95": 17,
+        "max": 183
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 40,
+          "total": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "storageWrites": 10,
+      "domNodes": 650,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "music": {
+      "renders": {
+        "HomesteadApp": 6,
+        "MusicPage": 4,
+        "normalizeLocalMusicSong": 2000
+      },
+      "reactMs": {
+        "count": 3,
+        "total": 263,
+        "p95": 134,
+        "max": 134
+      },
+      "longTasksMs": {
+        "count": 2,
+        "total": 287,
+        "p95": 153,
+        "max": 153
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 693,
+        "total": 11829,
+        "p95": 17,
+        "max": 167
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 6,
+          "total": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "musicDerivation": {
+          "count": 4,
+          "total": 151,
+          "p95": 44,
+          "max": 44
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "storageWrites": 4,
+      "domNodes": 774,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "musicSearch": {
+      "renders": {
+        "HomesteadApp": 30,
+        "MusicPage": 28,
+        "normalizeLocalMusicSong": 14000,
+        "buildOwnedSearchArtwork": 51600
+      },
+      "reactMs": {
+        "count": 15,
+        "total": 1491,
+        "p95": 167,
+        "max": 167
+      },
+      "longTasksMs": {
+        "count": 14,
+        "total": 1538,
+        "p95": 169,
+        "max": 169
+      },
+      "inputToFrameMs": {
+        "count": 6,
+        "total": 585,
+        "p95": 133,
+        "max": 133
+      },
+      "frameMs": {
+        "count": 1407,
+        "total": 24726,
+        "p95": 17,
+        "max": 200
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 30,
+          "total": 227,
+          "p95": 36,
+          "max": 59
+        },
+        "musicDerivation": {
+          "count": 28,
+          "total": 868,
+          "p95": 34,
+          "max": 34
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "storageWrites": 0,
+      "domNodes": 932,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "moviesSearch": {
+      "renders": {
+        "HomesteadApp": 34,
+        "MoviesPage": 28,
+        "buildOwnedSearchArtwork": 51600
+      },
+      "reactMs": {
+        "count": 17,
+        "total": 514,
+        "p95": 76,
+        "max": 76
+      },
+      "longTasksMs": {
+        "count": 3,
+        "total": 219,
+        "p95": 82,
+        "max": 82
+      },
+      "inputToFrameMs": {
+        "count": 6,
+        "total": 163,
+        "p95": 82,
+        "max": 82
+      },
+      "frameMs": {
+        "count": 2774,
+        "total": 46565,
+        "p95": 17,
+        "max": 100
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 34,
+          "total": 217,
+          "p95": 36,
+          "max": 48
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "storageWrites": 0,
+      "domNodes": 808,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "profiles": {
+      "renders": {
+        "HomesteadApp": 48,
+        "MoviesPage": 18
+      },
+      "reactMs": {
+        "count": 25,
+        "total": 586,
+        "p95": 125,
+        "max": 154
+      },
+      "longTasksMs": {
+        "count": 6,
+        "total": 601,
+        "p95": 156,
+        "max": 156
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 4501,
+        "total": 75639,
+        "p95": 17,
+        "max": 184
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 48,
+          "total": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "profileLists": {
+        "personal": {
+          "count": 30,
+          "firstMs": 6011
+        },
+        "celebrities": {
+          "count": 30,
+          "firstMs": 6011
+        },
+        "performers": {
+          "count": 30,
+          "firstMs": 6011
+        }
+      },
+      "profileRequests": 360,
+      "storageWrites": 10,
+      "domNodes": 650,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "production": {
+      "renders": {},
+      "reactMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "longTasksMs": {
+        "count": 1,
+        "total": 74,
+        "p95": 74,
+        "max": 74
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 3177,
+        "total": 53114,
+        "p95": 17,
+        "max": 67
+      },
+      "workMs": {},
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": 249,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 172
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 172
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "index-B5_nxCy1.js",
+          "encodedBytes": 4260580
+        }
+      ],
+      "storageWrites": 6,
+      "domNodes": 657,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    }
+  },
+  "after": {
+    "music": {
+      "renders": {
+        "HomesteadApp": 6,
+        "MusicPage": 4,
+        "normalizeLocalMusicSong": 1000
+      },
+      "reactMs": {
+        "count": 3,
+        "total": 215,
+        "p95": 144,
+        "max": 144
+      },
+      "longTasksMs": {
+        "count": 2,
+        "total": 241,
+        "p95": 162,
+        "max": 162
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 418,
+        "total": 7224,
+        "p95": 17,
+        "max": 150
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 6,
+          "total": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "musicDerivation": {
+          "count": 4,
+          "total": 68,
+          "p95": 67,
+          "max": 67
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": null,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 156
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 156
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "react.js?v=c4486cb4",
+          "encodedBytes": 38303
+        },
+        {
+          "url": "react-dom_client.js?v=c4486cb4",
+          "encodedBytes": 811067
+        },
+        {
+          "url": "react_jsx-dev-runtime.js?v=c4486cb4",
+          "encodedBytes": 10573
+        },
+        {
+          "url": "chunk-B4lejLz5.js?v=c4486cb4",
+          "encodedBytes": 10442
+        },
+        {
+          "url": "react-dom.js?v=c4486cb4",
+          "encodedBytes": 14630
+        },
+        {
+          "url": "scheduler-DPsYWsWX.js?v=c4486cb4",
+          "encodedBytes": 10221
+        },
+        {
+          "url": "profile-startup.js",
+          "encodedBytes": 13493
+        },
+        {
+          "url": "feature-loaders.js",
+          "encodedBytes": 1701
+        },
+        {
+          "url": "display-format.js",
+          "encodedBytes": 44850
+        },
+        {
+          "url": "video-display.js",
+          "encodedBytes": 11578
+        },
+        {
+          "url": "useLibraryScrollReset.js",
+          "encodedBytes": 4392
+        },
+        {
+          "url": "media-polish.js",
+          "encodedBytes": 6648
+        },
+        {
+          "url": "photo-appearance.js",
+          "encodedBytes": 4684
+        },
+        {
+          "url": "appearance-state.js",
+          "encodedBytes": 20462
+        },
+        {
+          "url": "image-fallback.js",
+          "encodedBytes": 1573
+        },
+        {
+          "url": "appearance-preview.js",
+          "encodedBytes": 10364
+        },
+        {
+          "url": "providers.js",
+          "encodedBytes": 44705
+        }
+      ],
+      "storageWrites": 4,
+      "domNodes": 773,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 60
+    },
+    "musicSearch": {
+      "renders": {
+        "HomesteadApp": 30,
+        "MusicPage": 16
+      },
+      "reactMs": {
+        "count": 15,
+        "total": 306,
+        "p95": 70,
+        "max": 70
+      },
+      "longTasksMs": {
+        "count": 2,
+        "total": 141,
+        "p95": 79,
+        "max": 79
+      },
+      "inputToFrameMs": {
+        "count": 6,
+        "total": 271,
+        "p95": 79,
+        "max": 79
+      },
+      "frameMs": {
+        "count": 952,
+        "total": 15983,
+        "p95": 17,
+        "max": 67
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 30,
+          "total": 3,
+          "p95": 1,
+          "max": 1
+        },
+        "musicDerivation": {
+          "count": 16,
+          "total": 1,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": null,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 156
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 156
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "react.js?v=c4486cb4",
+          "encodedBytes": 38303
+        },
+        {
+          "url": "react-dom_client.js?v=c4486cb4",
+          "encodedBytes": 811067
+        },
+        {
+          "url": "react_jsx-dev-runtime.js?v=c4486cb4",
+          "encodedBytes": 10573
+        },
+        {
+          "url": "chunk-B4lejLz5.js?v=c4486cb4",
+          "encodedBytes": 10442
+        },
+        {
+          "url": "react-dom.js?v=c4486cb4",
+          "encodedBytes": 14630
+        },
+        {
+          "url": "scheduler-DPsYWsWX.js?v=c4486cb4",
+          "encodedBytes": 10221
+        },
+        {
+          "url": "profile-startup.js",
+          "encodedBytes": 13493
+        },
+        {
+          "url": "feature-loaders.js",
+          "encodedBytes": 1701
+        },
+        {
+          "url": "display-format.js",
+          "encodedBytes": 44850
+        },
+        {
+          "url": "video-display.js",
+          "encodedBytes": 11578
+        },
+        {
+          "url": "useLibraryScrollReset.js",
+          "encodedBytes": 4392
+        },
+        {
+          "url": "media-polish.js",
+          "encodedBytes": 6648
+        },
+        {
+          "url": "photo-appearance.js",
+          "encodedBytes": 4684
+        },
+        {
+          "url": "appearance-state.js",
+          "encodedBytes": 20462
+        },
+        {
+          "url": "image-fallback.js",
+          "encodedBytes": 1573
+        },
+        {
+          "url": "appearance-preview.js",
+          "encodedBytes": 10364
+        },
+        {
+          "url": "providers.js",
+          "encodedBytes": 44705
+        }
+      ],
+      "storageWrites": 0,
+      "domNodes": 931,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 76
+    },
+    "moviesSearch": {
+      "renders": {
+        "HomesteadApp": 30,
+        "MoviesPage": 16
+      },
+      "reactMs": {
+        "count": 15,
+        "total": 217,
+        "p95": 88,
+        "max": 88
+      },
+      "longTasksMs": {
+        "count": 1,
+        "total": 93,
+        "p95": 93,
+        "max": 93
+      },
+      "inputToFrameMs": {
+        "count": 6,
+        "total": 200,
+        "p95": 93,
+        "max": 93
+      },
+      "frameMs": {
+        "count": 1004,
+        "total": 16834,
+        "p95": 17,
+        "max": 83
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 30,
+          "total": 2,
+          "p95": 0,
+          "max": 1
+        }
+      },
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": null,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 156
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 156
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "react.js?v=c4486cb4",
+          "encodedBytes": 38303
+        },
+        {
+          "url": "react-dom_client.js?v=c4486cb4",
+          "encodedBytes": 811067
+        },
+        {
+          "url": "react_jsx-dev-runtime.js?v=c4486cb4",
+          "encodedBytes": 10573
+        },
+        {
+          "url": "chunk-B4lejLz5.js?v=c4486cb4",
+          "encodedBytes": 10442
+        },
+        {
+          "url": "react-dom.js?v=c4486cb4",
+          "encodedBytes": 14630
+        },
+        {
+          "url": "scheduler-DPsYWsWX.js?v=c4486cb4",
+          "encodedBytes": 10221
+        },
+        {
+          "url": "profile-startup.js",
+          "encodedBytes": 13493
+        },
+        {
+          "url": "feature-loaders.js",
+          "encodedBytes": 1701
+        },
+        {
+          "url": "display-format.js",
+          "encodedBytes": 44850
+        },
+        {
+          "url": "video-display.js",
+          "encodedBytes": 11578
+        },
+        {
+          "url": "useLibraryScrollReset.js",
+          "encodedBytes": 4392
+        },
+        {
+          "url": "media-polish.js",
+          "encodedBytes": 6648
+        },
+        {
+          "url": "photo-appearance.js",
+          "encodedBytes": 4684
+        },
+        {
+          "url": "appearance-state.js",
+          "encodedBytes": 20462
+        },
+        {
+          "url": "image-fallback.js",
+          "encodedBytes": 1573
+        },
+        {
+          "url": "appearance-preview.js",
+          "encodedBytes": 10364
+        },
+        {
+          "url": "providers.js",
+          "encodedBytes": 44705
+        }
+      ],
+      "storageWrites": 0,
+      "domNodes": 807,
+      "gridImages": 120,
+      "loadedImages": 31,
+      "artRequests": 76
+    },
+    "profiles": {
+      "renders": {
+        "HomesteadApp": 38,
+        "MoviesPage": 16
+      },
+      "reactMs": {
+        "count": 20,
+        "total": 446,
+        "p95": 133,
+        "max": 133
+      },
+      "longTasksMs": {
+        "count": 5,
+        "total": 403,
+        "p95": 134,
+        "max": 134
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 4193,
+        "total": 70361,
+        "p95": 17,
+        "max": 150
+      },
+      "workMs": {
+        "searchCorpus": {
+          "count": 38,
+          "total": 0,
+          "p95": 0,
+          "max": 0
+        }
+      },
+      "profileLists": {
+        "personal": {
+          "count": 30,
+          "firstMs": 423
+        },
+        "celebrities": {
+          "count": 30,
+          "firstMs": 423
+        },
+        "performers": {
+          "count": 30,
+          "firstMs": 423
+        },
+        "personalEnriched": {
+          "count": 30,
+          "firstMs": 1616
+        },
+        "celebritiesEnriched": {
+          "count": 30,
+          "firstMs": 2556
+        },
+        "performersEnriched": {
+          "count": 30,
+          "firstMs": 3490
+        }
+      },
+      "profileRequests": 180,
+      "gridFirstMs": 596,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 428
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 428
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "react.js?v=c4486cb4",
+          "encodedBytes": 38303
+        },
+        {
+          "url": "react-dom_client.js?v=c4486cb4",
+          "encodedBytes": 811067
+        },
+        {
+          "url": "react_jsx-dev-runtime.js?v=c4486cb4",
+          "encodedBytes": 10573
+        },
+        {
+          "url": "chunk-B4lejLz5.js?v=c4486cb4",
+          "encodedBytes": 10442
+        },
+        {
+          "url": "react-dom.js?v=c4486cb4",
+          "encodedBytes": 14630
+        },
+        {
+          "url": "scheduler-DPsYWsWX.js?v=c4486cb4",
+          "encodedBytes": 10221
+        },
+        {
+          "url": "profile-startup.js",
+          "encodedBytes": 14705
+        },
+        {
+          "url": "feature-loaders.js",
+          "encodedBytes": 1701
+        },
+        {
+          "url": "display-format.js",
+          "encodedBytes": 44850
+        },
+        {
+          "url": "video-display.js",
+          "encodedBytes": 11578
+        },
+        {
+          "url": "useLibraryScrollReset.js",
+          "encodedBytes": 4392
+        },
+        {
+          "url": "photo-appearance.js",
+          "encodedBytes": 4684
+        },
+        {
+          "url": "media-polish.js",
+          "encodedBytes": 6648
+        },
+        {
+          "url": "appearance-state.js",
+          "encodedBytes": 20462
+        },
+        {
+          "url": "appearance-preview.js",
+          "encodedBytes": 10364
+        },
+        {
+          "url": "image-fallback.js",
+          "encodedBytes": 1573
+        },
+        {
+          "url": "providers.js",
+          "encodedBytes": 44705
+        }
+      ],
+      "storageWrites": 10,
+      "domNodes": 660,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "production": {
+      "renders": {},
+      "reactMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "longTasksMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 7370,
+        "total": 123023,
+        "p95": 17,
+        "max": 67
+      },
+      "workMs": {},
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": 157,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 112
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 112
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "chunk-aKtaBQYM.js",
+          "encodedBytes": 1084
+        },
+        {
+          "url": "index-BkIILXBU.js",
+          "encodedBytes": 1740054
+        }
+      ],
+      "storageWrites": 6,
+      "domNodes": 657,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    }
+  },
+  "originalProductionSamples": {
+    "before": {
+      "renders": {},
+      "reactMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "longTasksMs": {
+        "count": 2,
+        "total": 139,
+        "p95": 83,
+        "max": 83
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 7788,
+        "total": 130119,
+        "p95": 17,
+        "max": 83
+      },
+      "workMs": {},
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": 289,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 192
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 192
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 4281
+        },
+        {
+          "url": "index-B5_nxCy1.js",
+          "encodedBytes": 4260580
+        },
+        {
+          "url": "youtube-index.json?v=1791061043608",
+          "encodedBytes": 34386
+        },
+        {
+          "url": "media-index.json?v=1791061043608",
+          "encodedBytes": 2449212
+        }
+      ],
+      "storageWrites": 6,
+      "domNodes": 646,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "after": {
+      "renders": {},
+      "reactMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "longTasksMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "inputToFrameMs": {
+        "count": 0,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "frameMs": {
+        "count": 1436,
+        "total": 24014,
+        "p95": 17,
+        "max": 67
+      },
+      "workMs": {},
+      "profileLists": {},
+      "profileRequests": 0,
+      "gridFirstMs": 144,
+      "paint": [
+        {
+          "name": "first-paint",
+          "ms": 64
+        },
+        {
+          "name": "first-contentful-paint",
+          "ms": 64
+        }
+      ],
+      "scripts": [
+        {
+          "url": "pwa-register.js",
+          "encodedBytes": 289
+        },
+        {
+          "url": "chunk-aKtaBQYM.js",
+          "encodedBytes": 1084
+        },
+        {
+          "url": "index-C0QoCDKB.js",
+          "encodedBytes": 1740000
+        }
+      ],
+      "storageWrites": 6,
+      "domNodes": 657,
+      "gridImages": 120,
+      "loadedImages": 30,
+      "artRequests": 30
+    },
+    "note": "Initial baseline copy omitted the unchanged public PWA script; the primary production comparison below repeats both builds with matching public assets and configuration."
+  },
+  "intermediateProfileMeasurement": {
+    "renders": {
+      "HomesteadApp": 40,
+      "MoviesPage": 22
+    },
+    "reactMs": {
+      "count": 21,
+      "total": 1049,
+      "p95": 224,
+      "max": 297
+    },
+    "longTasksMs": {
+      "count": 6,
+      "total": 966,
+      "p95": 299,
+      "max": 299
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 1630,
+      "total": 28061,
+      "p95": 17,
+      "max": 284
+    },
+    "workMs": {
+      "searchCorpus": {
+        "count": 40,
+        "total": 0,
+        "p95": 0,
+        "max": 0
+      }
+    },
+    "profileLists": {
+      "personal": {
+        "count": 30,
+        "firstMs": 124
+      },
+      "celebrities": {
+        "count": 30,
+        "firstMs": 124
+      },
+      "performers": {
+        "count": 30,
+        "firstMs": 124
+      },
+      "personalEnriched": {
+        "count": 30,
+        "firstMs": 1831
+      },
+      "celebritiesEnriched": {
+        "count": 30,
+        "firstMs": 2969
+      },
+      "performersEnriched": {
+        "count": 30,
+        "firstMs": 3603
+      }
+    },
+    "profileRequests": 180,
+    "gridFirstMs": 456,
+    "paint": [
+      {
+        "name": "first-paint",
+        "ms": 164
+      },
+      {
+        "name": "first-contentful-paint",
+        "ms": 164
+      }
+    ],
+    "scripts": [
+      {
+        "url": "pwa-register.js",
+        "encodedBytes": 289
+      },
+      {
+        "url": "react.js?v=c4486cb4",
+        "encodedBytes": 38303
+      },
+      {
+        "url": "react-dom_client.js?v=c4486cb4",
+        "encodedBytes": 811067
+      },
+      {
+        "url": "react_jsx-dev-runtime.js?v=c4486cb4",
+        "encodedBytes": 10573
+      },
+      {
+        "url": "chunk-B4lejLz5.js?v=c4486cb4",
+        "encodedBytes": 10442
+      },
+      {
+        "url": "react-dom.js?v=c4486cb4",
+        "encodedBytes": 14630
+      },
+      {
+        "url": "scheduler-DPsYWsWX.js?v=c4486cb4",
+        "encodedBytes": 10221
+      },
+      {
+        "url": "profile-startup.js",
+        "encodedBytes": 13986
+      },
+      {
+        "url": "feature-loaders.js",
+        "encodedBytes": 1701
+      },
+      {
+        "url": "display-format.js",
+        "encodedBytes": 44850
+      },
+      {
+        "url": "video-display.js",
+        "encodedBytes": 11578
+      },
+      {
+        "url": "useLibraryScrollReset.js",
+        "encodedBytes": 4392
+      },
+      {
+        "url": "media-polish.js",
+        "encodedBytes": 6648
+      },
+      {
+        "url": "photo-appearance.js",
+        "encodedBytes": 4684
+      },
+      {
+        "url": "appearance-state.js",
+        "encodedBytes": 20462
+      },
+      {
+        "url": "appearance-preview.js",
+        "encodedBytes": 10364
+      },
+      {
+        "url": "image-fallback.js",
+        "encodedBytes": 1573
+      },
+      {
+        "url": "providers.js",
+        "encodedBytes": 44705
+      }
+    ],
+    "storageWrites": 10,
+    "domNodes": 660,
+    "gridImages": 120,
+    "loadedImages": 30,
+    "artRequests": 30
+  },
+  "previousMatchedProductionMeasurement": {
+    "renders": {},
+    "reactMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "longTasksMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "inputToFrameMs": {
+      "count": 0,
+      "total": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "frameMs": {
+      "count": 2543,
+      "total": 42529,
+      "p95": 17,
+      "max": 67
+    },
+    "workMs": {},
+    "profileLists": {},
+    "profileRequests": 0,
+    "gridFirstMs": 235,
+    "paint": [
+      {
+        "name": "first-paint",
+        "ms": 116
+      },
+      {
+        "name": "first-contentful-paint",
+        "ms": 116
+      }
+    ],
+    "scripts": [
+      {
+        "url": "pwa-register.js",
+        "encodedBytes": 289
+      },
+      {
+        "url": "index-C0QoCDKB.js",
+        "encodedBytes": 1740000
+      },
+      {
+        "url": "chunk-aKtaBQYM.js",
+        "encodedBytes": 1084
+      }
+    ],
+    "storageWrites": 6,
+    "domNodes": 657,
+    "gridImages": 120,
+    "loadedImages": 30,
+    "artRequests": 30
+  }
+}

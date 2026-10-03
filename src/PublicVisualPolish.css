@@ -1,0 +1,186 @@
+/* Public V1: scoped visual corrections, using the existing appearance tokens. */
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 10px 14px;
+  border: 1px solid rgba(155, 141, 255, .4);
+  border-radius: 14px;
+  background: var(--accent, #355dff);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 150ms ease, box-shadow 150ms ease;
+}
+.primary-button:disabled { opacity: .55; cursor: default; }
+.primary-button:focus-visible,
+.app-ribbon-actions > button:focus-visible,
+.media-appearance-scope-toggle > button:focus-visible {
+  outline: 2px solid #a7b2ff;
+  outline-offset: 3px;
+}
+.library-header-card.app-ribbon-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.app-ribbon-card .app-ribbon-title { flex: 1 1 140px; min-width: 0; }
+.app-ribbon-title h2 { overflow-wrap: anywhere; text-wrap: balance; }
+.app-ribbon-card .app-ribbon-stats {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  width: auto;
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  scrollbar-width: thin;
+}
+.app-ribbon-stats > span { flex: 0 0 auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.app-ribbon-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; max-width: 100%; flex-wrap: wrap; }
+.app-ribbon-actions > button { flex-shrink: 0; }
+.app-ribbon-actions .app-ribbon-appearance-button { order: 80; }
+.app-ribbon-card > .collection-app-hero-body { flex-basis: 100%; }
+
+/* Scope scrollers to navigation, leaving form and Family launch tiles alone. */
+:is(.library-page, .music-library-page, .books-library-page, .youtube-page, .youtube-detail-page, .family-page, .settings-page) > .tabs,
+:is(.ai-v1-page, .inventory-v1-page, .cloud-v1-page) > .library-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+:is(.library-page, .music-library-page, .books-library-page, .youtube-page, .youtube-detail-page, .family-page, .settings-page) > .tabs > button,
+:is(.ai-v1-page, .inventory-v1-page, .cloud-v1-page) > .library-tabs > button,
+.music-library-tabs > label {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 40px;
+  white-space: nowrap;
+}
+.music-library-tabs > label { display: inline-flex; align-items: center; gap: 8px; }
+.music-library-tabs select { border: 1px solid #ffffff24; border-radius: 10px; padding: 8px; color: inherit; background: var(--media-tab-color, #171b24); }
+:is(.youtube-meta-row, .book-detail-meta, .tv-detail-meta) {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-block: 3px;
+}
+:is(.youtube-meta-row, .book-detail-meta, .tv-detail-meta) > span { flex-shrink: 0; white-space: nowrap; line-height: 1.3; font-variant-numeric: tabular-nums; }
+
+/* Grid width is a maximum, never a minimum that can overflow its container. */
+.public-media-custom-appearance :is(.movie-library-grid, .tv-grid, .music-grid, .book-grid, .youtube-grid, .creator-grid, .album-grid) {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(0, var(--media-render-poster-width, var(--media-grid-poster-width, 190px))));
+  gap: var(--media-grid-gap, 18px);
+  align-items: start;
+}
+.public-media-custom-appearance :is(.movie-library-grid, .tv-grid, .music-grid, .book-grid, .youtube-grid, .creator-grid, .album-grid) > :is(.tv-card, .simple-tv-card, .book-card, .music-card, .youtube-creator-card, .youtube-series-card, .person-card, .music-artist-card) {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 0;
+}
+.public-media-custom-appearance :is(.movie-library-grid, .tv-grid, .music-grid, .book-grid, .youtube-grid, .creator-grid, .album-grid) > :is(.tv-card, .simple-tv-card, .book-card, .music-card, .youtube-creator-card, .person-card, .music-artist-card) > img {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: var(--media-poster-ratio, 2 / 3);
+  object-fit: var(--photo-poster-fit, cover);
+}
+.public-media-custom-appearance :is(.movie-library-grid, .tv-grid, .music-grid, .book-grid, .youtube-grid, .creator-grid, .album-grid) h3 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.public-media-custom-appearance .cloud-v1-file { background: color-mix(in srgb, var(--media-card-color, #151922) calc(var(--media-card-opacity, .86) * 100%), transparent); backdrop-filter: blur(var(--media-card-blur, 8px)); }
+.cloud-v1-file-grid > .next-v1-empty { grid-column: 1 / -1; margin-top: 0; }
+.ai-v1-page .ai-tool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 16px; }
+.ai-v1-page .ai-tool-grid > .panel { margin-top: 0; }
+
+/* Hero text flows with its content instead of depending on absolute artwork size. */
+.music-artist-hero { height: auto; min-height: 380px; }
+.music-artist-hero > img { position: absolute; inset: 0; }
+.music-artist-hero .family-hero-content { position: relative; left: auto; bottom: auto; width: 100%; max-width: none; padding: 120px 32px 32px; }
+.music-detail-content { display: flex; align-items: center; gap: 28px; }
+.music-detail-content > div { flex: 1; min-width: 0; }
+.music-detail-content .music-detail-artwork { width: 220px; height: 220px; object-fit: cover; border-radius: 16px; flex-shrink: 0; }
+.music-detail-content h1 { overflow-wrap: anywhere; text-wrap: balance; }
+.music-detail-content p { margin-block: 8px; line-height: 1.5; }
+.youtube-creator-content > div { min-width: 0; flex: 1; }
+.youtube-creator-poster { flex-shrink: 0; }
+.youtube-creator-content h1 { overflow-wrap: anywhere; text-wrap: balance; }
+.media-appearance-card { width: min(980px, 100%); max-height: min(88dvh, 920px); overscroll-behavior: contain; }
+.media-appearance-scope-toggle { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.media-appearance-scope-toggle > button { border: 1px solid #ffffff24; border-radius: 12px; padding: 10px 14px; min-height: 40px; color: inherit; background: #ffffff09; cursor: pointer; }
+.media-appearance-scope-toggle > button.active { border-color: #99a6ff; background: #6676ff30; }
+.media-appearance-scope-toggle > button:disabled { opacity: .5; cursor: default; }
+.media-appearance-card > header > div { min-width: 0; }
+.media-appearance-card > header > button { flex-shrink: 0; }
+.media-appearance-card > footer { flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .app-ribbon-card .app-ribbon-title { flex: 1 1 160px; }
+  .app-ribbon-card .app-ribbon-stats { order: 1; flex: 1 0 100%; max-width: 100%; margin-left: 0; }
+  .app-ribbon-actions { order: 2; flex-basis: 100%; }
+  .app-ribbon-actions > .app-ribbon-global-add { margin-left: auto; }
+}
+@media (max-width: 760px) {
+  .public-media-custom-appearance { --media-render-poster-width: min(var(--media-grid-poster-width, 190px), calc((100vw - 56px - var(--media-grid-gap, 18px)) / 2)); }
+  .books-library-page .book-grid { padding-right: 0; }
+  .music-detail-content { flex-direction: column; align-items: flex-start; }
+  .music-artist-hero .family-hero-content { padding: 84px 18px 24px; }
+  .music-detail-content .music-detail-artwork { width: min(160px, 100%); height: auto; aspect-ratio: 1; }
+  .music-detail-content h1 { font-size: clamp(1.7rem, 7vw, 2.4rem); }
+  .youtube-creator-hero { min-height: 0; }
+  .youtube-creator-content { display: grid; grid-template-columns: 100px minmax(0, 1fr); align-items: start; gap: 14px; padding: 84px 18px 24px; }
+  .youtube-creator-poster { width: 100px; height: 100px; border-radius: 16px; }
+  .youtube-creator-content h1 { font-size: 1.8rem; }
+  .tv-show-hero-content { align-items: flex-start; }
+  .media-appearance-overlay { padding: 12px; }
+  .media-appearance-card { padding: 16px; max-height: calc(100dvh - 24px); }
+  .media-appearance-grid { grid-template-columns: minmax(0, 1fr); }
+  .media-appearance-grid label { min-width: 0; }
+  :is(.library-page, .youtube-detail-page) { padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+}
+/* Book grids use an alpha-navigation wrapper; only the direct poster is sized. */
+.public-media-custom-appearance .book-grid > div > .book-card,
+.public-media-custom-appearance .book-grid > .book-card { width: 100%; min-width: 0; max-width: none; }
+.public-media-custom-appearance .book-grid > div > .book-card > img,
+.public-media-custom-appearance .book-grid > .book-card > img {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: var(--media-poster-ratio, 2 / 3);
+  object-fit: var(--photo-poster-fit, cover);
+}
+.public-media-custom-appearance :is(.inventory-v1-card, .inventory-tcg-poster-card, .tcg-binder-card, .tcg-deck-card) {
+  background-color: color-mix(in srgb, var(--media-card-color, #151922) calc(var(--media-card-opacity, .86) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--media-card-blur, 8px));
+  backdrop-filter: blur(var(--media-card-blur, 8px));
+}
+
+/* Keep missing Family artwork from reserving an empty hero. */
+.family-page .family-hero:not(:has(> img[src]:not([style*="visibility: hidden"]))) { height: auto; min-height: 0; }
+.family-page .family-hero:not(:has(> img[src]:not([style*="visibility: hidden"]))) > .family-hero-content { position: relative; left: auto; bottom: auto; width: 100%; padding: 24px; }
+
+.family-page .family-hero > :is(img:not([src]), img[style*="visibility: hidden"]) { display: none; }

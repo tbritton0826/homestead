@@ -1,3 +1,4 @@
+import useDialogFocus from "../hooks/useDialogFocus.js";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -9,6 +10,7 @@ export default function BookSeriesAppearanceEditor({ series, appearance = {}, on
   const [position, setPosition] = useState(appearance.position || "center");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  useDialogFocus({ selector: ".book-series-appearance-overlay", open: true, onClose, canClose: !busy });
 
   useEffect(() => {
     setBanner(appearance.banner || "");

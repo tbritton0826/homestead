@@ -3,9 +3,9 @@ const path = require("path");
 const vm = require("vm");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "src", "App.jsx"), "utf8");
-const css = fs.readFileSync(path.join(root, "src", "App.css"), "utf8");
-const server = fs.readFileSync(path.join(root, "server.cjs"), "utf8");
+const app = fs.readFileSync(path.join(root, "src", "App.jsx"), "utf8").replace(/\r\n/g, "\n");
+const css = fs.readFileSync(path.join(root, "src", "App.css"), "utf8").replace(/\r\n/g, "\n");
+const server = fs.readFileSync(path.join(root, "server.cjs"), "utf8").replace(/\r\n/g, "\n");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
 function requireText(source, text, label) {
