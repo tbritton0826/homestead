@@ -1,3 +1,4 @@
+import { formatHomesteadDateTime } from '../../utils/display-format.js';
 import { useEffect, useMemo, useState } from "react";
 
 function emptyDraft() {
@@ -472,7 +473,7 @@ function editSource(source) {
               <p>
                 {source.channelCount || 0} channels
 				{source.epgProgramCount ? ` · ${source.epgProgramCount} guide programs` : ""}
-                {source.lastScan ? ` · Last scanned ${new Date(source.lastScan).toLocaleString()}` : " · Not scanned yet"}
+                {source.lastScan ? ` · Last scanned ${formatHomesteadDateTime(source.lastScan)}` : " · Not scanned yet"}
               </p>
 
               <p className="small-muted">{source.url}</p>

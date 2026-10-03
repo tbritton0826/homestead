@@ -20,6 +20,11 @@ function getYearFromDate(value) {
   return /^\d{4}$/.test(year) ? year : null;
 }
 
+function musicBrainzReleaseGroupCoverUrl(value = "") {
+  const match = String(value || "").trim().match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
+  return match ? `https://coverartarchive.org/release-group/${match[0]}/front-500` : "";
+}
+
 function normalizeMusicBrainzArtist(artist = {}) {
   const title = artist.name || artist.artist || "Untitled Artist";
   const musicbrainzId = artist.id || artist.mbid || artist.musicbrainzId || null;
@@ -89,7 +94,16 @@ function normalizeMusicBrainzRecording(recording = {}) {
 }
 
 async function fetchJson(url) {
+  // Serialize this provider's metadata requests, including bulk Auto Match.
+  const previous = musicRequestTail;
+  let release;
+  musicRequestTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, nextMusicRequestAt - Date.now())));
+  nextMusicRequestAt = Date.now() + 1100;
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
     headers: {
       Accept: "application/json",
       "User-Agent": "Homestead/1.0 (metadata-fetch; self-hosted)",
@@ -110,6 +124,24 @@ async function fetchJson(url) {
   }
 
   return data;
+  } finally { release(); }
+}
+
+let musicRequestTail = Promise.resolve();
+let nextMusicRequestAt = 0;
+
+async function searchMusicBrainzAlbums(query, options = {}) {
+  const data = await fetchJson(`https://musicbrainz.org/ws/2/release-group?query=${strictEncodeQuery(query)}&fmt=json&limit=${Math.min(100, Number(options.limit) || 12)}`);
+  return (data?.["release-groups"] || []).map((album) => {
+    const poster = musicBrainzReleaseGroupCoverUrl(album.id);
+    return {
+      id: album.id, providerId: album.id, provider: "musicbrainz", mediaType: "release-group",
+      title: album.title, name: album.title, year: getYearFromDate(album["first-release-date"]),
+      releaseDate: album["first-release-date"] || "", description: album.disambiguation || "",
+      artists: (album["artist-credit"] || []).map((credit) => credit.artist?.name || credit.name).filter(Boolean),
+      identifiers: { musicbrainzId: album.id }, poster, image: poster, cover: poster, raw: album,
+    };
+  });
 }
 
 async function searchMusicBrainzArtists(query, options = {}) {
@@ -174,6 +206,8 @@ async function searchMusicMetadata(query, options = {}) {
     return searchMusicBrainzRecordings(query, { ...options, limit });
   }
 
+  if (type === "album" || type === "release-group") return searchMusicBrainzAlbums(query, options);
+
   if (type === "all") {
     const settled = await Promise.allSettled([
       searchMusicBrainzArtists(query, { ...options, limit }),
@@ -196,4 +230,6 @@ module.exports = {
   searchMusicBrainzRecordings,
   normalizeMusicBrainzArtist,
   normalizeMusicBrainzRecording,
+  musicBrainzReleaseGroupCoverUrl,
+  searchMusicBrainzAlbums,
 };

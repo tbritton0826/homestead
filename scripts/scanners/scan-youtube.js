@@ -8,7 +8,7 @@ const DATA_ROOT = path.join(PROJECT_ROOT, "data");
 const OUTPUT_FILE = path.join(DATA_ROOT, "youtube-index.json");
 
 const VIDEO_EXTS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"];
-const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp"];
+const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"];
 const LOCAL_METADATA_NAMES = ["metadata.json", "info.json", "channel.json", "playlist.json"];
 
 function ensureFolder(folderPath) {
@@ -133,24 +133,43 @@ function detectSeriesAndSeason(filePath, creatorId) {
   const creatorRoot = path.join(YOUTUBE_CREATORS_ROOT, creatorId);
   const relative = path.relative(creatorRoot, filePath);
   const parts = relative.split(path.sep).filter(Boolean);
+  const folders = parts.slice(0, -1);
 
   let series = "uploads";
   let season = "season-1";
+  let seasonFolder = "";
 
-  if (parts.length >= 2) {
-    series = parts[0];
+  if (folders.length >= 1) {
+    series = folders[0];
   }
 
-  for (const part of parts) {
+  for (const part of folders) {
     const lower = part.toLowerCase();
-    const seasonMatch = lower.match(/season[\s_-]?(\d+)/i) || lower.match(/^s(\d{1,2})$/i);
+    const seasonMatch = lower.match(/season[\s._-]?(\d+)/i) || lower.match(/^s[\s._-]?(\d{1,2})$/i);
 
     if (seasonMatch) {
       season = `season-${Number(seasonMatch[1])}`;
+      seasonFolder = part;
     }
   }
 
-  return { series: slugify(series), season };
+  return {
+    series: slugify(series),
+    season,
+    seriesFolder: folders[0] || "",
+    seasonFolder,
+    folderRelativePath: folders.join("/"),
+    folderSeason: seasonFolder ? `Season ${Number(season.replace("season-", ""))}` : "",
+  };
+}
+
+function parseEpisodeNumber(value = "") {
+  const text = String(value || "");
+  const match = text.match(/(?:^|\s)#\s*(\d{1,4})\b/i)
+    || text.match(/\b(?:episode|ep)\s*[#._-]?\s*(\d{1,4})\b/i)
+    || text.match(/\bE\s*(\d{1,4})\b/i)
+    || text.match(/\bS\d{1,3}[\s._-]*E(\d{1,4})\b/i);
+  return match ? Number(match[1]) : null;
 }
 
 function findThumbnail(filePath, videoInfo = {}) {
@@ -162,7 +181,8 @@ function findThumbnail(filePath, videoInfo = {}) {
 }
 
 function parseVideo(filePath, creatorId) {
-  const { series, season } = detectSeriesAndSeason(filePath, creatorId);
+  const folderIdentity = detectSeriesAndSeason(filePath, creatorId);
+  const { series, season } = folderIdentity;
   const metadataFile = findVideoMetadataFile(filePath);
   const info = readJson(metadataFile) || {};
   const localThumb = findThumbnail(filePath, info);
@@ -177,6 +197,11 @@ function parseVideo(filePath, creatorId) {
     creatorName: info.channel || info.uploader || info.channel_title || creatorId,
     series,
     season,
+    seriesFolder: folderIdentity.seriesFolder,
+    seasonFolder: folderIdentity.seasonFolder,
+    folderRelativePath: folderIdentity.folderRelativePath,
+    folderSeason: folderIdentity.folderSeason,
+    episodeNumber: parseEpisodeNumber(title),
     path: toPublicMediaPath(filePath),
     thumb: localThumb ? toPublicMediaPath(localThumb) : getBestThumbnailFromInfo(info),
     thumbnail: localThumb ? toPublicMediaPath(localThumb) : getBestThumbnailFromInfo(info),
@@ -231,18 +256,18 @@ function addCreator(index, creatorId, metadata, videos) {
   const creatorDir = path.join(YOUTUBE_CREATORS_ROOT, creatorId);
 
   const posterFile = findFirstExisting(creatorDir, [
-    "poster.jpg", "poster.jpeg", "poster.png", "poster.webp",
-    "folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
-    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
-    "avatar.jpg", "avatar.jpeg", "avatar.png", "avatar.webp",
-    "channel.jpg", "channel.jpeg", "channel.png", "channel.webp",
+    "poster.jpg", "poster.jpeg", "poster.png", "poster.webp", "poster.heic", "poster.heif",
+    "folder.jpg", "folder.jpeg", "folder.png", "folder.webp", "folder.heic", "folder.heif",
+    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "cover.heic", "cover.heif",
+    "avatar.jpg", "avatar.jpeg", "avatar.png", "avatar.webp", "avatar.heic", "avatar.heif",
+    "channel.jpg", "channel.jpeg", "channel.png", "channel.webp", "channel.heic", "channel.heif",
   ]);
 
   const bannerFile = findFirstExisting(creatorDir, [
-    "banner.jpg", "banner.jpeg", "banner.png", "banner.webp",
-    "backdrop.jpg", "backdrop.jpeg", "backdrop.png", "backdrop.webp",
-    "fanart.jpg", "fanart.jpeg", "fanart.png", "fanart.webp",
-    "landscape.jpg", "landscape.jpeg", "landscape.png", "landscape.webp",
+    "banner.jpg", "banner.jpeg", "banner.png", "banner.webp", "banner.heic", "banner.heif",
+    "backdrop.jpg", "backdrop.jpeg", "backdrop.png", "backdrop.webp", "backdrop.heic", "backdrop.heif",
+    "fanart.jpg", "fanart.jpeg", "fanart.png", "fanart.webp", "fanart.heic", "fanart.heif",
+    "landscape.jpg", "landscape.jpeg", "landscape.png", "landscape.webp", "landscape.heic", "landscape.heif",
   ]);
 
   index.creators[creatorId] = {
@@ -281,12 +306,14 @@ function addVideoToSeries(index, video) {
 }
 
 function naturalSortVideos(videos = []) {
-  return videos.sort((a, b) =>
-    String(a.title || a.filename).localeCompare(String(b.title || b.filename), undefined, {
+  return videos.sort((a, b) => {
+    const aNumber = Number.isFinite(Number(a.episodeNumber)) ? Number(a.episodeNumber) : Number.MAX_SAFE_INTEGER;
+    const bNumber = Number.isFinite(Number(b.episodeNumber)) ? Number(b.episodeNumber) : Number.MAX_SAFE_INTEGER;
+    return aNumber - bNumber || String(a.title || a.filename).localeCompare(String(b.title || b.filename), undefined, {
       numeric: true,
       sensitivity: "base",
-    })
-  );
+    });
+  });
 }
 
 function scanYouTube() {

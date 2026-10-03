@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 
 const videoExtensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"];
-const imageExtensions = [".jpg", ".jpeg", ".png", ".webp", ".gif"];
+const imageExtensions = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"];
 
 export function scanLocalFiles(performerDir) {
   const files = walkDir(performerDir);

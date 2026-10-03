@@ -1,0 +1,30 @@
+services:
+  homestead-ai-service:
+    build: .
+    image: homestead-ai-service:0.2.0
+    container_name: homestead-ai-service
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORT: "8099"
+      AI_SHARED_SECRET: "replace-with-the-same-strong-secret-used-by-the-plugin"
+      AI_PROVIDER: "ollama"
+      AI_ALLOWED_PROVIDERS: "ollama"
+      AI_MODEL: "replace-with-an-installed-tool-capable-model"
+      AI_ALLOWED_MODELS: "replace-with-an-installed-tool-capable-model,optional-chat-only-model"
+      AI_TOOL_MODELS: "replace-with-an-installed-tool-capable-model"
+      AI_OLLAMA_URL: "http://ollama:11434"
+      AI_PROVIDER_TIMEOUT_MS: "90000"
+      AI_MAX_REQUEST_BYTES: "2097152"
+    networks:
+      - homestead-private
+
+networks:
+  homestead-private:
+    external: true

@@ -1,0 +1,40 @@
+/* Adult Home rows share one bounded, keyboard-scrollable card layout. */
+.adult-hub-page .hub-two-column-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.adult-hub-page .hub-feed-panel { min-width: 0; }
+.adult-hub-page .adult-recommendation-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; margin-top: 20px; }
+.adult-hub-page .adult-recommendation-poster-grid { display: grid; grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 154px; gap: 14px; overflow-x: auto; overflow-y: hidden; padding: 2px 2px 12px; scroll-snap-type: x proximity; overscroll-behavior-x: contain; align-items: start; }
+.adult-hub-page .adult-recommendation-poster-card { width: 154px; min-width: 0; scroll-snap-align: start; }
+.adult-hub-page .adult-recommendation-poster-art { aspect-ratio: 2 / 3; }
+.adult-hub-page .adult-recommendation-poster-main { width: 100%; }
+.adult-hub-page .adult-recommendation-poster-copy { min-width: 0; overflow-wrap: anywhere; }
+.adult-hub-page .adult-recommendation-poster-actions { flex-wrap: wrap; }
+.adult-hub-page .adult-recommendation-poster-actions button { min-height: 34px; }
+@media (max-width: 600px) { .adult-hub-page .hub-two-column-row { grid-template-columns: minmax(0, 1fr); } }
+
+.adult-video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr)); gap: 16px; align-items: start; }
+.adult-video-card { padding: 0 0 10px; overflow: hidden; min-width: 0; text-align: left; border: 1px solid #ffffff1c; border-radius: 12px; background: color-mix(in srgb, var(--media-panel-color, #171b24) calc(var(--media-panel-opacity, .8) * 100%), transparent); color: inherit; cursor: pointer; }
+.adult-video-thumb { display: block; position: relative; aspect-ratio: 16 / 9; background: #0b0e15; overflow: hidden; }
+.adult-video-thumb img, .adult-video-thumb video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.adult-video-play { position: absolute; right: 8px; bottom: 7px; background: #0b0e15c9; padding: 5px 8px; border-radius: 50%; font-size: 11px; }
+.adult-video-card > strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: .82rem; line-height: 1.35; margin: 9px 10px 6px; }
+.adult-video-pills { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 10px; }
+.adult-video-pills > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .66rem; padding: 3px 7px; border: 1px solid #ffffff20; border-radius: 999px; color: #bac6da; background: #7287b012; }
+.adult-photo-album-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; position: relative; z-index: 2; }
+
+/* The hero is one local stacking context. Artwork never escapes over content.
+   Tool dialogs are portalled to body, outside transformed/backdrop-filter panels. */
+.profile-page .profile-hero { isolation: isolate; z-index: 0 !important; }
+.profile-page .profile-hero .profile-poster-glass-wrap,
+.profile-page .profile-hero .profile-anatomy-banner-cards { z-index: 2 !important; }
+.profile-page .profile-hero .global-nav-buttons { position: relative; z-index: 3 !important; }
+.profile-page .profile-main { position: relative; z-index: 1 !important; }
+.profile-tool-portal { position: relative; z-index: 22000; color: #f7f9ff; }
+.profile-tool-portal .profile-tool-overlay { position: fixed !important; inset: 0 !important; z-index: 22000 !important; }
+.profile-tool-portal .profile-tool-overlay-card { position: relative; z-index: 1; }
+.profile-tool-portal .profile-tool-overlay-backdrop { position: absolute; inset: 0; }
+.profile-tool-portal .profile-tool-overlay-body { min-height: 0; }
+
+.display-preferences-panel .display-preference-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+.display-preferences-panel label { display: grid; gap: 6px; }
+.display-preferences-panel select { padding: 9px; background: #171c28; color: inherit; border: 1px solid #ffffff30; border-radius: 9px; }
+.display-preferences-panel footer { display: flex; align-items: center; gap: 12px; margin-top: 16px; }

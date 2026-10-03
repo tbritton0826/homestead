@@ -7,6 +7,7 @@ const ADULT_BROWSE_ONLY_SOURCE_IDS = new Set([
   "euroxxx",
   "porndude",
   "rule34",
+  "justteensporn",
 ]);
 
 const ADULT_BROWSE_ONLY_DOMAINS = new Set([
@@ -18,6 +19,7 @@ const ADULT_BROWSE_ONLY_DOMAINS = new Set([
   "euroxxx.net",
   "theporndude.com",
   "rule34.xxx",
+  "justteensporn.com",
 ]);
 
 function normalizeAdultSourceDomain(value = "") {
@@ -546,6 +548,70 @@ const DEFAULT_ADULT_SOURCES = [
     "profileOverrides": {},
     "directProfileOnly": false,
     "notes": "Performer profile directory/search source. Used for Advanced Person Search, not generic Browse Media."
+  },
+  {
+    "id": "thenude",
+    "name": "TheNude",
+    "role": "performer",
+    "category": "supplemental performer directory metadata",
+    "badges": [
+      "Metadata",
+      "Fallback",
+      "Review required"
+    ],
+    "icon": "TN",
+    "baseUrl": "https://www.thenude.com",
+    "enabled": true,
+    "supports": [
+      "performerMetadata",
+      "aliases",
+      "biography",
+      "birthplace",
+      "careerYears",
+      "measurements",
+      "hair",
+      "ethnicity",
+      "tattoos",
+      "piercings",
+      "externalLinks"
+    ],
+    "searchModes": [
+      "performer",
+      "metadata"
+    ],
+    "profileTypes": [
+      "performer"
+    ],
+    "priority": 10,
+    "requiresSession": false,
+    "status": "active",
+    "supportsFixMatch": false,
+    "supportsBulkMetadata": false,
+    "supportsArtwork": false,
+    "supportsScenes": false,
+    "supportsImport": false,
+    "fieldPriority": {
+      "aliases": 10,
+      "birthPlace": 10,
+      "careerStart": 10,
+      "careerEnd": 10,
+      "height": 10,
+      "measurements": 10,
+      "hairColor": 10,
+      "ethnicity": 10,
+      "tattoos": 10,
+      "piercings": 10
+    },
+    "supportedFilters": [
+      "contentType"
+    ],
+    "filterStrategy": "queryAppend",
+    "searchUrlTemplate": "https://www.thenude.com/index.php?page=search&action=searchModels&__form_name=navbar-search&m_aka=on&m_name={queryPlus}",
+    "providerIdKey": "thenude",
+    "providerUrlTemplate": "",
+    "profileOverrides": {},
+    "directProfileOnly": false,
+    "notes": "Supplemental performer-only source. Identity and every proposed field require review. Homestead fetches profile metadata only and never auto-imports gallery media from this provider."
   },
   {
     "id": "picsx",
@@ -3010,6 +3076,145 @@ const DEFAULT_ADULT_SOURCES = [
     "notes": "Used mainly as an external ID/reference link when available from TMDB or Wikidata."
   },
   {
+    "id": "teenidols4you",
+    "name": "Teen Idols 4 You",
+    "role": "celebrity",
+    "category": "general celebrity reference / review media",
+    "badges": [
+      "Biography",
+      "Filmography",
+      "Age review"
+    ],
+    "icon": "TI4U",
+    "baseUrl": "https://www.teenidols4you.com",
+    "enabled": true,
+    "supports": [
+      "celebrityMetadata",
+      "biography",
+      "birthday",
+      "credits",
+      "reviewMedia"
+    ],
+    "searchModes": [
+      "celebrity",
+      "metadata",
+      "all"
+    ],
+    "profileTypes": [
+      "celebrity"
+    ],
+    "priority": 6,
+    "requiresSession": false,
+    "status": "active",
+    "supportsFixMatch": true,
+    "supportsBulkMetadata": false,
+    "supportsArtwork": true,
+    "supportsScenes": false,
+    "supportsImport": true,
+    "fieldPriority": {
+      "birthday": 4,
+      "biography": 5,
+      "knownFor": 5,
+      "movieTvLinks": 5
+    },
+    "supportedFilters": [
+      "contentType"
+    ],
+    "filterStrategy": "queryAppend",
+    "searchUrlTemplate": "https://www.teenidols4you.com/Actors.html",
+    "providerIdKey": "teenidols4you",
+    "providerUrlTemplate": "",
+    "profileOverrides": {},
+    "directProfileOnly": false,
+    "notes": "General celebrity reference, not an adult-only catalog. Known under-18 media is blocked; undated or ambiguous photos require explicit review before import. Respect source usage rights."
+  },
+  {
+    "id": "celebritytall",
+    "name": "CelebrityTall",
+    "role": "celebrity",
+    "category": "estimated body metadata fallback",
+    "badges": [
+      "Fallback",
+      "Estimated",
+      "Review required"
+    ],
+    "icon": "CT",
+    "baseUrl": "https://celebritytall.com",
+    "enabled": true,
+    "supports": [
+      "height",
+      "weight",
+      "measurements",
+      "hair",
+      "eyes",
+      "shoeSize",
+      "dressSize"
+    ],
+    "searchModes": [
+      "celebrity",
+      "metadata"
+    ],
+    "profileTypes": [
+      "celebrity"
+    ],
+    "priority": 90,
+    "requiresSession": false,
+    "status": "active",
+    "supportsFixMatch": false,
+    "supportsBulkMetadata": false,
+    "supportsArtwork": false,
+    "supportsScenes": false,
+    "supportsImport": false,
+    "fieldPriority": {
+      "height": 90,
+      "weight": 90,
+      "measurements": 90,
+      "braSize": 90,
+      "shoeSize": 90,
+      "dressSize": 90
+    },
+    "supportedFilters": [
+      "contentType"
+    ],
+    "filterStrategy": "queryAppend",
+    "searchUrlTemplate": "https://celebritytall.com/{querySlug}/",
+    "providerIdKey": "celebritytall",
+    "providerUrlTemplate": "",
+    "profileOverrides": {},
+    "directProfileOnly": false,
+    "notes": "Last-resort secondary source. Values may be estimated; it fills only blank fields when stronger sources have no body measurements and remains subject to user review."
+  },
+  {
+    "id": "celebrityinside",
+    "name": "CelebrityInside",
+    "role": "celebrity",
+    "category": "estimated body metadata fallback",
+    "badges": ["Fallback", "Body data", "Review required"],
+    "icon": "CI",
+    "baseUrl": "https://celebrityinside.com",
+    "enabled": true,
+    "supports": ["height", "weight", "measurements", "hair", "eyes", "shoeSize", "dressSize"],
+    "searchModes": ["celebrity", "metadata"],
+    "profileTypes": ["celebrity"],
+    "priority": 91,
+    "requiresSession": false,
+    "status": "active",
+    "supportsFixMatch": false,
+    "supportsBulkMetadata": false,
+    "supportsArtwork": false,
+    "supportsScenes": false,
+    "supportsImport": false,
+    "fieldPriority": { "height": 91, "weight": 91, "measurements": 91, "cupSize": 91, "shoeSize": 91, "dressSize": 91 },
+    "supportedFilters": ["contentType"],
+    "filterStrategy": "queryAppend",
+    "searchUrlTemplate": "https://celebrityinside.com/?s={queryPlus}",
+    "providerIdKey": "celebrityinside",
+    "providerUrlTemplate": "",
+    "profileOverrides": {},
+    "directProfileOnly": false,
+    "notes": "Last-resort celebrity body-data source. Matches identity, never presents a cup-only value as a full bra size, fills blanks only, and requires review before saving."
+  },
+  {
     "id": "models-com",
     "name": "Models.com",
     "role": "celebrity",
@@ -3320,6 +3525,52 @@ const DEFAULT_ADULT_SOURCES = [
     "profileOverrides": {},
     "directProfileOnly": false,
     "notes": "Anime/hentai/tag images only; hide from normal performer metadata."
+  },
+  {
+    "id": "justteensporn",
+    "name": "JustTeensPorn",
+    "role": "performer",
+    "category": "subscriber-only performer homepage",
+    "badges": [
+      "Locked",
+      "Subscription",
+      "Deferred"
+    ],
+    "icon": "JTP",
+    "baseUrl": "https://www.justteensporn.com",
+    "enabled": false,
+    "supports": [
+      "performerDirectory",
+      "photos",
+      "artwork"
+    ],
+    "searchModes": [
+      "browse",
+      "media"
+    ],
+    "profileTypes": [
+      "performer"
+    ],
+    "priority": 200,
+    "requiresSession": true,
+    "status": "locked",
+    "discoveryScope": "browse",
+    "supportsFixMatch": false,
+    "supportsBulkMetadata": false,
+    "supportsArtwork": false,
+    "supportsScenes": false,
+    "supportsImport": false,
+    "fieldPriority": {},
+    "supportedFilters": [
+      "contentType"
+    ],
+    "filterStrategy": "queryAppend",
+    "searchUrlTemplate": "https://www.justteensporn.com/",
+    "providerIdKey": "",
+    "providerUrlTemplate": "",
+    "profileOverrides": {},
+    "directProfileOnly": false,
+    "notes": "Saved for a future authenticated homepage performer-catalog import. Disabled until the user has a valid subscription; Homestead must not attempt access or store credentials while locked. Import only verified adult performers and hold uncertain identities for review."
   },
   {
     "id": "wowgirls",
