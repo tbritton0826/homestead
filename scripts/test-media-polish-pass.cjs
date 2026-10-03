@@ -93,7 +93,7 @@ async function run() {
   const readerCode = await transformWithOxc(readerSource, 'reader.jsx', { jsx: { runtime: 'classic' } });
   const effects = [], order = [];
   const mockBook = { ready: Promise.resolve(), locations: { generate() { order.push('index'); return new Promise(() => {}); } }, renderTo() { return { display: async () => { order.push('display'); }, on() {}, destroy() {} }; }, destroy() {} };
-  const Reader = vm.runInNewContext(readerCode.code + '; BookReader', { React, useRef: () => ({ current: {} }), useState: () => ['', () => {}], useEffect: (fn) => effects.push(fn), getPlayableMediaUrl: () => '/api/file?path=book.epub', getWatchProgress: () => ({}), ePub: () => mockBook, saveWatchProgress() {}, window: { addEventListener() {}, removeEventListener() {} } });
+  const Reader = vm.runInNewContext(readerCode.code + '; BookReader', { React, useRef: () => ({ current: {} }), useState: () => ['', () => {}], useEffect: (fn) => effects.push(fn), getPlayableMediaUrl: () => '/api/file?path=book.epub', getWatchProgress: () => ({}), loadEpub: async () => ({ default: () => mockBook }), saveWatchProgress() {}, window: { addEventListener() {}, removeEventListener() {} } });
   const readerHtml = renderToStaticMarkup(Reader({ compact: true, file: { path: 'book.epub', name: 'book.epub' }, book: { id: 'book', title: 'Book' }, onClose() {} }));
   assert(readerHtml.includes('book-reader-inline')); assert(!readerHtml.includes('book-reader-overlay')); assert(readerHtml.includes('Turn pages as you listen'));
   const cleanup = effects[0](); await new Promise((resolve) => setImmediate(resolve)); assert.deepEqual(order, ['display', 'index'], 'reader must not wait for all locations before opening'); cleanup();

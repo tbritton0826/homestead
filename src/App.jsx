@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import FullCalendar from "@fullcalendar/react";
-import dayGridPlugin from "@fullcalendar/daygrid";
-import multiMonthPlugin from "@fullcalendar/multimonth";
-import timeGridPlugin from "@fullcalendar/timegrid";
-import interactionPlugin from "@fullcalendar/interaction";
+import { lazyFeature, FeatureReloadButton } from "./components/LazyFeature.jsx";
+import { createProfileStartupLoader, initialStartupProfileList, mergeStartupProfileList } from "./utils/profile-startup.js";
+import { loadEpub, loadHls, loadBarcodeReader } from "./utils/feature-loaders.js";
+const ModelViewer = lazyFeature(() => import("./components/ModelViewer.jsx"), "3D viewer");
+const FullCalendar = lazyFeature(() => import("./components/CalendarView.jsx"), "calendar");
 import "./App.css";
 import "./MediaPolish.css";
 import "./AdultPolish.css";
@@ -32,15 +32,11 @@ import ProgressiveLibraryGrid from "./components/ProgressiveLibraryGrid.jsx";
 import { createAppearancePreviewBuffer, appearanceNumericVariables } from "./utils/appearance-preview.js";
 import { handlePosterFallback } from "./utils/image-fallback.js";
 
-import ModelViewer from "./components/ModelViewer";
-import ePub from "epubjs";
 import MediaStatusBadge from "./components/MediaStatusBadge.jsx";
 import RequestRows, { REQUEST_TYPES, RequestStatePill } from "./components/RequestRows.jsx";
 import SHARED_SMART_COLLECTION_SEEDS from "./data/shared-collection-presets.json";
 import MCU_TIMELINE_SECTIONS from "./data/mcu-timeline.json";
 import { METADATA_PROVIDERS, createBaseMetadata, normalizeTmdbMetadata, mergeMetadata,} from "../scripts/metadata/providers.js";
-import Hls from "hls.js";
-import { BrowserMultiFormatReader } from "@zxing/browser";
 import LiveTvSourcesManager from "./components/livetv/LiveTvSourcesManager";
 import AddAdultProfileModal from "./components/adult/AddAdultProfileModal";
 import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
@@ -8393,7 +8389,7 @@ function CalendarPage({ setActiveLibrary, setupConfig }) {
   return <div className={`calendar-page ${focusMode ? "calendar-focus-mode" : ""}`}>
     {focusMode && <button className="focus-mode-exit" onClick={() => setFocusMode(false)}>× Exit Full Screen</button>}
     {message && <div className="calendar-page-message">{message}<button onClick={() => setMessage("")}>×</button></div>}
-    <div className="calendar-layout"><div className="panel calendar-board"><FullCalendar key={calendarView} plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin, multiMonthPlugin]} initialView={calendarView === "day" ? "timeGridDay" : calendarView === "week" ? "timeGridWeek" : calendarView === "month" ? "dayGridMonth" : "multiMonthYear"} height="auto" editable selectable nowIndicator stickyHeaderDates eventMaxStack={4} events={visibleEvents.map((event) => { const palette = ["#3978c7", "#9863c8", "#3e9b72", "#c06d46", "#ba526f", "#5c78c9", "#808f3f"]; const hash = [...String(event.personName || event.kind || "family")].reduce((total, character) => ((total * 31) + character.charCodeAt(0)) >>> 0, 0); const color = event.color || event.backgroundColor || palette[hash % palette.length]; const sourceTitle = event.sourceService === "sonarr" && sourceTitleFormats[event.sourceId] === "series" ? (event.seriesTitle || String(event.title || "").split(" · ")[0]) : event.title; return { ...event, editable: !event.readOnly && !event.sourceId, classNames: [`calendar-kind-${event.kind || "event"}`], title: `${event.personName ? `${event.personName} · ` : ""}${sourceTitle}`, backgroundColor: color, borderColor: color }; })} eventClick={(info) => editCalendarEvent(info.event.id)} eventDrop={(info) => saveMove(info.event)} eventResize={(info) => saveMove(info.event)} select={(info) => setEventModalOpen({ date: localDateInputValue(info.start), startTime: info.startStr.slice(11, 16) || "09:00", endTime: info.endStr?.slice(11, 16) || "10:00" })} /></div>
+    <div className="calendar-layout"><div className="panel calendar-board"><FullCalendar key={calendarView} initialView={calendarView === "day" ? "timeGridDay" : calendarView === "week" ? "timeGridWeek" : calendarView === "month" ? "dayGridMonth" : "multiMonthYear"} height="auto" editable selectable nowIndicator stickyHeaderDates eventMaxStack={4} events={visibleEvents.map((event) => { const palette = ["#3978c7", "#9863c8", "#3e9b72", "#c06d46", "#ba526f", "#5c78c9", "#808f3f"]; const hash = [...String(event.personName || event.kind || "family")].reduce((total, character) => ((total * 31) + character.charCodeAt(0)) >>> 0, 0); const color = event.color || event.backgroundColor || palette[hash % palette.length]; const sourceTitle = event.sourceService === "sonarr" && sourceTitleFormats[event.sourceId] === "series" ? (event.seriesTitle || String(event.title || "").split(" · ")[0]) : event.title; return { ...event, editable: !event.readOnly && !event.sourceId, classNames: [`calendar-kind-${event.kind || "event"}`], title: `${event.personName ? `${event.personName} · ` : ""}${sourceTitle}`, backgroundColor: color, borderColor: color }; })} eventClick={(info) => editCalendarEvent(info.event.id)} eventDrop={(info) => saveMove(info.event)} eventResize={(info) => saveMove(info.event)} select={(info) => setEventModalOpen({ date: localDateInputValue(info.start), startTime: info.startStr.slice(11, 16) || "09:00", endTime: info.endStr?.slice(11, 16) || "10:00" })} /></div>
       <aside className="calendar-side-stack"><section className="panel calendar-coordination-panel"><div className="section-header-row"><div><p className="eyebrow">Coordination</p><h3>Needs coverage</h3></div><span>{coverageEvents.length}</span></div>{coverageEvents.length ? <div className="calendar-coverage-list">{coverageEvents.map((event) => <article key={event.id}><div><strong>{event.title}</strong><span>{event.personName || "Household"} · {formatHomesteadDateTime(event.start)}</span>{event.location && <small>{event.location}</small>}</div><button className="secondary-button" disabled={event.coverageStatus === "requested"} onClick={() => requestCoverage(event)}>{event.coverageStatus === "requested" ? "Requested" : "Request help"}</button></article>)}</div> : <div className="calendar-empty-state">No uncovered pickups or rides.</div>}</section></aside></div>
     {eventModalOpen && <CalendarEventModal initial={typeof eventModalOpen === "object" ? eventModalOpen : {}} people={people} audience={audience} currentUser={currentUser} onClose={() => setEventModalOpen(false)} onSaved={(result) => { setEventModalOpen(false); setMessage(result.updated ? result.scope === "series" ? `${result.updatedCount} events in the series updated.` : result.scope === "import" ? `${result.updatedCount} shifts in the imported schedule updated.` : "Calendar event updated." : result.series ? `${result.added} repeating events added${result.skipped ? `; ${result.skipped} duplicate${result.skipped === 1 ? "" : "s"} skipped` : ""}.` : "Event added to the family calendar."); loadCalendar(); }} />}
     {importModalOpen && <ScheduleImportModal people={people} onClose={() => setImportModalOpen(false)} onImported={(result) => { setImportModalOpen(false); setMessage(`${result.added} shift${result.added === 1 ? "" : "s"} added${result.skipped ? `; ${result.skipped} duplicate${result.skipped === 1 ? "" : "s"} skipped` : ""}.`); loadCalendar(); }} />}
@@ -21379,6 +21375,7 @@ function BookCard({ book, onClick }) {
 
 function BookReader({ file, book, onClose, compact = false }) {
   const readerRef = useRef(null);
+  const [readerLoading, setReaderLoading] = useState(false);
   const [readerError, setReaderError] = useState('');
   const renditionRef = useRef(null);
   const touchStartRef = useRef(null);
@@ -21444,6 +21441,8 @@ function BookReader({ file, book, onClose, compact = false }) {
     async function loadBook() {
       const savedProgress = getWatchProgress()[progressKey] || getWatchProgress()[book?.id];
 
+      const { default: ePub } = await loadEpub();
+      if (cancelled || !readerRef.current) return;
       epubBook = ePub(readerUrl);
 
       await epubBook.ready;
@@ -21457,6 +21456,7 @@ function BookReader({ file, book, onClose, compact = false }) {
       renditionRef.current = rendition;
 
       await rendition.display(savedProgress?.path === file.path ? savedProgress.location || undefined : undefined);
+      if (cancelled) return;
       // Display the first page immediately; location indexing can be expensive.
       epubBook.locations.generate(1000).catch(() => {});
 
@@ -21480,7 +21480,8 @@ function BookReader({ file, book, onClose, compact = false }) {
     }
 
     setReaderError('');
-    loadBook().catch((error) => { if (!cancelled) setReaderError(error.message || 'This ebook could not be opened.'); });
+    setReaderLoading(true);
+    loadBook().catch((error) => { if (!cancelled) setReaderError(error.message || 'This ebook could not be opened.'); }).finally(() => { if (!cancelled) setReaderLoading(false); });
 
     return () => {
       cancelled = true;
@@ -21521,7 +21522,8 @@ function BookReader({ file, book, onClose, compact = false }) {
         {!isPdf && <button className="secondary-button" onClick={goNextPage}>Next →</button>}
       </div>
 
-      {readerError && <p role="alert">{readerError}</p>}
+      {readerLoading && !isPdf && <p role="status">Loading ebook reader…</p>}
+      {readerError && <div role="alert"><p>{readerError}</p><FeatureReloadButton /></div>}
       {compact && <p className="read-along-note">Turn pages as you listen. Reading position is saved separately from audio.</p>}
 
       {isPdf ? (
@@ -22177,7 +22179,7 @@ setExpandedMusicSections({
 };
 
   const musicMatchIndex = useMemo(() => loadHomesteadMetadataMatches(), [metadataMatchesVersion]);
-  const baseSongs = Object.values(scannedMusic).flatMap((artistFolder) => {
+  const baseSongs = useMemo(() => Object.values(scannedMusic).flatMap((artistFolder) => {
     const files = artistFolder.files || [];
 
     const audioFiles = files.filter(
@@ -22192,13 +22194,18 @@ setExpandedMusicSections({
       return { ...song, artistLocalId: artistFolder.id, artistLocalPoster: artistFolder.poster || "", artistLocalBanner: artistFolder.banner || "", title: trackMatch?.title || song.title, album: albumMatch?.title || song.album,
         metadataMatch: trackMatch, albumMetadataMatch: albumMatch, artistMetadataMatch: artistMatch };
     });
-  });
+  }), [scannedMusic, musicMatchIndex]);
 
-const artists = [...new Set(
+const baseSongsByArtist = useMemo(() => {
+  const groups = new Map();
+  for (const song of baseSongs) { if (!groups.has(song.artist)) groups.set(song.artist, []); groups.get(song.artist).push(song); }
+  return groups;
+}, [baseSongs]);
+const artists = useMemo(() => [...new Set(
   baseSongs.map((song) => song.artist).filter(Boolean)
-)].sort((left, right) => getAlphabetSortValue(left).localeCompare(getAlphabetSortValue(right), undefined, { numeric: true }));
+)].sort((left, right) => getAlphabetSortValue(left).localeCompare(getAlphabetSortValue(right), undefined, { numeric: true })), [baseSongs]);
 
-const albumArtworkRequests = Array.from(baseSongs.reduce((requests, song) => {
+const albumArtworkRequests = useMemo(() => Array.from(baseSongs.reduce((requests, song) => {
   if (!song.album) return requests;
   const key = getMusicAlbumKey(song.albumArtist || song.artist, song.album);
   if (!key || requests.has(key)) return requests;
@@ -22212,16 +22219,16 @@ const albumArtworkRequests = Array.from(baseSongs.reduce((requests, song) => {
     artistMbid: artistMatch.foreignArtistId || artistMatch.musicbrainzId || artistMatch.mbid || artistMatch.providerId || "",
   });
   return requests;
-}, new Map()).values());
+}, new Map()).values()), [baseSongs]);
 
-const artistArtworkRequests = artists.map((artist) => {
-  const match = baseSongs.find((song) => song.artist === artist)?.artistMetadataMatch || {};
+const artistArtworkRequests = useMemo(() => artists.map((artist) => {
+  const match = baseSongsByArtist.get(artist)?.[0]?.artistMetadataMatch || {};
   return {
     key: artist,
     name: artist,
     mbid: match.foreignArtistId || match.musicbrainzId || match.mbid || match.providerId || "",
   };
-});
+}), [artists, baseSongsByArtist]);
 
 const musicArtworkRequestKey = `${artists.join("|")}::${albumArtworkRequests.map((request) => `${request.key}:${request.mbid}`).join("|")}`;
 
@@ -22232,7 +22239,7 @@ useEffect(() => {
     // The scanner already records which local poster/banner files exist. Using
     // that index avoids two extra network requests for every artist on load.
     const localEntries = artists.map((artist) => {
-      const song = baseSongs.find((entry) => entry.artist === artist) || {};
+      const song = baseSongsByArtist.get(artist)?.[0] || {};
       const localPoster = song.artistLocalPoster ? getLocalApiFileUrl(song.artistLocalPoster) : "";
       const localBanner = song.artistLocalBanner ? getLocalApiFileUrl(song.artistLocalBanner) : "";
       return [artist, { localPoster, localBanner, hasLocalPoster: Boolean(localPoster), hasLocalBanner: Boolean(localBanner), lidarr: {} }];
@@ -22292,7 +22299,7 @@ useEffect(() => {
   };
 }, [musicArtworkRequestKey, musicMetadataRevision]);
 
-const songs = baseSongs.map((song) => {
+const songs = useMemo(() => baseSongs.map((song) => {
   const albumKey = getMusicAlbumKey(song.albumArtist || song.artist, song.album);
   const lidarrAlbum = lidarrAlbumArtwork[albumKey]?.artwork || {};
   const albumMatch = song.albumMetadataMatch || {};
@@ -22308,9 +22315,9 @@ const songs = baseSongs.map((song) => {
     albumArtworkKey: albumKey,
     poster: manualArtwork || (musicArtworkPriority === "local" ? localFirst : providerFirst) || "/media/music/default-poster.jpg",
   };
-});
+}), [baseSongs, lidarrAlbumArtwork, musicArtworkPriority]);
 
-const albumGroups = Array.from(songs.reduce((groups, song) => {
+const albumGroups = useMemo(() => Array.from(songs.reduce((groups, song) => {
   if (!song.album) return groups;
   const key = song.albumArtworkKey || getMusicAlbumKey(song.artist, song.album);
   if (!groups.has(key)) groups.set(key, {
@@ -22331,17 +22338,23 @@ const albumGroups = Array.from(songs.reduce((groups, song) => {
 }, new Map()).values()).sort((left, right) =>
   getAlphabetSortValue(left.artist).localeCompare(getAlphabetSortValue(right.artist), undefined, { numeric: true }) ||
   getAlphabetSortValue(left.title).localeCompare(getAlphabetSortValue(right.title), undefined, { numeric: true })
-);
+), [songs]);
 
-const artistGroups = artists.map((artist) => {
-  const artistSongs = songs.filter((song) => song.artist === artist);
+const songsByArtist = useMemo(() => {
+  const groups = new Map();
+  for (const song of songs) { if (!groups.has(song.artist)) groups.set(song.artist, []); groups.get(song.artist).push(song); }
+  return groups;
+}, [songs]);
+const foldersById = useMemo(() => { const folders = new Map(); for (const folder of Object.values(scannedMusic)) { if (!folders.has(folder.id)) folders.set(folder.id, folder); } return folders; }, [scannedMusic]);
+const artistGroups = useMemo(() => artists.map((artist) => {
+  const artistSongs = songsByArtist.get(artist) || [];
   const videoCount = artistSongs.filter((song) => song.videoFile).length;
 
 return {
   artist,
   localId: artistSongs[0]?.artistLocalId,
   id: artistSongs[0]?.artistLocalId,
-  originalItem: Object.values(scannedMusic).find((folder) => folder.id === artistSongs[0]?.artistLocalId),
+  originalItem: foldersById.get(artistSongs[0]?.artistLocalId),
   metadataMatch: artistSongs[0]?.artistMetadataMatch,
   songs: artistSongs,
   songCount: artistSongs.length,
@@ -22387,7 +22400,7 @@ return {
       : lidarrBanner || localBanner || "";
   })(),
 };
-});
+}), [artists, songsByArtist, foldersById, lidarrArtistArtwork, musicArtworkPriority]);
 
 const normalizeMusicTrack = (song) => {
   if (!song) return;
@@ -34158,6 +34171,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   const wedgeBufferRef = useRef("");
   const wedgeTimerRef = useRef(null);
   const lastResolvedCodeRef = useRef({ value: "", at: 0 });
+  const scannerGeneration = useRef(0);
+  const [scannerLoadError, setScannerLoadError] = useState(false);
   const zxingReaderRef = useRef(null);
   const zxingControlsRef = useRef(null);
   const barcodePhotoInputRef = useRef(null);
@@ -34226,6 +34241,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }, [mode, code]);
 
   const stopCamera = useCallback(() => {
+    scannerGeneration.current++;
     try { zxingControlsRef.current?.stop?.(); } catch {}
     zxingControlsRef.current = null;
     zxingReaderRef.current = null;
@@ -34518,25 +34534,35 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     }
     try {
       stopCamera();
+      const generation = scannerGeneration.current;
       setMode("scan");
-      setStatus("Point the rear camera at a UPC, ISBN, EAN, or QR code.");
+      setStatus("Loading barcode scanner…");
+      setScannerLoadError(false);
       setCameraActive(true);
       setScanContinuous(true);
       window.setTimeout(async () => {
-        if (!videoRef.current) return;
+        if (generation !== scannerGeneration.current || !videoRef.current) return;
         try {
+          const { BrowserMultiFormatReader } = await loadBarcodeReader().catch((error) => { if (generation === scannerGeneration.current) setScannerLoadError(true); throw error; });
+          if (generation !== scannerGeneration.current || !videoRef.current) return;
+          setStatus("Point the rear camera at a UPC, ISBN, EAN, or QR code.");
           const reader = new BrowserMultiFormatReader();
           zxingReaderRef.current = reader;
+          let scanned = false;
           const controls = await reader.decodeFromVideoDevice(undefined, videoRef.current, async (scanResult) => {
+            if (generation !== scannerGeneration.current || scanned) return;
             const value = scanResult?.getText?.() || scanResult?.text || "";
             if (!value) return;
-            try { controls?.stop?.(); } catch {}
+            scanned = true;
+            try { zxingControlsRef.current?.stop?.(); } catch {}
             zxingControlsRef.current = null;
             setCode(value);
             await resolveCode(value);
           });
+          if (generation !== scannerGeneration.current || scanned) { controls?.stop?.(); return; }
           zxingControlsRef.current = controls;
         } catch (error) {
+          if (generation !== scannerGeneration.current) return;
           setCameraActive(false);
           setScanContinuous(false);
           const insecure = !window.isSecureContext;
@@ -34553,10 +34579,12 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
   async function decodeBarcodePhoto(file) {
     if (!file) return;
+    const generation = scannerGeneration.current;
     setBusy(true);
     const photoReturnMode = mode === "media-scan" ? "media-scan" : "scan";
     setMode(photoReturnMode);
     setStatus("Reading barcode from camera photo…");
+    setScannerLoadError(false);
     try {
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -34564,8 +34592,11 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         reader.onerror = () => reject(new Error("Could not read the photo."));
         reader.readAsDataURL(file);
       });
+      const { BrowserMultiFormatReader } = await loadBarcodeReader().catch((error) => { if (generation === scannerGeneration.current) setScannerLoadError(true); throw error; });
+      if (generation !== scannerGeneration.current) return;
       const reader = new BrowserMultiFormatReader();
       const decoded = await reader.decodeFromImageUrl(dataUrl);
+      if (generation !== scannerGeneration.current) return;
       const value = decoded?.getText?.() || decoded?.text || "";
       if (!value) throw new Error("No barcode or QR code was found in that photo.");
       setCode(value);
@@ -34575,10 +34606,11 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         await resolveCode(value);
       }
     } catch (error) {
+      if (generation !== scannerGeneration.current) return;
       giveScannerFeedback("error");
       setStatus(error.message || "No barcode or QR code was found. Try again with the code filling most of the frame.");
     } finally {
-      setBusy(false);
+      if (generation === scannerGeneration.current) setBusy(false);
     }
   }
 
@@ -36350,7 +36382,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
         {mode === "complete" && <div className="intake-complete-step"><div className="intake-complete-mark">✓</div><h3>{title || result?.suggestedTitle || "Item"}</h3><p>{result?.existing && duplicateAction === "update" ? <>Your photos and notes were attached to the existing Homestead item and logged in the <strong>Activity Center</strong>.</> : createdRecord ? <>Created a real <strong>{selectedLibrary?.[1] || libraryId}</strong> record and linked it to Activity Center.</> : <>Saved to the Homestead <strong>Activity Center</strong> for <strong>{selectedLibrary?.[1] || libraryId}</strong>.</>}</p>{createdRecord && <div className="intake-created-record"><span>Homestead ID</span><strong>{createdRecord.id}</strong><small>{createdRecord.libraryId} · completed</small></div>}<div className="intake-footer-actions"><button type="button" className="secondary-button" onClick={() => { setCode(""); setTitle(""); setAuthor(""); setPublisher(""); setPublishedDate(""); setNotes(""); setCaptures([]); setResult(null); setDuplicateAction("open"); setCreatedRecord(null); setAddToBooks(true); setAddToInventory(false); setLinkInventoryToMedia(false); setInventoryMediaLibrary("movies"); setInventoryCategory("general"); setSearchDigitalEdition(true); setDigitalSources([]); setSelectedDigitalSource(null); setSourceSearchMessage(""); setArrRequestMessage(""); setExternalSourceMessage(""); setTcgGame("yugioh"); setTcgCardName(""); setTcgSetCode(""); setTcgRarity(""); setTcgEdition("Unlimited"); setTcgCondition("Near Mint"); setTcgLanguage("English"); setTcgQuantity(1); setTcgPurchasePrice(""); setTcgMarketValue(""); setTcgLookupMessage(""); setTcgMatches([]); setTcgSelectedMatch(null); setValuationEstimate(null); setValuationMessage(""); setMode("home"); }}>Add another</button>{onOpenActivity && <button type="button" className="secondary-button" onClick={() => { onClose(); onOpenActivity(); }}>View Activity</button>}<button type="button" className="primary-button" onClick={onClose}>Done</button></div></div>}
 
-        <footer className="intake-status" role="status"><span className={busy || scanContinuous ? "working" : ""} />{status}</footer>
+        <footer className="intake-status" role="status"><span className={busy || scanContinuous ? "working" : ""} />{status}{scannerLoadError && <FeatureReloadButton />}</footer>
       </section>
     </div>,
     document.body
@@ -40723,6 +40755,8 @@ function SidecarVideoPlayer({
 
 function LiveTvPlayer({ channel, program = null }) {
   const videoRef = useRef(null);
+  const [playbackStatus, setPlaybackStatus] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [clock, setClock] = useState(() => Date.now());
 
   useEffect(() => {
@@ -40746,50 +40780,28 @@ function LiveTvPlayer({ channel, program = null }) {
     console.log("Live TV original URL:", channel.url);
     console.log("Live TV proxied URL:", proxiedUrl);
 
-    let hls;
-
-    if (Hls.isSupported()) {
-      hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-        debug: false,
-      });
-
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        console.error("HLS error:", data);
-      });
-
+    let hls, playTimer, cancelled = false;
+    const play = () => { playTimer = setTimeout(() => { if (!cancelled) video.play().catch((error) => console.warn("Live TV play blocked", error)); }, 250); };
+    setPlaybackStatus("Loading live TV…");
+    async function attach() {
+      // Native HLS needs no downloaded engine (notably on Safari/mobile).
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = proxiedUrl; setPlaybackStatus(""); play(); return;
+      }
+      const { default: Hls } = await loadHls();
+      if (cancelled) return;
+      if (!Hls.isSupported()) { video.src = proxiedUrl; setPlaybackStatus(""); play(); return; }
+      hls = new Hls({ enableWorker: true, lowLatencyMode: true, debug: false });
+      hls.on(Hls.Events.ERROR, (_event, data) => { if (!cancelled && data.fatal) setPlaybackStatus("Live TV could not start. Retry or select another channel."); });
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => { if (!cancelled) { hls.loadSource(proxiedUrl); setPlaybackStatus(""); play(); } });
       hls.attachMedia(video);
-
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        hls.loadSource(proxiedUrl);
-      });
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = proxiedUrl;
-    } else {
-      video.src = proxiedUrl;
     }
-
-    const playTimer = setTimeout(() => {
-      video.play().catch((error) => {
-        console.warn("Live TV autoplay/play blocked or failed:", error);
-      });
-    }, 250);
-
+    attach().catch((error) => { if (!cancelled) { console.warn("Live TV player could not load", error); setPlaybackStatus("Live TV could not start. Retry or select another channel."); } });
     return () => {
-      clearTimeout(playTimer);
-
-      if (hls) {
-        hls.destroy();
-      }
-
-      if (video) {
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
-      }
+      cancelled = true; clearTimeout(playTimer); hls?.destroy();
+      video.pause(); video.removeAttribute("src"); video.load();
     };
-  }, [channel?.url, channel?.name]);
+  }, [channel?.url, channel?.name, loadAttempt]);
 
   if (!channel) {
     return (
@@ -40809,6 +40821,7 @@ function LiveTvPlayer({ channel, program = null }) {
 
   return (
     <div className="live-tv-player-wrap">
+      {playbackStatus && <p role={playbackStatus.includes("could not") ? "alert" : "status"}>{playbackStatus}{playbackStatus.includes("could not") && <button className="secondary-button" type="button" onClick={() => setLoadAttempt((value) => value + 1)}>Retry</button>}{playbackStatus.includes("could not") && <FeatureReloadButton />}</p>}
       <video
         ref={videoRef}
         controls
@@ -47624,11 +47637,12 @@ useEffect(() => {
   setupConfig?.branding?.updatedAt,
 ]);
 
+const profileStartup = useRef(null);
 useEffect(() => {
-  async function loadProfiles() {
-    const index = await fetchJsonIfExists("/data/media-index.json");
-    setMediaIndex(index);
-
+  const userId = String(sessionUser?.id || "owner");
+  if (profileStartup.current?.userId !== userId) profileStartup.current = { userId, loader: createProfileStartupLoader({
+    loadIndex: () => fetchJsonIfExists("/data/media-index.json"),
+    prepare: (index) => {
 const personalIndex = {
   ...(index?.libraries?.girls || {}),
   ...(index?.girls || {}),
@@ -47651,8 +47665,7 @@ const performerIds = Object.keys(
   index?.libraries?.performers || {}
 );
 
-const generatedProfiles = await Promise.all(
-  girlIds.map(async (id) => {
+const hydratePersonal = async (id) => {
     const base = defaultProfile(id);
     const indexRecord = personalIndex[id] || {};
     const legacyRecord = legacyGirlsIndex[id] || {};
@@ -47765,11 +47778,9 @@ return {
     ...(metadata.relationships || {}),
   },
 };
-  })
-);
+};
 
-const generatedCelebrities = await Promise.all(
-  celebrityIds.map(async (id) => {
+const hydrateCelebrity = async (id) => {
     const base = defaultProfile(id);
     const indexRecord = index?.libraries?.celebrities?.[id] || {};
 
@@ -47825,11 +47836,9 @@ const generatedCelebrities = await Promise.all(
         [],
       metadataCandidates: candidates?.metadataCandidates || {},
     };
-  })
-);
+};
 
-const generatedPerformers = await Promise.all(
-  performerIds.map(async (id) => {
+const hydratePerformer = async (id) => {
     const base = defaultProfile(id);
     const indexRecord = index?.libraries?.performers?.[id] || {};
 
@@ -47875,15 +47884,52 @@ return {
   ],
   metadataCandidates: candidates?.mergedCandidate || {},
 };
-  })
-);
+};
 
-setPeople(generatedProfiles);
-setCelebrities(generatedCelebrities);
-setPerformers(generatedPerformers);
+
+const makeInitial = (id, library, record) => {
+  const base = defaultProfile(id);
+  const legacy = library === "personal" && (record.library === "girls" || String(record.metadataPath || record.profileDir || "").includes("/media/girls/"));
+  const hint = normalizeMetadataPathToMediaUrl(record.metadataPath || record.metadataFile || record.profileDir || record.folderPath || record.sourcePath || "");
+  const directory = hint ? hint.replace(/\/metadata\.json$/i, "") : `/media/${legacy ? "girls" : library}/${id}`;
+  return { ...base, ...record, id, name: record.name || record.title || base.name, library,
+    profileDir: record.profileDir || record.folderPath || directory, folderPath: record.folderPath || record.profileDir || directory,
+    metadataPath: record.metadataPath || record.metadataFile || `${directory}/metadata.json`,
+    poster: record.poster || `${directory}/poster.jpg`, banner: record.banner || `${directory}/banner.jpg`,
+    metadata: mergeAdultLoadedMetadata(base.metadata, record), relationships: { ...base.relationships, ...(record.relationships || {}) }, _startupPending: true };
+};
+return {
+  personal: { initial: girlIds.map((id) => makeInitial(id, "personal", personalIndex[id] || {})), hydrate: hydratePersonal },
+  celebrities: { initial: celebrityIds.map((id) => makeInitial(id, "celebrities", index?.libraries?.celebrities?.[id] || {})), hydrate: hydrateCelebrity },
+  performers: { initial: performerIds.map((id) => makeInitial(id, "performers", index?.libraries?.performers?.[id] || {})), hydrate: hydratePerformer },
+};
+
+    },
+  }) };
+  const loader = profileStartup.current.loader;
+  let initialized = false;
+  return loader.subscribe((snapshot) => {
+    if (snapshot.error) { console.warn("Profile lists could not load", snapshot.error); return; }
+    setMediaIndex(snapshot.index);
+    const isInitial = !initialized;
+    for (const [library, setter] of [["personal", setPeople], ["celebrities", setCelebrities], ["performers", setPerformers]]) {
+      setter((current) => !isInitial ? mergeStartupProfileList(current, snapshot.initial[library], snapshot.lists[library]) : mergeStartupProfileList(initialStartupProfileList(current, snapshot.initial[library]), snapshot.initial[library], snapshot.lists[library]));
     }
-    loadProfiles();
-  }, []);
+    initialized = true;
+    setSelected((current) => {
+      if (!current?._startupPending) return current;
+      const loaded = loader.getProfile(current.library, current.id);
+      return loaded && !loaded._startupPending ? loaded : current;
+    });
+  });
+}, [sessionUser?.id]);
+useEffect(() => {
+  if (!selected?._startupPending) return;
+  const loader = profileStartup.current?.loader;
+  loader?.prioritize(selected.library, selected.id);
+  const loaded = loader?.getProfile(selected.library, selected.id);
+  if (loaded && !loaded._startupPending) setSelected(loaded);
+}, [selected?.id, selected?.library, selected?._startupPending]);
 
 function isLibraryEnabled(libraryId) {
   if (["home", "dashboard", "settings", "users", "account", "more"].includes(libraryId)) {
@@ -48268,7 +48314,7 @@ const canSearchYoutube = !!enabledLibraries.youtube;
 useEffect(() => {
   let cancelled = false;
   if (!searchText) {
-    setPluginSearchResults([]);
+    setPluginSearchResults((current) => current.length ? [] : current);
     return undefined;
   }
   const searchablePlugins = runtimePlugins.filter((plugin) =>
@@ -48279,7 +48325,7 @@ useEffect(() => {
     accountPreferences?.pluginSearch?.[plugin.id] === true
   );
   if (!searchablePlugins.length) {
-    setPluginSearchResults([]);
+    setPluginSearchResults((current) => current.length ? [] : current);
     return undefined;
   }
   const controller = new AbortController();
@@ -48868,6 +48914,7 @@ if (selectedSeerrMedia) {
 }
 
 if (selected) {
+  if (selected._startupPending) return <main><button type="button" className="secondary-button" onClick={() => setSelected(null)}>← Back</button><h1>{selected.name}</h1><p role="status">Loading profile details…</p></main>;
   const selectedScannedProfile =
     selected.library === "personal"
       ? mediaIndex?.libraries?.personal?.[selected.id]
