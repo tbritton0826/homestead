@@ -63,7 +63,7 @@ assert(app.includes('setCustomCollectionEditor(collection); setSelectedSharedCol
 const preview = vm.runInNewContext(`${source('getSeerrPreviewStatus')}; getSeerrPreviewStatus`);
 assert.equal(preview({ id: 399566, mediaInfo: { status: 3 } }, { movies: [{ tmdbId: 399566, status: 'available', checkedAt: 'now' }] }), 'available');
 assert.equal(preview({ id: 399566, mediaInfo: { status: 5 } }, { movies: [{ tmdbId: 399566, status: 'scanning', checkedAt: 'now' }] }), 'scanning');
-const trailers = vm.runInNewContext(`${source('getTrailerCandidateFromDetails')}\n${source('buildYouTubeTrailerSource')}\n${source('buildTrailerSource')}; ({getTrailerCandidateFromDetails, buildTrailerSource})`, { URL, URLSearchParams });
+const trailers = vm.runInNewContext(`${source('getTrailerCandidateFromDetails')}\n${source('getYouTubeVideoId')}\n${source('buildYouTubePlayerSource')}\n${source('buildTrailerSource')}; ({getTrailerCandidateFromDetails, buildTrailerSource})`, { URL, URLSearchParams });
 const trailer = { name: 'Official Trailer', site: 'YouTube', key: 'Abc12345_-Z', type: 'Trailer' };
 assert.equal(trailers.getTrailerCandidateFromDetails({ item: { relatedVideos: [trailer] } }, {}, {}).key, trailer.key);
 assert(trailers.buildTrailerSource(trailer).src.includes('/embed/Abc12345_-Z'));
@@ -78,7 +78,7 @@ async function run() {
   const displayFormat = await import("../src/utils/display-format.js");
   // Execute the real snapshot route against fake providers and account contexts.
   const routeStart = server.indexOf('app.get("/api/requests/status"');
-  const routeEnd = server.indexOf('\napp.get("/api/integrations/seerr/media/:mediaType/:tmdbId/status"', routeStart);
+  const routeEnd = server.indexOf('\napp.post("/api/requests/search-again"', routeStart);
   let snapshotHandler;
   const requestRows = { movies: [{ tmdbId: 1, title: 'Mine', requestedByUserId: 'member' }, { tmdbId: 2, title: 'Private', requestedByUserId: 'other' }], music: [{ id: 'song', title: 'Music private', requestedByUserId: 'other' }] };
   const routeContext = {
@@ -131,7 +131,7 @@ async function run() {
   const hookStates = [fixture, false, '', null, { status: 'available', owned, message: 'Verified playable files in Homestead.' }, '', false, '', false, null, '', 'requested'];
   const detailCode = await transformWithOxc(detail, 'details.jsx', { jsx: { runtime: 'classic' } });
   const Detail = vm.runInNewContext(`${detailCode.code}; SeerrMediaDetail`, {
-    React, useEffect() {}, useState: (initial) => [hookIndex < hookStates.length ? hookStates[hookIndex++] : initial, () => {}], useRef: (current) => ({ current }),
+    React, useDialogFocus() {}, useEffect() {}, useState: (initial) => [hookIndex < hookStates.length ? hookStates[hookIndex++] : initial, () => {}], useRef: (current) => ({ current }),
     ...metadata, ...displayFormat, getNormalizedTmdbCardImage: () => '', getTmdbImageUrl: () => '', getOfficialMediaExtras: () => [], ...trailers,
     RequestStatePill: components.RequestStatePill, MediaStatusBadge: () => null,
   });

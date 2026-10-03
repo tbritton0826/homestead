@@ -1,3 +1,4 @@
+import useDialogFocus from "../../hooks/useDialogFocus.js";
 import { useEffect, useMemo, useState } from "react";
 
 const MEDIA_DESTINATIONS = [
@@ -203,6 +204,7 @@ export default function ImportAdultMediaModal({
   onSubmit,
   onBrowseSource,
 }) {
+  useDialogFocus({ selector: ".adult-import-modal-overlay", open, onClose });
   const normalizedProfiles = useMemo(() => uniqueProfiles(profiles), [profiles]);
 
   const [step, setStep] = useState(1);

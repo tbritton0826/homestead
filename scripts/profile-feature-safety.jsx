@@ -1,0 +1,12 @@
+// Disposable browser fixture; excluded from the public entry and production build.
+import React, {useEffect, useState} from 'react';
+import {createRoot} from 'react-dom/client';
+import {lazyFeature} from '../src/components/LazyFeature.jsx';
+import {loadBarcodeReader} from '../src/utils/feature-loaders.js';
+import {BookReader, LiveTvPlayer} from '../src/App.jsx';
+import '../src/App.css';
+const Calendar=lazyFeature(()=>import('../src/components/CalendarView.jsx'),'calendar');
+const Model=lazyFeature(()=>import('../src/components/ModelViewer.jsx'),'3D viewer');
+function Scanner(){const [status,setStatus]=useState('Loading scanner…');useEffect(()=>{let cancelled=false;loadBarcodeReader().then(async({BrowserMultiFormatReader})=>{const reader=new BrowserMultiFormatReader();try{const decoded=await reader.decodeFromImageUrl('/media/profiling/fixture-code.png');if(!cancelled)setStatus('Decoded '+decoded.getText())}catch{if(!cancelled)setStatus('Scanner loaded; no barcode in blank fixture')}}).catch(()=>{if(!cancelled)setStatus('Scanner unavailable; close and retry')});return()=>{cancelled=true}},[]);return <p role="status">{status}</p>}
+function Check(){const [feature,updateFeature]=useState(new URLSearchParams(location.search).get('feature')||'');const [fault,setFault]=useState('');const setFeature=value=>{updateFeature(value);const url=new URL(location.href);url.searchParams.set('feature',value);history.replaceState({},'',url)};return <main style={{padding:24}}><h1>First-use feature safety fixture</h1><p>Local synthetic data only</p><nav>{['calendar','model','epub','hls','scanner'].map(name=><button key={name} onClick={()=>setFeature(name)}>Open {name}</button>)}<button onClick={()=>setFeature('')}>Close feature</button><button onClick={async()=>{await fetch('/__profile/fail-next',{method:'POST'});setFault('Import failure armed')}}>Fail next import</button></nav><p role="status">{fault}</p>{feature==='calendar'&&<Calendar initialView="dayGridMonth" height={500}/>} {feature==='model'&&<Model modelPath="/media/profiling/fixture.stl"/>}{feature==='epub'&&<BookReader file={{name:'fixture.epub',path:'/media/profiling/fixture.epub'}} book={{id:'fixture',title:'Startup reader fixture'}} onClose={()=>setFeature('')}/>} {feature==='hls'&&<LiveTvPlayer channel={{name:'Local HLS fixture',url:'http://localhost:7314/media/profiling/fixture.m3u8'}}/>}{feature==='scanner'&&<Scanner/>}</main>}
+createRoot(document.getElementById('root')).render(<Check/>);

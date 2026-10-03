@@ -1,3 +1,4 @@
+import useDialogFocus from "../hooks/useDialogFocus.js";
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -5,6 +6,7 @@ export default function ArtworkPicker({ library, item, slot, label, localId, onC
   const [options, setOptions] = useState([]), [selection, setSelection] = useState('');
   const [upload, setUpload] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true);
   const [error, setError] = useState(''), [warnings, setWarnings] = useState([]);
+  useDialogFocus({ selector: ".artwork-picker", open: true, onClose, canClose: !busy });
   useEffect(() => {
     const controller = new AbortController();
     fetch(`/api/media/artwork/options?${new URLSearchParams({ library, localId, slot })}`, { signal: controller.signal }).then(async (response) => {

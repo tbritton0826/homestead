@@ -1,0 +1,132 @@
+{
+  "note": "Chunk bytes are final UTF-8 JS; gzip estimates use Node zlib level 6 (Vite reporter may differ); package renderedLength is source contribution, not final minified or gzip attribution.",
+  "chunks": [
+    {
+      "file": "assets/index-BkIILXBU.js",
+      "entry": true,
+      "bytes": 1740054,
+      "gzipBytesNodeLevel6": 427801,
+      "imports": [
+        "assets/chunk-aKtaBQYM.js"
+      ],
+      "dynamicImports": [
+        "assets/src-CXM2kgbP.js",
+        "assets/hls-4U1xkJAb.js",
+        "assets/esm-CsOg5o8t.js",
+        "assets/ModelViewer-Dpd88y3D.js",
+        "assets/CalendarView-CjEOTP4V.js"
+      ],
+      "packagesByRenderedLength": {
+        "application": 2971191,
+        "react-dom": 458707,
+        "react": 16340,
+        "scheduler": 9182
+      }
+    },
+    {
+      "file": "assets/CalendarView-CjEOTP4V.js",
+      "entry": false,
+      "bytes": 265483,
+      "gzipBytesNodeLevel6": 76181,
+      "imports": [
+        "assets/chunk-aKtaBQYM.js",
+        "assets/index-BkIILXBU.js"
+      ],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "@fullcalendar/core": 279853,
+        "@fullcalendar/interaction": 49131,
+        "@fullcalendar/timegrid": 46546,
+        "@fullcalendar/daygrid": 40268,
+        "preact": 23022,
+        "@fullcalendar/multimonth": 9831,
+        "@fullcalendar/react": 2885,
+        "application": 283
+      }
+    },
+    {
+      "file": "assets/ModelViewer-Dpd88y3D.js",
+      "entry": false,
+      "bytes": 967373,
+      "gzipBytesNodeLevel6": 260421,
+      "imports": [
+        "assets/chunk-aKtaBQYM.js",
+        "assets/index-BkIILXBU.js"
+      ],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "three": 1201493,
+        "@react-three/fiber": 234709,
+        "three-stdlib": 93747,
+        "@react-three/drei": 43034,
+        "@monogrid/gainmap-js": 29280,
+        "use-sync-external-store": 4569,
+        "react-use-measure": 4026,
+        "its-fine": 2368,
+        "zustand": 2003,
+        "suspend-react": 1942,
+        "application": 1026,
+        "@babel/runtime": 364
+      }
+    },
+    {
+      "file": "assets/chunk-aKtaBQYM.js",
+      "entry": false,
+      "bytes": 1084,
+      "gzipBytesNodeLevel6": 621,
+      "imports": [],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "application": 1888
+      }
+    },
+    {
+      "file": "assets/esm-CsOg5o8t.js",
+      "entry": false,
+      "bytes": 436286,
+      "gzipBytesNodeLevel6": 113383,
+      "imports": [],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "@zxing/library": 811525,
+        "@zxing/browser": 51034,
+        "ts-custom-error": 1543
+      }
+    },
+    {
+      "file": "assets/hls-4U1xkJAb.js",
+      "entry": false,
+      "bytes": 509709,
+      "gzipBytesNodeLevel6": 156139,
+      "imports": [],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "hls.js": 959836
+      }
+    },
+    {
+      "file": "assets/src-CXM2kgbP.js",
+      "entry": false,
+      "bytes": 345779,
+      "gzipBytesNodeLevel6": 102788,
+      "imports": [
+        "assets/chunk-aKtaBQYM.js"
+      ],
+      "dynamicImports": [],
+      "packagesByRenderedLength": {
+        "epubjs": 228811,
+        "jszip": 205289,
+        "@xmldom/xmldom": 94074,
+        "localforage": 65119,
+        "marks-pane": 12516,
+        "path-webpack": 9732,
+        "lodash": 8948,
+        "es5-ext": 4545,
+        "event-emitter": 2975,
+        "type": 1990,
+        "d": 1518
+      }
+    }
+  ],
+  "duplicateRenderedModules": []
+}

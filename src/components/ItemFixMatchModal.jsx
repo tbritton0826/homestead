@@ -1,3 +1,4 @@
+import useDialogFocus from "../hooks/useDialogFocus.js";
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -8,12 +9,8 @@ export default function ItemFixMatchModal({ library, item, onClose, onSaved }) {
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState('');
   const generation = useRef(0);
+  useDialogFocus({ selector: ".item-picker-modal", open: true, onClose, canClose: !busy });
   const localId = String(item.localId || item.originalItem?.id || item.id || '');
-  useEffect(() => {
-    const close = (event) => { if (event.key === 'Escape' && !busy) { event.stopImmediatePropagation(); onClose(); } };
-    window.addEventListener('keydown', close, true);
-    return () => window.removeEventListener('keydown', close, true);
-  }, [busy, onClose]);
   useEffect(() => () => { generation.current++; }, []);
   async function search(event) {
     event?.preventDefault(); if (busy) return;
@@ -45,7 +42,7 @@ export default function ItemFixMatchModal({ library, item, onClose, onSaved }) {
     <section className="item-picker-modal" role="dialog" aria-modal="true" aria-label="Fix Match" onClick={(event) => event.stopPropagation()}>
       <header><div><h2>Fix Match</h2><p>{item.title || item.name || item.artist}</p></div><button className="secondary-button" disabled={busy} onClick={onClose}>Close</button></header>
       <p>Search {library === 'books' ? 'by title, author, or ISBN (isbn:978…)': 'for the correct artist'}. Confirmed matches stay locked; media files are not renamed or moved.</p>
-      <form className="item-match-search" onSubmit={search}><input autoFocus aria-label="Title, author or identifier" value={query} onChange={(event) => setQuery(event.target.value)} /><button className="primary-button" disabled={busy || !query.trim()}>{busy ? 'Working…' : 'Search'}</button></form>
+      <form className="item-match-search" onSubmit={search}><input aria-label="Title, author or identifier" value={query} onChange={(event) => setQuery(event.target.value)} /><button className="primary-button" disabled={busy || !query.trim()}>{busy ? 'Working…' : 'Search'}</button></form>
       {error && <p role="alert">{error}</p>}
       {searched && !candidates.length && <p>No candidates found. Keep this item for review—no substitute has been applied.</p>}
       <div className="item-match-results">{candidates.map((candidate) => <article key={`${candidate.provider}:${candidate.providerId}`}>
