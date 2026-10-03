@@ -28,6 +28,10 @@ import { resolvePhotoAlbumAppearance } from "./utils/photo-appearance.js";
 import { appearanceScope, appearanceScopeKey, getScopedAppearanceOverrides, withScopedAppearanceOverrides, explicitAppearanceChanges, normalizeLegacyAppearance, appearanceCacheKey, cacheAppearanceScope, clearAppearanceScopeCache, loadAppearanceCache, appearanceDialogVariables, createAppearanceSaveQueue } from "./utils/appearance-state.js";
 
 
+import ProgressiveLibraryGrid from "./components/ProgressiveLibraryGrid.jsx";
+import { createAppearancePreviewBuffer, appearanceNumericVariables } from "./utils/appearance-preview.js";
+import { handlePosterFallback } from "./utils/image-fallback.js";
+
 import ModelViewer from "./components/ModelViewer";
 import ePub from "epubjs";
 import MediaStatusBadge from "./components/MediaStatusBadge.jsx";
@@ -525,6 +529,7 @@ function AlphaJumpRail({ items = [], libraryId = "library" }) {
   if (!availableLetters.size) return null;
 
   const jumpToLetter = (letter) => {
+    window.dispatchEvent(new CustomEvent("homestead-alpha-reveal", { detail: { libraryId, letter } }));
     const target = document.querySelector(
       `[data-alpha-library="${libraryId}"][data-alpha-letter="${letter}"]`
     );
@@ -14296,9 +14301,9 @@ function SharedCollectionCard({ collection, onClick }) {
         <img
           src={collection.poster || "/placeholder-banner.jpg"}
           alt=""
-          onError={(event) => {
-            event.currentTarget.src = "/placeholder-banner.jpg";
-          }}
+          loading="lazy"
+          decoding="async"
+          onError={(event) => handlePosterFallback(event, "/placeholder-banner.jpg")}
         />
       </div>
       <div className="shared-collection-info">
@@ -16317,9 +16322,8 @@ useEffect(() => {
       ) : (
         <>
       <AlphaJumpRail items={filteredMovies} libraryId="movies" />
-      <div className="tv-grid alpha-aware-grid movie-library-grid">
-        {filteredMovies.map((movie) => (
-  <button
+      <ProgressiveLibraryGrid className="tv-grid alpha-aware-grid movie-library-grid" libraryId="movies" items={filteredMovies} getLetter={(item) => getAlphabetBucket(item.title)} renderItem={(movie) => (
+<button
     key={movie.id}
     className="tv-card simple-tv-card"
     data-alpha-library="movies"
@@ -16329,18 +16333,18 @@ useEffect(() => {
     <img
   src={movie.poster}
   alt=""
-  onError={(event) => {
-    event.currentTarget.src = "/placeholder-poster.jpg";
-  }}
+  loading="lazy"
+  decoding="async"
+  onError={handlePosterFallback}
 />
 
     <div className="tv-card-overlay">
       <h3>{movie.title}</h3>
     </div>
   </button>
-))}
-
+)} />
 {showRequestPlaceholder && (
+<div className="tv-grid alpha-aware-grid movie-library-grid">
   <button
   key={requestPlaceholderMovie.id}
   className="tv-card simple-tv-card"
@@ -16353,8 +16357,9 @@ useEffect(() => {
     <p>Requested</p>
   </div>
 </button>
+</div>
 )}
-      </div>
+
         </>
       )}
     </div>
@@ -16781,9 +16786,8 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
       ) : (
         <>
       <AlphaJumpRail items={filteredShows} libraryId="tv" />
-      <div className="tv-grid alpha-aware-grid">
-        {filteredShows.map((show) => (
-          <button
+      <ProgressiveLibraryGrid className="tv-grid alpha-aware-grid" libraryId="tv" items={filteredShows} getLetter={(item) => getAlphabetBucket(item.title)} renderItem={(show) => (
+<button
             key={show.localId || show.id}
             className="tv-card simple-tv-card"
             data-alpha-library="tv"
@@ -16793,17 +16797,16 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
             <img
   src={show.poster}
   alt=""
-  onError={(event) => {
-    event.currentTarget.src = "/placeholder-poster.jpg";
-  }}
+  loading="lazy"
+  decoding="async"
+  onError={handlePosterFallback}
 />
 
             <div className="tv-card-overlay">
               <h3>{show.title}</h3>
             </div>
           </button>
-        ))}
-      </div>
+)} />
         </>
       )}
     </div>
@@ -20562,7 +20565,7 @@ function YouTubeArtwork({ candidates = [], alt = "", className = "" }) {
   useEffect(() => setCandidateIndex(0), [normalized.join("|")]);
   const source = normalized[candidateIndex] || "";
   if (!source) return <div className={`youtube-artwork-fallback ${className}`} aria-label="Artwork unavailable"><span>▶</span></div>;
-  return <img className={className} src={getLocalApiFileUrl(source)} alt={alt} loading="lazy" onError={() => setCandidateIndex((current) => current + 1)} />;
+  return <img className={className} src={getLocalApiFileUrl(source)} alt={alt} loading="lazy" decoding="async" onError={() => setCandidateIndex((current) => current + 1)} />;
 }
 
 function buildYouTubeSeriesCatalog(creators = [], dedicatedSeries = []) {
@@ -21353,9 +21356,7 @@ function BookCard({ book, onClick }) {
   alt=""
   loading="lazy"
   decoding="async"
-  onError={(event) => {
-    event.currentTarget.src = "/placeholder-poster.jpg";
-  }}
+  onError={handlePosterFallback}
 />
 
       <div className="person-card-body">
@@ -23755,8 +23756,7 @@ onClick={() => {
 )}
 
 {libraryTab === "artists" && (
-  <div className="tv-grid music-grid alpha-aware-grid">
-    {artistGroups.map((group) => (
+  <ProgressiveLibraryGrid className="tv-grid music-grid alpha-aware-grid" libraryId="music-artists" items={artistGroups} getLetter={(item) => getAlphabetBucket(item.artist)} renderItem={(group) => (
       <button
         key={group.artist}
         className="tv-card simple-tv-card"
@@ -23769,6 +23769,7 @@ onClick={() => {
           data-fallback-poster={group.fallbackPoster || ""}
           alt={group.artist}
           loading="lazy"
+          decoding="async"
           onError={(event) => {
             const fallback = event.currentTarget.dataset.fallbackPoster || "";
             if (fallback && event.currentTarget.src !== new URL(fallback, window.location.href).href) {
@@ -23789,8 +23790,8 @@ onClick={() => {
           {group.artworkReason && <small className="music-artwork-status">{group.artworkReason}</small>}
         </div>
       </button>
-    ))}
-  </div>
+
+  )} />
 )}
 
 {libraryTab === "songs" && (
@@ -24627,17 +24628,11 @@ const hasAudiobook = audiobookFiles.length > 0;
       )}
 
       {libraryTab === "all" && (
-        <div className="grid book-grid alpha-aware-grid">
-          {bookWorks.map((book) => (
-            <div
-              key={book.id}
-              data-alpha-library="books-all"
-              data-alpha-letter={getAlphabetBucket(book.title)}
-            >
-              <BookCard book={book} onClick={() => setSelectedBook(book)} />
-            </div>
-          ))}
-        </div>
+        <ProgressiveLibraryGrid className="grid book-grid alpha-aware-grid" libraryId="books-all" items={bookWorks} getLetter={(item) => getAlphabetBucket(item.title)} renderItem={(book) => (
+          <div key={book.id} data-alpha-library="books-all" data-alpha-letter={getAlphabetBucket(book.title)}>
+            <BookCard book={book} onClick={() => setSelectedBook(book)} />
+          </div>
+        )} />
       )}
 
       {libraryTab === "authors" && (
@@ -46306,8 +46301,25 @@ function getAppearanceArtworkCandidates(mediaIndex = {}, activeLibrary = "movies
   return candidates.slice(0, 240);
 }
 
-function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onReset, mediaIndex, initialTab = "library", albumId = "", albumName = "", scopeMode = "library", onScopeModeChange, pageLabel = "", status = "", busy = false, ready = true, pageSupported = false, uploadScope = "" }) {
-  const setNumber = (key, value) => onChange({ ...values, [key]: Number(value) });
+function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onReset, mediaIndex, initialTab = "library", albumId = "", albumName = "", scopeMode = "library", onScopeModeChange, pageLabel = "", status = "", busy = false, ready = true, pageSupported = false, uploadScope = "", onPreview }) {
+  const [previewValues, setPreviewValues] = useState({});
+  const previewCallbacks = useRef({});
+  const previewBuffer = useRef(null);
+  previewCallbacks.current = { onChange, onPreview };
+  if (!previewBuffer.current) previewBuffer.current = createAppearancePreviewBuffer({
+    preview: (changes) => { setPreviewValues(changes); previewCallbacks.current.onPreview?.(changes); },
+    commit: (changes) => previewCallbacks.current.onChange((current) => ({ ...current, ...changes })),
+  });
+  useEffect(() => () => previewBuffer.current.cancel(), []);
+  const commitPreview = () => previewBuffer.current.flush();
+  const closeEditor = () => { commitPreview(); onClose(); };
+  const resetEditor = () => { previewBuffer.current.cancel(); onReset(); };
+  values = { ...values, ...previewValues };
+  const setNumber = (key, value) => {
+    if (onPreview) previewBuffer.current.change(key, Number(value));
+    else onChange({ ...values, [key]: Number(value) });
+  };
+  const previewStatus = Object.keys(previewValues).length ? "Previewing…" : status;
   const label = scopeMode === "global" ? "All Libraries" : albumId ? albumName || "Photo Album" : getAppearanceLibraryLabel(library);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -46354,17 +46366,17 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
   };
   return typeof document !== "undefined" ? createPortal(
     <div className="media-appearance-overlay public-media-custom-appearance" style={appearanceDialogVariables(values)} role="dialog" aria-modal="true" aria-label={`${label} appearance`}>
-      <button className="media-appearance-backdrop" type="button" aria-label="Close appearance" onClick={onClose} />
+      <button className="media-appearance-backdrop" type="button" aria-label="Close appearance" onClick={closeEditor} />
       <section className="media-appearance-card">
         <header>
           <div><p className="eyebrow">{albumId ? "Album Settings" : scopeMode === "global" ? "Global Settings" : scopeMode === "page" ? "Page Settings" : "Library Settings"}</p><h2>{scopeMode === "page" && pageLabel ? pageLabel : label}</h2><span>{albumId ? "Changes apply only to this album. Reset restores inherited library settings." : scopeMode === "global" ? "Account defaults inherited by every library. Reset removes these overrides." : scopeMode === "page" ? "Saved for this user and this page. Reset restores inherited library settings." : "Saved for this user and inherited by every page in this library."}</span></div>
-          <button className="secondary-button" type="button" onClick={onClose}>Close</button>
+          <button className="secondary-button" type="button" onClick={closeEditor}>Close</button>
         </header>
-        <fieldset disabled={busy || !ready} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+        <fieldset onPointerDown={(event) => { if (event.target.type === "range") previewBuffer.current.hold(); }} onPointerUp={() => previewBuffer.current.release()} onPointerCancel={() => previewBuffer.current.release()} onBlurCapture={(event) => { if (event.target.type === "range") commitPreview(); }} disabled={busy || !ready} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {!albumId && onScopeModeChange && <div className="media-appearance-scope-toggle" role="group" aria-label="Appearance scope">
-          <button type="button" className={scopeMode === "global" ? "active" : ""} onClick={() => onScopeModeChange("global")}>All Libraries</button>
-          <button type="button" className={scopeMode === "library" ? "active" : ""} onClick={() => onScopeModeChange("library")}>Whole Library</button>
-          <button type="button" className={scopeMode === "page" ? "active" : ""} disabled={!pageSupported} onClick={() => onScopeModeChange("page")}>This Page</button>
+          <button type="button" className={scopeMode === "global" ? "active" : ""} onClick={() => { commitPreview(); onScopeModeChange("global"); }}>All Libraries</button>
+          <button type="button" className={scopeMode === "library" ? "active" : ""} onClick={() => { commitPreview(); onScopeModeChange("library"); }}>Whole Library</button>
+          <button type="button" className={scopeMode === "page" ? "active" : ""} disabled={!pageSupported} onClick={() => { commitPreview(); onScopeModeChange("page"); }}>This Page</button>
         </div>}
         <nav className="media-appearance-tabs" aria-label={`${label} settings sections`}>
           <button type="button" className={appearanceTab === "library" ? "active" : ""} onClick={() => setAppearanceTab("library")}>{albumId ? "Album" : "Library"}</button>
@@ -46449,10 +46461,10 @@ function MediaLibraryAppearanceStudio({ library, values, onChange, onClose, onRe
           <button className="primary-button" type="button" disabled={autoMatchBusy} onClick={async () => { setAutoMatchBusy(true); try { const response = await fetch(`/api/${autoMatchLibrary}/auto-match/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 100, force: true }) }); const status = await response.json(); setAutoMatchStatus(status); if (response.ok && status.matched > 0) window.dispatchEvent(new CustomEvent("homestead-metadata-match-updated")); } finally { setAutoMatchBusy(false); } }}>{autoMatchBusy ? "Matching…" : `Scan unmatched ${autoMatchLabel} names now`}</button>
         </section>}
         </fieldset>
-        {status && <div className="next-v1-notice" role="status">{status}</div>}
+        {previewStatus && <div className="next-v1-notice" role="status">{previewStatus}</div>}
         {backgroundUploadStatus && <div className="next-v1-notice">{backgroundUploadStatus}</div>}
         {photoPickerTarget && <PhotoLibraryPicker mediaIndex={mediaIndex} libraryKey={library === "adultPhotos" ? "adultPhotos" : "photos"} initialAlbum={albumId} onClose={() => setPhotoPickerTarget("")} onSelect={(url) => onChange((current) => ({ ...current, [photoPickerTarget]: url }))} title={`Choose ${albumId ? label + " album" : label} appearance photo`} />}
-        <footer><button className="secondary-button" type="button" disabled={busy || !ready || backgroundUploadBusy} onClick={onReset}>Reset {label}</button><button className="primary-button" type="button" onClick={onClose}>Done</button></footer>
+        <footer><button className="secondary-button" type="button" disabled={busy || !ready || backgroundUploadBusy} onClick={resetEditor}>Reset {label}</button><button className="primary-button" type="button" onClick={closeEditor}>Done</button></footer>
       </section>
     </div>, document.body
   ) : null;
@@ -47013,6 +47025,25 @@ function HomesteadApp({ sessionUser, onLogout }) {
     try { cacheAppearanceScope(localStorage, appearanceUserId, appearanceDeviceId, scope, saved); }
     catch (error) { console.warn("Appearance saved on server but browser cache failed", scope, error); setAppearanceStatus(appearanceScopeKey(scope), "Saved on server; browser cache unavailable."); return; }
     setAppearanceStatus(appearanceScopeKey(scope), "Saved.");
+  };
+  const previewScopedAppearance = (changes) => {
+    const scope = editingAppearanceScope;
+    const overrides = { ...getScopedAppearanceOverrides(appearanceConfigRef.current, scope, appearanceDeviceId), ...(changes || {}) };
+    const config = withScopedAppearanceOverrides(appearanceConfigRef.current, scope, overrides, appearanceDeviceId);
+    const inherited = resolveUserAppearance(config, activeLibrary, activeAppearancePageScope, {}, appearanceDeviceId);
+    const resolved = photoAppearanceAlbumId ? { ...resolvePhotoAlbumAppearance(inherited, photoAppearanceAlbumId), ...getScopedAppearanceOverrides(config, appearanceScope(activeLibrary, "", "library", photoAppearanceAlbumId), appearanceDeviceId) } : inherited;
+    const main = libraryScrollRef.current;
+    if (!main) return;
+    const variables = appearanceNumericVariables(resolved);
+    if (pageContext.library === activeLibrary && pageContext.hero?.type === "collection") {
+      variables["--library-background-opacity"] = pageContext.hero.backgroundOpacity ?? 0.3;
+      variables["--sidebar-background-opacity"] = pageContext.hero.backgroundOpacity ?? 0.3;
+      variables["--library-background-blur"] = `${pageContext.hero.backgroundBlur ?? 0}px`;
+    }
+    for (const target of [main, ...main.querySelectorAll(".movie-detail-custom-appearance, .tv-detail-custom-appearance"), ...document.querySelectorAll(".sidebar")]) {
+      for (const [name, value] of Object.entries(variables)) target.style.setProperty(name, String(value));
+    }
+    for (const banner of main.querySelectorAll(".photos-library-banner")) banner.style.opacity = String(resolved.bannerOpacity ?? 0.7);
   };
   const changeScopedAppearance = (update) => {
     if (!userAppearanceReady || appearanceResetScope === editingAppearanceKey) return;
@@ -48351,7 +48382,8 @@ const getOwnedStatus = () => "owned";
 
 const searchMetadataMatches = useMemo(() => loadHomesteadMetadataMatches(), [metadataMatchesVersion]);
 
-const searchResults = searchText
+const searchCorpusActive = searchOpen || Boolean(searchText);
+const localSearchCorpus = useMemo(() => searchCorpusActive
   ? [
       ...(canSearchMovies
         ? Object.values(mediaIndex?.libraries?.movies || {}).map((item) => ({
@@ -48465,12 +48497,12 @@ const searchResults = searchText
             })),
           ]
         : []),
-    ].filter((item) => {
-      const haystack = String(item.searchText || `${item.title || ""} ${item.subtitle || ""}`).toLowerCase();
-      const tokens = searchText.split(/\s+/).filter(Boolean);
-      return tokens.every((token) => haystack.includes(token));
-    })
-  : [];
+    ].map((item) => ({ ...item, searchText: String(item.searchText || `${item.title || ""} ${item.subtitle || ""}`).toLowerCase() }))
+  : [], [searchCorpusActive, mediaIndex, searchMetadataMatches, inventorySearchItems, pluginSearchResults, people, performers, celebrities, canSearchMovies, canSearchTv, canSearchBooks, canSearchMusic, canSearchYoutube, canSearchAdult]);
+const searchResults = useMemo(() => {
+  const tokens = searchText.split(/\s+/).filter(Boolean);
+  return tokens.length ? localSearchCorpus.filter((item) => tokens.every((token) => item.searchText.includes(token))) : [];
+}, [localSearchCorpus, searchText]);
 
 useEffect(() => {
   if (!searchText) {
@@ -49317,7 +49349,7 @@ const floatingActions = {
     ready={userAppearanceReady}
     pageSupported={Boolean(activeAppearancePageScope)}
     uploadScope={photoAppearanceAlbumId ? `album:${photoAppearanceAlbumId}` : mediaAppearanceScope === "global" ? "global" : mediaAppearanceScope === "page" ? editingAppearanceScope.scopeId : ""}
-    onChange={changeScopedAppearance}
+    onPreview={previewScopedAppearance} onChange={changeScopedAppearance}
     onClose={closeAppearanceStudio}
     scopeMode={mediaAppearanceScope}
     pageLabel={pageContext.title || active?.name || "This Page"}

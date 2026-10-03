@@ -7,7 +7,7 @@ coverage/
 npm-debug.log*
 
 # Runtime state and user media.
-data/
+/data/
 media/
 config/
 uploads/
