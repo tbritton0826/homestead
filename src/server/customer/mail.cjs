@@ -23,8 +23,8 @@ function createMailer({ pool, env, send }) {
     const data = Buffer.from(payload, 'base64'); const cipher = crypto.createDecipheriv('aes-256-gcm', key, data.subarray(0,12));
     cipher.setAuthTag(data.subarray(12,28)); return JSON.parse(Buffer.concat([cipher.update(data.subarray(28)), cipher.final()]).toString());
   }
-  async function enqueue(db, message) {
-    await db.query('INSERT INTO customer_mail_outbox(id,payload) VALUES($1,$2)', [crypto.randomUUID(), encrypt(message)]);
+  async function enqueue(db, message, notificationKey=null) {
+    await db.query('INSERT INTO customer_mail_outbox(id,payload,notification_key) VALUES($1,$2,$3) ON CONFLICT(notification_key) DO NOTHING', [crypto.randomUUID(), encrypt(message), notificationKey]);
   }
   async function flush() {
     if (!deliver) return;

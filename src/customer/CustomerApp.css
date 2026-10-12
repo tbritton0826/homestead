@@ -11,6 +11,8 @@
 .customer-card p,.customer-main>p { color:#b9c2d1; line-height:1.5; }
 .customer-plan-grid,.customer-dashboard-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:16px; }
 .customer-price { display:block; font-size:1.35rem; }
+.customer-lifetime { margin-top:16px; border-color:#9c88ff; }
+.customer-current,.customer-savings { color:#bbf1d6!important; font-weight:600; }
 .customer-auth { max-width:500px; margin:30px auto; }
 .customer-page form,.customer-page label { display:grid; gap:10px; }
 .customer-page form { gap:18px; margin:18px 0; }
