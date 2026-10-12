@@ -1,4 +1,5 @@
 const { sendIndexJson } = require("./src/server/json-response.cjs");
+const { createArtworkRecovery } = require("./src/server/artwork-recovery.cjs");
 const { createPluginRegistry } = require("./plugins/registry.cjs");
 const { createPluginInstaller } = require("./plugins/installer.cjs");
 const { registerNextVersionRoutes } = require("./src/server/next-version.cjs");
@@ -885,7 +886,7 @@ const METADATA_MATCHES_FILE = path.join(
   HOMESTEAD_DATA_DIR,
   "metadata-matches.json"
 );
-const ARTWORK_RECOVERY_ROOT = path.join(HOMESTEAD_DATA_DIR, "artwork-recovery");
+const artworkRecoverySnapshots = createArtworkRecovery({ dataDir: HOMESTEAD_DATA_DIR });
 const REMOTE_ARTWORK_CACHE_ROOT = path.join(HOMESTEAD_DATA_DIR, "artwork-cache");
 
 function ensureHomesteadDataDir() {
@@ -894,19 +895,8 @@ function ensureHomesteadDataDir() {
   }
 }
 
-function backupArtworkIndexes(reason = "artwork-change") {
-  ensureHomesteadDataDir();
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const destination = path.join(ARTWORK_RECOVERY_ROOT, `${stamp}-${String(reason || "backup").replace(/[^a-z0-9-]+/gi, "-")}`);
-  const sources = [
-    { name: "metadata-matches.json", file: METADATA_MATCHES_FILE },
-    { name: "media-index.json", file: path.join(HOMESTEAD_DATA_DIR, "media-index.json") },
-  ].filter((entry) => fs.existsSync(entry.file));
-  if (!sources.length) return "";
-  fs.mkdirSync(destination, { recursive: true });
-  for (const source of sources) fs.copyFileSync(source.file, path.join(destination, source.name));
-  fs.writeFileSync(path.join(destination, "backup.json"), JSON.stringify({ reason, createdAt: new Date().toISOString(), files: sources.map((entry) => entry.name) }, null, 2));
-  return destination;
+function backupArtworkIndexes(reason = "artwork-change", change) {
+  return artworkRecoverySnapshots.snapshot({ reason }, change).directory;
 }
 
 const METADATA_MATCH_VOLATILE_FIELDS = new Set([
@@ -1102,10 +1092,18 @@ function buildStableTvMatchAliases({ localId = "", localItem = null, metadata = 
 
 function writeMetadataMatches(matches) {
   ensureHomesteadDataDir();
-  if (fs.existsSync(METADATA_MATCHES_FILE)) backupArtworkIndexes("metadata-match");
-  const temporaryPath = `${METADATA_MATCHES_FILE}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(compactMetadataMatches(matches), null, 2));
-  fs.renameSync(temporaryPath, METADATA_MATCHES_FILE);
+  const serialized = JSON.stringify(compactMetadataMatches(matches), null, 2);
+  // Do not copy both full indexes or rewrite the metadata file for a no-op match.
+  if (fs.existsSync(METADATA_MATCHES_FILE) && fs.readFileSync(METADATA_MATCHES_FILE, "utf8") === serialized) return;
+  backupArtworkIndexes("metadata-match", () => {
+    const temporaryPath = `${METADATA_MATCHES_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporaryPath, serialized, { flag: "wx" });
+      fs.renameSync(temporaryPath, METADATA_MATCHES_FILE);
+    } finally {
+      if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    }
+  });
 }
 
 function getMetadataMatchStats(matches = readMetadataMatches()) {
@@ -2851,7 +2849,7 @@ function runScannerCommands(commands = [], callback) {
   try {
     backupArtworkIndexes(isBulkScan ? "before-full-scan" : "before-library-scan");
   } catch (backupError) {
-    console.warn("[artwork] Could not create pre-scan index backup:", backupError.message);
+    console.warn("[artwork] Could not create pre-scan index backup:", backupError.code || "IO_ERROR");
   }
 
   let finished = false;
@@ -3258,25 +3256,32 @@ async function saveConfirmedMatchArtwork({ libraryType = "", localItem = {}, met
     { slot: "backdrop", url: String(metadata.backdrop || metadata.banner || "").trim(), fileName: "fanart.jpg" },
   ].filter((entry) => /^https?:\/\//i.test(entry.url));
   if (!artworkEntries.length) return { saved: [] };
-  const backupDirectory = path.join(ARTWORK_RECOVERY_ROOT, `${new Date().toISOString().replace(/[:.]/g, "-")}-fix-match-${crypto.createHash("sha1").update(targetDirectory).digest("hex").slice(0, 10)}`);
-  const saved = [];
-  await Promise.all(artworkEntries.map(async (entry) => {
+  // Fetch/convert first, then take the shared snapshot/write lock only for filesystem work.
+  const prepared = await Promise.all(artworkEntries.map(async (entry) => {
     const artwork = await fetchRemoteArtworkBuffer(entry.url, { timeoutMs: 9000 });
     if (sharp) await sharp(artwork.buffer, { animated: false }).metadata();
-    const destination = path.join(targetDirectory, entry.fileName);
-    if (fs.existsSync(destination)) {
-      fs.mkdirSync(backupDirectory, { recursive: true });
-      fs.copyFileSync(destination, path.join(backupDirectory, entry.fileName));
-    }
-    const temporaryPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
-    // Normalize provider images to JPEG so poster.jpg/fanart.jpg always match
-    // their on-disk extension and remain compatible with Plex-style agents.
+    // Normalize provider images to JPEG for Plex-style agents.
     const output = sharp ? await sharp(artwork.buffer, { animated: false }).jpeg({ quality: 92, mozjpeg: true }).toBuffer() : artwork.buffer;
-    fs.writeFileSync(temporaryPath, output);
-    fs.renameSync(temporaryPath, destination);
-    saved.push({ slot: entry.slot, file: destination, publicUrl: localArtworkPublicUrl(destination) });
+    return { ...entry, output, destination: path.join(targetDirectory, entry.fileName) };
   }));
-  return { saved, backupDirectory: fs.existsSync(backupDirectory) ? backupDirectory : "" };
+  const scope = crypto.createHash("sha1").update(targetDirectory).digest("hex").slice(0, 10);
+  const saved = [];
+  const backup = artworkRecoverySnapshots.snapshot({
+    reason: `fix-match-${scope}`, kind: "artwork", scope,
+    sources: prepared.map((entry) => ({ name: entry.fileName, file: entry.destination })),
+  }, () => {
+    for (const entry of prepared) {
+      const temporaryPath = `${entry.destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(temporaryPath, entry.output, { flag: "wx" });
+        fs.renameSync(temporaryPath, entry.destination);
+        saved.push({ slot: entry.slot, file: entry.destination, publicUrl: localArtworkPublicUrl(entry.destination) });
+      } finally {
+        if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+      }
+    }
+  });
+  return { saved, backupDirectory: backup.directory };
 }
 
 function decodeArtworkHtml(value = "") {
@@ -24645,10 +24650,15 @@ function repairArtworkReferencesInIndex() {
     }
   }
   if (repaired) {
-    backupArtworkIndexes("before-artwork-relink");
-    const temporaryPath = `${indexPath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(index, null, 2));
-    fs.renameSync(temporaryPath, indexPath);
+    backupArtworkIndexes("before-artwork-relink", () => {
+      const temporaryPath = `${indexPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(temporaryPath, JSON.stringify(index, null, 2), { flag: "wx" });
+        fs.renameSync(temporaryPath, indexPath);
+      } finally {
+        if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+      }
+    });
   }
   return { checked, repaired, items: repairedItems.slice(0, 200) };
 }
@@ -24663,11 +24673,12 @@ app.post("/api/admin/artwork/recover", homesteadAccess.requireAdmin, (req, res) 
 
 app.listen(PORT, () => {
   console.log(`Homestead server running on http://localhost:${PORT}`);
+  if (process.env.HOMESTEAD_CUSTOMER_ONLY !== "true") artworkRecoverySnapshots.start();
   try {
     const artworkRecovery = repairArtworkReferencesInIndex();
     if (artworkRecovery.repaired) console.log(`[artwork] Relinked ${artworkRecovery.repaired} local artwork reference(s).`);
   } catch (error) {
-    console.warn("[artwork] Startup recovery skipped:", error.message);
+    console.warn("[artwork] Startup recovery skipped:", error.code || "IO_ERROR");
   }
   // Recursive Unraid/FUSE inspection runs in a child process so slow mounts
   // can never block the API event loop or the installer health check.
@@ -24677,5 +24688,5 @@ app.listen(PORT, () => {
   setInterval(() => refreshAcquisitionJobs().catch((error) => console.error("[acquisition] Refresh failed:", error.message)), 45000).unref();
 });
 
-process.once("SIGTERM", () => { stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });
-process.once("SIGINT", () => { stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });
+process.once("SIGTERM", () => { artworkRecoverySnapshots.stop(); stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });
+process.once("SIGINT", () => { artworkRecoverySnapshots.stop(); stopLibraryWatchWorker(); setTimeout(() => process.exit(0), 50).unref(); });
