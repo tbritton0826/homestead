@@ -26,7 +26,7 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
   const ready=migrate(pool).then(()=>seedDrafts(pool));
   // Keep startup failure handled even if no customer request has arrived yet.
   let startupFailed=false;ready.catch(()=>{startupFailed=true;console.error('Customer database initialization failed. Run the migration diagnostics.');});
-  const auth=createAuth({pool,config,mailer});const billing=createBilling({pool,provider,config,auth});
+  const auth=createAuth({pool,config,mailer});const billing=createBilling({pool,provider,config,auth,mailer});
   router.use(async(req,res,next)=>{
     res.set('Cache-Control','no-store');res.set('X-Content-Type-Options','nosniff');
     if (startupFailed) return res.status(503).json({message:'Customer database is unavailable.'});
@@ -66,12 +66,12 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
     const customer=auth.requireVerified(req);const access=await billing.entitlements(customer.id);
     if (!access.active) throw failure(403,'No active license is available.');
     if (!env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY) throw failure(503,'License signing is not configured.');
-    const order=['free','family','plus','pro'];
-    const license=access.licenses.sort((a,b)=>order.indexOf(b.tier)-order.indexOf(a.tier))[0];
-    const now=Math.floor(Date.now()/1000);const expiration=Math.min(now+86400,license.expiresAt?Math.floor(new Date(license.expiresAt).getTime()/1000):Infinity);
-    const payload=Buffer.from(JSON.stringify({customerId:customer.id,tier:license.tier,notBefore:now,expiresAt:expiration})).toString('base64url');
+    const license=access.effectiveLicense;
+    const now=Math.floor(Date.now()/1000);const lifetime=Boolean(license.purchaseId && license.productKind==='one_time');
+    const expiration=lifetime?null:Math.min(now+86400,license.expiresAt?Math.floor(new Date(license.expiresAt).getTime()/1000):Infinity);
+    const payload=Buffer.from(JSON.stringify({customerId:customer.id,licenseId:license.id,tier:license.tier,productKind:license.productKind,notBefore:now,...(expiration?{expiresAt:expiration}:{})})).toString('base64url');
     const signature=require('node:crypto').sign(null,Buffer.from(payload),env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY.replace(/\\n/g,'\n')).toString('base64url');
-    res.json({token:`${payload}.${signature}`,expiresAt:new Date(expiration*1000).toISOString()});
+    res.json({token:`${payload}.${signature}`,expiresAt:expiration?new Date(expiration*1000).toISOString():null});
   });
   router.use((req,res)=>res.status(404).json({message:'Customer endpoint not found.'}));
   router.use((error,req,res,next)=>{

@@ -1,3 +1,79 @@
+# Commercial V1.1 validation — 2026-10-12
+
+Branch: `codex/customer-billing-v1-1`, isolated checkout from merged main `c7bf743`.
+The user reports successful V1 PostgreSQL/account/Brevo testing on DDUnraid.
+This pass used no staging/production database, real SMTP or Stripe credentials.
+No push, merge, deployment or DNS change was performed.
+
+## V1.1 changes and results
+
+- Approved USD catalog with Free enrollment, six recurring Prices and the 24999
+  one-time Pro Lifetime offering. Versioned plans preserve V1 history; paid sales
+  remain disabled until environment-specific test mappings are validated.
+- Current-state lifetime Checkout/PaymentIntent/charge reconciliation, owned
+  receipts/purchases, unique fulfillment, refunds and durable manual revocation.
+- Single effective license precedence, separate lifetime/subscription grants,
+  paid-period cancellation and backward-compatible Ed25519 lifetime tokens.
+- Encrypted billing notifications with durable business-event deduplication,
+  validated test portal configuration and provider Price availability checks.
+- Pricing intervals/savings/current tier, lifetime dashboard status and explicit
+  confirmed/pending/failed/refunded checkout states.
+- Append-only migration `002-purchase-fulfillment.sql`; 001 remains unchanged.
+  Tests migrate a populated V1 schema and preserve identity, mail, purchase
+  snapshot, original price and checksum, including repeated migration/seeding.
+
+| Check | Result |
+| --- | --- |
+| `npm run test:customer` | 42 passed, 0 failed |
+| `npm test` | Passed |
+| `npm run test:full-pass` | Passed |
+| `npm run test:docker-release` | Static release checks passed |
+| `npm run build` | Passed; existing large media chunk warnings remain |
+| Desktop 1440×900 | Four tiers, annual prices/savings and lifetime offering checked |
+| Mobile 390×844 / 320×740 | Fixture login, lifetime/effective dashboard, history, annual toggle and already-owned buttons checked; no page horizontal overflow |
+| Browser console | No errors/warnings captured |
+
+The customer suite uses PGlite, a disposable PostgreSQL-compatible fixture, and
+actual Stripe SDK signature validation with mocked remote API responses. It
+covers approved monthly/annual purchases, Free upgrades, lifetime/subscription
+coexistence and precedence, repeated/lost-response checkout, delayed payments,
+partial/full/older-period refunds, ownership, historic amounts, retry and mail
+idempotency. Browser QA used a disposable loopback fixture with synthetic customer
+and lifetime records; it did not execute real Checkout or send mail.
+Ignored screenshot artifacts are under `work/customer-qa/`.
+
+Customer JavaScript: 15.33 kB (4.92 kB gzip); customer CSS: 2.67 kB (0.98 kB gzip).
+Shared entry remains 192.50 kB (60.92 kB gzip). Main media App stays separately
+loaded at 1557.56 kB; model, EPUB, HLS and calendar features remain separate chunks.
+
+Compatible lockfile patches remove seven advisories: audit reduced from 10 to 3
+(2 high, 1 moderate). Remaining production issues: `@xmldom/xmldom`, `epubjs`,
+`sharp`; npm's fixes require breaking media upgrades. Customer dependencies have
+no reported advisories. No forced upgrade was performed.
+
+## V1.1 acceptance still required
+
+No standalone PostgreSQL/Docker executables were available, and no actual Stripe
+account mappings or test credentials were supplied. Real PostgreSQL 17 locking,
+Docker build/Compose/container restart and volume restoration, hosted Stripe test
+payments/webhook delivery/portal operations, and actual billing SMTP delivery
+remain external acceptance checks. The existing PostgreSQL 17 CI workflow was not
+triggered because this branch was not pushed. Mocked tests do not establish those
+results. Static Docker checks are not a Docker image execution.
+
+Lifetime tokens do not expire. The existing offline installer cannot recall an
+already-issued token after refund/revocation. Database access and new issuance
+reflect revocation immediately; installer-side online revocation design/approval
+is a public-sale blocker. Long-term lifetime terms/future-version policy and
+refund/tax/proration/grace/dispute policies require approval. No quantity cap,
+expiry, live-mode switch or automatic cancellation of a separate subscription
+was added. Failed-event recovery relies on Stripe retry/operator resend; mail can
+still duplicate across an SMTP-success/process-crash boundary.
+
+See [V1.1 setup, Products/Prices and DDUnraid acceptance](CUSTOMER_BILLING_V1_1.md).
+
+---
+
 # Customer billing V1 validation â€” 2026-10-11
 
 Implementation is isolated on `codex/customer-billing-v1`, based on `main` at

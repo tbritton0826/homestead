@@ -10,6 +10,21 @@ function createStripeProvider(env, injected) {
   if (env.HOMESTEAD_PAYMENT_MODE && env.HOMESTEAD_PAYMENT_MODE !== 'test') throw new Error('Live billing is disabled in this release');
   if (!/^sk_test_/.test(env.STRIPE_SECRET_KEY || '')) throw new Error('A Stripe test secret key is required');
   const stripe = injected || new (require('stripe'))(env.STRIPE_SECRET_KEY,{ maxNetworkRetries:2,timeout:15000 });
+  async function purchase(session,failed=false) {
+    if(session.mode!=='payment') throw new Error('One-time Checkout mode mismatch');
+    const lines=await stripe.checkout.sessions.listLineItems(session.id,{limit:2});
+    if(lines.has_more || lines.data.length!==1 || lines.data[0].quantity!==1) throw new Error('Only single-product purchases are supported');
+    if(!session.payment_intent) return null;
+    const intent=testOnly(await stripe.paymentIntents.retrieve(ref(session.payment_intent)));
+    if(ref(intent.customer)!==ref(session.customer) || intent.metadata?.homesteadCheckoutId!==session.client_reference_id || intent.amount!==session.amount_total || intent.currency!==session.currency) throw new Error('Purchase payment association mismatch');
+    const charge=intent.latest_charge?testOnly(await stripe.charges.retrieve(ref(intent.latest_charge))):null;
+    if(charge && (ref(charge.customer)!==ref(session.customer) || ref(charge.payment_intent)!==intent.id || charge.amount!==intent.amount || charge.currency!==intent.currency)) throw new Error('Purchase charge association mismatch');
+    const paid=session.status==='complete' && session.payment_status==='paid' && intent.status==='succeeded' && intent.amount_received===intent.amount && charge?.paid===true;
+    const refunded=Number(charge?.amount_refunded || 0);
+    return {id:intent.id,checkoutRef:session.id,customerRef:ref(session.customer),priceRef:ref(lines.data[0].price),amount:intent.amount,currency:intent.currency,
+      paid,refunded,fullyRefunded:refunded>0 && refunded>=intent.amount,paidAt:paid?date(charge.created):null,receiptUrl:charge?.receipt_url || null,
+      status:paid?(refunded>=intent.amount?'refunded':refunded>0?'partially_refunded':'paid'):intent.status==='canceled' || (failed && intent.status==='requires_payment_method')?'failed':'pending'};
+  }
   async function invoice(id, failed = false) {
     const value = testOnly(await stripe.invoices.retrieve(id));
     let refunded=0;
@@ -40,7 +55,8 @@ function createStripeProvider(env, injected) {
     },
     async validatePrice(plan) {
       const price=testOnly(await stripe.prices.retrieve(plan.priceId));
-      if (!price.active || price.unit_amount!==plan.amount || price.currency!==plan.currency || price.recurring?.interval!==plan.billingInterval || price.recurring?.interval_count!==1)
+      const intervalValid=plan.productKind==='one_time'?price.type==='one_time' && !price.recurring:price.recurring?.interval===plan.billingInterval && price.recurring?.interval_count===1;
+      if (!price.active || price.unit_amount!==plan.amount || price.currency!==plan.currency || !intervalValid)
         throw failure(409,'Configured plan does not match the Stripe test Price.');
     },
     async createCustomer(customer) {
@@ -49,37 +65,60 @@ function createStripeProvider(env, injected) {
     async hasSubscription(customerRef) {
       const subscriptions=await stripe.subscriptions.list({customer:customerRef,status:'all',limit:100});
       if (subscriptions.has_more) throw failure(409,'Use billing management for this account.');
-      return subscriptions.data.some(sub=>!['canceled','incomplete_expired'].includes(sub.status));
+      return subscriptions.data.some(sub=>!['canceled','incomplete_expired'].includes(testOnly(sub).status));
     },
-    async checkout({customerRef,priceRef,intentId,origin}) {
-      const session=testOnly(await stripe.checkout.sessions.create({mode:'subscription',customer:customerRef,client_reference_id:intentId,
+    async checkout({customerRef,priceRef,intentId,origin,productKind}) {
+      const session=testOnly(await stripe.checkout.sessions.create({mode:productKind==='one_time'?'payment':'subscription',customer:customerRef,client_reference_id:intentId,
         line_items:[{price:priceRef,quantity:1}],success_url:`${origin}/customer/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url:`${origin}/customer/checkout/cancel`,allow_promotion_codes:false,
-        metadata:{homesteadCheckoutId:intentId}},{idempotencyKey:`homestead-checkout-${intentId}`}));
+        metadata:{homesteadCheckoutId:intentId},...(productKind==='one_time'?{payment_intent_data:{metadata:{homesteadCheckoutId:intentId}}}:{})},{idempotencyKey:`homestead-checkout-${intentId}`}));
       return {id:session.id,url:session.url,status:session.status};
     },
     async checkoutStatus(id) {
       const session=testOnly(await stripe.checkout.sessions.retrieve(id));
-      return {id:session.id,customerRef:ref(session.customer),intentId:session.client_reference_id,status:session.status,paymentStatus:session.payment_status,subscriptionRef:ref(session.subscription)};
+      return {id:session.id,customerRef:ref(session.customer),intentId:session.client_reference_id,status:session.status,paymentStatus:session.payment_status,subscriptionRef:ref(session.subscription),mode:session.mode};
     },
-    async portal(customerRef,origin) {
-      return (await stripe.billingPortal.sessions.create({customer:customerRef,return_url:`${origin}/customer/dashboard`})).url;
+    async portal(customerRef,origin,approvedPrices) {
+      let configuration;
+      if(env.STRIPE_PORTAL_CONFIGURATION_ID) configuration=testOnly(await stripe.billingPortal.configurations.retrieve(env.STRIPE_PORTAL_CONFIGURATION_ID));
+      else {
+        const configurations=await stripe.billingPortal.configurations.list({active:true,limit:100});
+        if(configurations.has_more) throw failure(409,'Configure a specific test billing portal.');
+        configuration=testOnly(configurations.data.find(item=>item.is_default));
+      }
+      if(!configuration.active) throw failure(409,'Test billing portal is inactive.');
+      const update=configuration.features?.subscription_update;
+      if(update?.enabled && (!update.products?.length || update.default_allowed_updates?.some(value=>value!=='price') || update.products.some(product=>product.adjustable_quantity?.enabled || !product.prices?.length || product.prices.some(price=>!approvedPrices.includes(price)))))
+        throw failure(409,'Billing portal offers an unapproved plan or quantity change. Contact billing support.');
+      return (await stripe.billingPortal.sessions.create({customer:customerRef,return_url:`${origin}/customer/dashboard`,configuration:configuration.id})).url;
     },
     customerReference(event) {return ref(event.data.object.customer);},
     async resolve(event) {
       const object=event.data.object;
-      let subId,invoiceId,checkout;
+      let subId,invoiceId,checkout,session;
       if (event.type.startsWith('customer.subscription.')) subId=object.id;
       else if (event.type.startsWith('invoice.')) invoiceId=object.id;
       else if (event.type.startsWith('checkout.session.')) {
-        checkout=await this.checkoutStatus(object.id);subId=checkout.subscriptionRef;
+        session=testOnly(await stripe.checkout.sessions.retrieve(object.id));checkout=await this.checkoutStatus(object.id);subId=checkout.subscriptionRef;
       } else if (event.type==='charge.refunded') {
         const charge=testOnly(await stripe.charges.retrieve(object.id));
         if (!charge.payment_intent) throw new Error('Refund could not be associated with an invoice payment');
         const payments=await stripe.invoicePayments.list({payment:{type:'payment_intent',payment_intent:ref(charge.payment_intent)},limit:100});
-        if (payments.has_more || payments.data.length!==1) throw new Error('Refund invoice association is ambiguous');
-        invoiceId=ref(payments.data[0].invoice);
+        if (payments.has_more || payments.data.length>1) throw new Error('Refund invoice association is ambiguous');
+        if(payments.data.length) invoiceId=ref(payments.data[0].invoice);
+        else {
+          const sessions=await stripe.checkout.sessions.list({payment_intent:ref(charge.payment_intent),limit:2});
+          if(sessions.has_more || sessions.data.length!==1) throw new Error('Refund Checkout association is ambiguous');
+          session=testOnly(await stripe.checkout.sessions.retrieve(sessions.data[0].id));checkout=await this.checkoutStatus(session.id);
+        }
+      } else if(event.type==='payment_intent.payment_failed' || event.type==='payment_intent.succeeded') {
+        const sessions=await stripe.checkout.sessions.list({payment_intent:object.id,limit:2});
+        if(sessions.has_more || sessions.data.length>1) throw new Error('Payment Checkout association is ambiguous');
+        // Invoice payments are reconciled by invoice/subscription events instead.
+        if(!sessions.data.length || sessions.data[0].mode!=='payment') return null;
+        session=testOnly(await stripe.checkout.sessions.retrieve(sessions.data[0].id));checkout=await this.checkoutStatus(session.id);
       } else return null;
+      if(session?.mode==='payment') return {checkout,purchases:[await purchase(session,event.type.endsWith('payment_failed'))].filter(Boolean)};
       const invoices=[];
       if (invoiceId) { const value=await invoice(invoiceId,event.type==='invoice.payment_failed');invoices.push(value);subId=value.subscriptionRef; }
       if (!subId) return {checkout,invoices};
@@ -88,6 +127,7 @@ function createStripeProvider(env, injected) {
       const item=sub.items.data[0];const latestId=ref(sub.latest_invoice);
       let latest=invoices.find(value=>value.id===latestId);
       if (latestId && !latest) {latest=await invoice(latestId);invoices.push(latest);}
+      if(latest && (latest.customerRef!==ref(sub.customer) || latest.subscriptionRef!==sub.id)) throw new Error('Subscription funding association mismatch');
       return {checkout,invoices,subscription:{id:sub.id,customerRef:ref(sub.customer),priceRef:ref(item.price),status:sub.status,
         periodStart:date(item.current_period_start),periodEnd:date(item.current_period_end),trialEnd:date(sub.trial_end),
         cancelAtPeriodEnd:sub.cancel_at_period_end,cancelAt:date(sub.cancel_at),canceledAt:date(sub.canceled_at),

@@ -1,5 +1,8 @@
 # Customer accounts and billing V1
 
+Historical V1 guide. For the approved catalog, lifetime purchases, billing emails
+and current deployment instructions, see [Commercial V1.1](CUSTOMER_BILLING_V1_1.md).
+
 This extends the existing React/Vite and Express app. Billing is **test-only** and
 disabled by default. No approved prices were found, so all seven existing
 Free/Family/Plus/Pro tier/interval entries start as inactive drafts. The local
