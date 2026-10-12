@@ -1,0 +1,50 @@
+services:
+  customer-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: homestead_customer
+      POSTGRES_USER: homestead_customer
+      POSTGRES_PASSWORD: ${CUSTOMER_DB_PASSWORD:?Set a dedicated customer database password}
+    volumes:
+      - customer-database:/var/lib/postgresql/data
+    networks: [customer-private]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U homestead_customer -d homestead_customer"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  customer-web:
+    build: .
+    ports:
+      - "127.0.0.1:${CUSTOMER_PORT:-7315}:7312"
+    environment:
+      NODE_ENV: production
+      PORT: "7312"
+      HOMESTEAD_CUSTOMER_ENABLED: "true"
+      HOMESTEAD_CUSTOMER_ONLY: "true"
+      HOMESTEAD_CUSTOMER_DATABASE_URL: ${HOMESTEAD_CUSTOMER_DATABASE_URL:?Set a dedicated PostgreSQL connection URL}
+      HOMESTEAD_CUSTOMER_ORIGIN: ${HOMESTEAD_CUSTOMER_ORIGIN:?Set the public HTTPS customer origin}
+      HOMESTEAD_TRUST_PROXY: ${HOMESTEAD_TRUST_PROXY:-loopback}
+      HOMESTEAD_CUSTOMER_SMTP_URL: ${HOMESTEAD_CUSTOMER_SMTP_URL:?Configure email delivery}
+      HOMESTEAD_CUSTOMER_MAIL_FROM: ${HOMESTEAD_CUSTOMER_MAIL_FROM:?Set the sender}
+      HOMESTEAD_CUSTOMER_MAIL_KEY: ${HOMESTEAD_CUSTOMER_MAIL_KEY:?Set the mail encryption key}
+      HOMESTEAD_PAYMENT_MODE: test
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY: ${HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY:-}
+      HOMESTEAD_DATA_DIR: /app/data
+    volumes:
+      - customer-application:/app/data
+    networks: [customer-private, customer-egress]
+    depends_on:
+      customer-db:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  customer-database:
+  customer-application:
+networks:
+  customer-private:
+    internal: true
+  customer-egress: {}

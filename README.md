@@ -10,6 +10,10 @@ placeholder account or trial.
 
 See `INSTALL.md` for Windows, Docker, Linux, and Unraid instructions.
 
+Opt-in commercial customer accounts and Stripe test billing are documented in
+[Customer billing V1](docs/CUSTOMER_BILLING_V1.md). This uses separate PostgreSQL
+storage and does not change local library accounts or enable live payments.
+
 The standard Docker install pulls `ghcr.io/tbritton0826/homestead:latest`.
 Release automation and a separate, submission-ready Unraid Community Apps
 metadata repository are included for maintainers.
