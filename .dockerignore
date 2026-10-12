@@ -3,6 +3,9 @@
 /.git
 /.github
 /.env
+/.env.*
+!/.env.example
+/customer-secrets
 /data
 /media
 /config

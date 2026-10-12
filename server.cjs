@@ -198,6 +198,10 @@ function saveAdultRecommendationProviders(input = []) {
 
 app.set("trust proxy", process.env.HOMESTEAD_TRUST_PROXY || "loopback");
 app.disable("x-powered-by");
+// Dedicated commercial deployment must not expose the installation's local owner/media APIs.
+if (process.env.HOMESTEAD_CUSTOMER_ONLY === "true") {
+  app.use(require("./src/server/customer/index.cjs").customerOnlyGate);
+}
 app.use(cors({
   credentials: true,
   origin(origin, callback) {
@@ -215,6 +219,8 @@ app.use((req, res, next) => {
   res.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()");
   next();
 });
+// Commercial accounts own their database and cookies; local media authorization remains unchanged.
+require("./src/server/customer/index.cjs").mountCustomer({ app, express });
 app.use(express.json({ limit: "32mb" }));
 
 // Register authentication before every API route, including plugin management.

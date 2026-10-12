@@ -41,6 +41,6 @@ ENV NODE_ENV=production
 EXPOSE 7312
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:7312/api/platform').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:7312'+(process.env.HOMESTEAD_CUSTOMER_ONLY==='true'?'/api/customer/health':'/api/platform')).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 CMD ["node", "server.cjs"]

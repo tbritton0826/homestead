@@ -4,6 +4,9 @@
   "version": "0.6.8.64",
   "type": "module",
   "scripts": {
+    "test:customer": "node --test scripts/test-customer-billing.cjs",
+    "customer:admin": "node scripts/customer-admin.cjs",
+    "customer:migrate": "node scripts/customer-admin.cjs migrate",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
@@ -40,13 +43,17 @@
     "epubjs": "^0.3.93",
     "express": "^5.2.1",
     "hls.js": "^1.6.16",
+    "nodemailer": "10.1.0",
+    "pg": "8.23.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "sharp": "^0.34.5",
+    "stripe": "23.0.0",
     "three": "^0.184.0",
     "three-stdlib": "^2.36.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@eslint/js": "^10.0.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
