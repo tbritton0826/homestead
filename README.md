@@ -22,3 +22,5 @@ This is development software. Back up persistent data before updating. Homestead
 does not provide media or grant rights to obtain, copy, or distribute content.
 
 Commercial V1.1 test billing, approved prices and lifetime setup: [Customer billing V1.1](docs/CUSTOMER_BILLING_V1_1.md).
+
+Artwork snapshot retention, protection, and offline recovery: [Artwork recovery](docs/artwork-recovery.md).
