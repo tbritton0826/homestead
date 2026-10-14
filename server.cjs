@@ -1,3 +1,4 @@
+const { recipeEditable, recipeEditSupplement } = require("./src/server/recipe-edit.cjs");
 const { sendIndexJson } = require("./src/server/json-response.cjs");
 const { createArtworkRecovery } = require("./src/server/artwork-recovery.cjs");
 const { createPluginRegistry } = require("./plugins/registry.cjs");
@@ -3766,6 +3767,7 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
     const index = recipes.findIndex((recipe) => recipe.id === req.params.recipeId);
     if (index < 0) return res.status(404).json({ ok: false, message: "Recipe not found." });
     const current = recipes[index];
+    if (!recipeEditable(current, req.homesteadAccess?.user)) return res.status(403).json({ ok: false, message: "This recipe is read-only for this account." });
     const fullEdit = Object.prototype.hasOwnProperty.call(req.body || {}, "title");
     let next = {
       ...current,
@@ -3775,12 +3777,15 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
     if (fullEdit) {
       const title = cleanRecipeValue(req.body?.title, 240);
       if (!title) return res.status(400).json({ ok: false, message: "Enter a recipe title before saving." });
+      const supplement = recipeEditSupplement(current, req.body || {}, { categories: recipeCategoriesForRequest(req), cleanValue: cleanRecipeValue, cleanLines: cleanRecipeLines });
+      if (supplement.sourceUrl && recipes.some((entry) => entry.id !== current.id && String(entry.sourceUrl || "").toLowerCase() === supplement.sourceUrl.toLowerCase())) return res.status(409).json({ ok: false, message: "That source link is already saved in Recipes." });
       let image = current.image || "";
       if (req.body?.imageDataUrl) image = await saveRecipeArtwork(current.id, decodeRecipeImageDataUrl(req.body.imageDataUrl));
       else if (req.body?.imageUrl) image = await saveRecipeArtwork(current.id, cleanRecipeValue(req.body.imageUrl, 2000));
       next = {
         ...current,
         title,
+        ...supplement,
         entryType: current.entryType === "quick-instruction" || req.body?.entryType === "quick-instruction" ? "quick-instruction" : "recipe",
         description: cleanRecipeValue(req.body?.description, 8000),
         servings: cleanRecipeValue(req.body?.servings, 120),

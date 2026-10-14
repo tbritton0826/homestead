@@ -45,6 +45,8 @@ import LiveTvSourcesManager from "./components/livetv/LiveTvSourcesManager";
 import AddAdultProfileModal from "./components/adult/AddAdultProfileModal";
 import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
 import "./mobile.css";
+import "./MobileV12.css";
+import { profileMetadataPills, recipeEditorDraft, recipeEditingAllowed } from "./utils/mobile-polish.js";
 
 
 function encodePublicMediaPath(value = "") {
@@ -5028,7 +5030,7 @@ function ProfileBiographyPanel({ profile = {}, bioText = "", onMetadataSaved, ed
   }
 
   return (
-    <div className="profile-biography-panel">
+    <div className="profile-biography-panel" id="profile-biography">
       <div className="profile-biography-header">
         <div>
           <h3>{showPersonalFacts ? "Biography & Profile Facts" : "Biography"}</h3>
@@ -6131,6 +6133,8 @@ function ProfilePage({ person, mediaFiles, onBack, openImageViewer, setSelected,
   const adultProfileVerified = isAdultProfileMetadataVerified(viewPerson);
   const adultBodyDetails = getAdultProfileBodyDetails(m);
   const adultMeasurementsText = formatAdultBodyMeasurements(adultBodyDetails);
+  const profilePills = profileMetadataPills(viewPerson, { allowIntimate: setupConfig?.enabledLibraries?.adult === true && setupConfig?.adultSublibraries?.bodyDetails !== false, measurements: adultMeasurementsText, formatBirthday: (value) => formatHomesteadDate(value, setupConfig) });
+  const showIntimateMetadata = profilePills.some((pill) => pill.intimate);
 const profileImportLibrary = ["performers", "celebrities", "personal"].includes(viewPerson.library)
     ? viewPerson.library
     : "performers";
@@ -6942,7 +6946,10 @@ useEffect(() => {
 
             <p className="summary">{m.biography || m.description || m.notes || viewPerson.summary || person.summary}</p>
 
-            <div className="glass-info-grid" role="region" aria-label="Profile metadata" tabIndex={0}>
+            {profilePills.length > 0 && <div className="library-tabs profile-metadata-pills" role="region" aria-label="Profile metadata" tabIndex={0}>
+              {profilePills.map((pill) => pill.id === "bio" ? <button key={pill.id} type="button" className="tab-button" aria-label="Show biography" onClick={() => { setTab("biography"); requestAnimationFrame(() => document.getElementById("profile-biography")?.scrollIntoView({ block: "start", behavior: "smooth" })); }}><span aria-hidden="true">{pill.icon}</span>{pill.text}</button> : <span key={pill.id} className="tab-button" aria-label={pill.label + ": " + pill.text}><span aria-hidden="true">{pill.icon}</span>{pill.text}</span>)}
+            </div>}
+            {showIntimateMetadata ? <div className="glass-info-grid" role="region" aria-label="Profile metadata" tabIndex={0}>
   {person.library === "celebrities" || person.library === "performers" ? (
     <>
       <div className="glass-info-card">
@@ -7047,7 +7054,7 @@ useEffect(() => {
       </div>
     </>
   )}
-</div>
+</div> : <div className="glass-info-grid" role="region" aria-label="Profile metadata" tabIndex={0}>{profilePills.filter((pill) => pill.id !== "bio").map((pill) => <div key={pill.id} className="glass-info-card"><div className="glass-icon" aria-hidden="true">{pill.icon}</div><span>{pill.label}</span><strong>{pill.text}</strong></div>)}</div>}
           </div>
         </section>
 
@@ -11368,6 +11375,7 @@ useEffect(() => {
     .then((data) => setTvSessionUser(data.user || null))
     .catch(() => {});
 }, []);
+const tvDetailBackground = tvLibraryAppearance?.backgroundImage || displayShow.banner;
 const tvDetailAppearance = useMemo(() => ({
   posterWidth: tvLibraryAppearance?.detailPosterWidth ?? 300,
   posterOpacity: tvLibraryAppearance?.detailPosterOpacity ?? 1,
@@ -11805,9 +11813,13 @@ return (
       "--tv-detail-banner-brightness": `${tvDetailAppearance.bannerBrightness}%`,
       "--tv-detail-panel-opacity": tvDetailAppearance.panelOpacity,
       "--tv-detail-panel-blur": `${tvDetailAppearance.panelBlur}px`,
+      "--tv-detail-background-opacity": tvLibraryAppearance?.backgroundImage ? tvLibraryAppearance.backgroundOpacity ?? 0.22 : 1,
+      "--tv-detail-background-blur": `${tvLibraryAppearance?.backgroundBlur ?? 0}px`,
+      "--tv-detail-background-fit": tvLibraryAppearance?.backgroundFit || "cover",
+      "--tv-detail-background-position": tvLibraryAppearance?.backgroundPosition || "center",
     }}>
       <div className="tv-show-hero">
-        {displayShow.trailer && !playingEpisode ? (
+        {displayShow.trailer && !tvLibraryAppearance?.backgroundImage && !playingEpisode ? (
   <video
     className="tv-show-hero-bg"
     src={displayShow.trailer}
@@ -11817,7 +11829,7 @@ return (
     playsInline
   />
 ) : (
-  <img className="tv-show-hero-bg" src={displayShow.banner} alt="" />
+  <img className="tv-show-hero-bg" src={tvDetailBackground} alt="" />
 )}
 
 <div className="global-nav-buttons">
@@ -20012,10 +20024,11 @@ const EMPTY_RECIPE_DRAFT = {
   favorite: false,
 };
 
-function RecipeWizard({ onClose, onSaved, categories = [] }) {
-  const [step, setStep] = useState("choose");
-  const [method, setMethod] = useState("");
-  const [draft, setDraft] = useState(EMPTY_RECIPE_DRAFT);
+function RecipeWizard({ onClose, onSaved, categories = [], recipe = null }) {
+  const editing = Boolean(recipe?.id);
+  const [step, setStep] = useState(editing ? "details" : "choose");
+  const [method, setMethod] = useState(editing ? "manual" : "");
+  const [draft, setDraft] = useState(() => editing ? recipeEditorDraft(recipe, EMPTY_RECIPE_DRAFT) : EMPTY_RECIPE_DRAFT);
   const [busy, setBusy] = useState(false);
   useDialogFocus({ selector: ".recipe-wizard-overlay", onClose, canClose: !busy });
   const [message, setMessage] = useState("");
@@ -20120,8 +20133,8 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/api/recipes", {
-        method: "POST",
+      const response = await fetch(editing ? `/api/recipes/${encodeURIComponent(recipe.id)}` : "/api/recipes", {
+        method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...draft,
@@ -20149,7 +20162,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
     <div className="recipe-wizard-overlay" role="dialog" aria-modal="true" aria-labelledby="recipe-wizard-title" onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose?.(); }}>
       <section className="recipe-wizard-card" onClick={(event) => event.stopPropagation()}>
         <header className="recipe-wizard-header">
-          <div><p>Recipes · Step {stepNumber} of 4</p><h2 id="recipe-wizard-title">{step === "complete" ? "Recipe Saved" : "Add a Recipe"}</h2><span>{step === "choose" ? "Choose how you want to begin." : step === "capture" ? "Bring in the source material." : step === "details" ? "Correct and complete the recipe." : step === "review" ? "Review everything before saving." : "It is now available throughout Homestead."}</span></div>
+          <div><p>Recipes · Step {stepNumber} of 4</p><h2 id="recipe-wizard-title">{step === "complete" ? (editing ? "Recipe Updated" : "Recipe Saved") : editing ? "Edit Recipe" : "Add a Recipe"}</h2><span>{step === "choose" ? "Choose how you want to begin." : step === "capture" ? "Bring in the source material." : step === "details" ? "Correct and complete the recipe." : step === "review" ? "Review everything before saving." : "It is now available throughout Homestead."}</span></div>
           <button type="button" className="secondary-button" onClick={onClose} disabled={busy} aria-label="Close recipe wizard">×</button>
         </header>
 
@@ -20173,7 +20186,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
           </div>}
 
           {step === "details" && <div className="recipe-wizard-form">
-            {(draft.imageDataUrl || draft.imageUrl) && <img className="recipe-wizard-hero-preview" src={draft.imageDataUrl || draft.imageUrl} alt="Recipe preview" />}
+            {(draft.imageDataUrl || draft.imageUrl || draft.image) && <img className="recipe-wizard-hero-preview" src={draft.imageDataUrl || draft.imageUrl || draft.image} alt="Recipe preview" />}
             <label className="wide"><span>Recipe title</span><input value={draft.title} onChange={(event) => update("title", event.target.value)} autoFocus /></label>
             <label className="wide"><span>Description</span><textarea rows="3" value={draft.description} onChange={(event) => update("description", event.target.value)} /></label>
             <label><span>Category</span><select value={draft.categoryId} onChange={(event) => update("categoryId", event.target.value)}><option value="">Uncategorized</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
@@ -20188,7 +20201,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
           </div>}
 
           {step === "review" && <div className="recipe-wizard-review">
-            {(draft.imageDataUrl || draft.imageUrl) && <img src={draft.imageDataUrl || draft.imageUrl} alt="" />}
+            {(draft.imageDataUrl || draft.imageUrl || draft.image) && <img src={draft.imageDataUrl || draft.imageUrl || draft.image} alt="" />}
             <div><span>{categories.find((category) => category.id === draft.categoryId)?.name || "Uncategorized"}</span><h3>{draft.title || "Untitled recipe"}</h3><p>{draft.description || "No description"}</p><dl><div><dt>Servings</dt><dd>{draft.servings || "Not set"}</dd></div><div><dt>Preparation</dt><dd>{draft.prepTime || "Not set"}</dd></div><div><dt>Cooking</dt><dd>{draft.cookTime || "Not set"}</dd></div><div><dt>Ingredients</dt><dd>{draft.ingredients.split(/\r?\n/).filter(Boolean).length}</dd></div><div><dt>Steps</dt><dd>{draft.directions.split(/\r?\n/).filter(Boolean).length}</dd></div><div><dt>Favorite</dt><dd>{draft.favorite ? "Yes" : "No"}</dd></div></dl>{draft.sourceUrl && <small>Source: {draft.sourceName || draft.sourceUrl}</small>}</div>
           </div>}
 
@@ -20201,7 +20214,7 @@ function RecipeWizard({ onClose, onSaved, categories = [] }) {
         <footer className="recipe-wizard-actions">
           {step === "choose" && <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>}
           {step === "capture" && <><button type="button" className="secondary-button" onClick={() => { setStep("choose"); setError(""); }}>Back</button>{method === "link" ? <><button type="button" className="secondary-button" onClick={() => setStep("details")}>Enter manually</button><button type="button" className="primary-button" disabled={busy || !draft.sourceUrl.trim()} onClick={previewUrl}>{busy ? "Importing…" : "Import & Review"}</button></> : <button type="button" className="primary-button" disabled={busy || !draft.imageDataUrl} onClick={() => setStep("details")}>{busy ? "Reading…" : "Continue"}</button>}</>}
-          {step === "details" && <><button type="button" className="secondary-button" onClick={() => setStep(method === "manual" ? "choose" : "capture")}>Back</button><button type="button" className="primary-button" disabled={!draft.title.trim()} onClick={() => { setError(""); setStep("review"); }}>Review Recipe</button></>}
+          {step === "details" && <><button type="button" className="secondary-button" onClick={() => editing ? onClose?.() : setStep(method === "manual" ? "choose" : "capture")}>{editing ? "Cancel" : "Back"}</button><button type="button" className="primary-button" disabled={!draft.title.trim()} onClick={() => { setError(""); setStep("review"); }}>Review Recipe</button></>}
           {step === "review" && <><button type="button" className="secondary-button" disabled={busy} onClick={() => setStep("details")}>Edit</button><button type="button" className="primary-button" disabled={busy} onClick={saveRecipe}>{busy ? "Saving…" : "Save Recipe"}</button></>}
           {step === "complete" && <button type="button" className="primary-button" onClick={onClose}>Done</button>}
         </footer>
@@ -20235,7 +20248,7 @@ function RecipeDetailsOverlay({ recipe, cookingMode = false, onClose, onToggleFa
   return createPortal(
     <div className={`recipe-detail-overlay ${cookingMode ? "recipe-cooking-mode" : ""}`} role="dialog" aria-modal="true" aria-labelledby="recipe-detail-title" onClick={(event) => { if (event.target === event.currentTarget) onClose?.(); }}>
       <section className="recipe-detail-card">
-        <nav className="recipe-detail-nav" aria-label="Recipe navigation"><button type="button" className="secondary-button" onClick={onClose}>← Back</button>{isQuickInstruction && <button type="button" className="secondary-button recipe-detail-edit" aria-label={`Edit ${recipe.title}`} title="Edit Quick Instruction" onClick={() => onEdit?.(recipe)}>✎ Edit</button>}</nav>
+        <nav className="recipe-detail-nav" aria-label="Recipe navigation"><button type="button" className="secondary-button" onClick={onClose}>← Back</button>{onEdit && recipe.readOnly !== true && recipe.canEdit !== false && <button type="button" className="secondary-button recipe-detail-edit" aria-label={`Edit ${recipe.title}`} title={isQuickInstruction ? "Edit Quick Instruction" : "Edit Recipe"} onClick={() => onEdit?.(recipe)}>✎ Edit</button>}</nav>
         <header className="recipe-detail-header">
           <div>
             <p>{isQuickInstruction ? "Quick Instructions" : "Homestead Recipes"}</p>
@@ -20405,7 +20418,8 @@ function RecipeCategoryEditor({ category, onClose, onSaved, onDeleted }) {
   </div>, document.body);
 }
 
-function RecipesPage({ setActiveLibrary, setupConfig }) {
+function RecipesPage({ setActiveLibrary, setupConfig, sessionUser }) {
+  const canEditRecipes = recipeEditingAllowed(sessionUser, setupConfig);
   const [recipes, setRecipes] = useState([]);
   const [recipeStorage, setRecipeStorage] = useState(null);
   const [recipeView, setRecipeView] = useState("recipes");
@@ -20516,8 +20530,8 @@ function RecipesPage({ setActiveLibrary, setupConfig }) {
         {recipe.image ? <img className="recipe-row-image" src={recipe.image} alt="" loading="lazy" /> : <div className="recipe-row-image recipe-row-image-fallback">{recipe.entryType === "quick-instruction" ? "⏱" : "🍲"}</div>}<div className="recipe-row-copy"><h4>{recipe.title}</h4><p>{recipe.entryType === "quick-instruction" ? [recipe.appliance, recipe.temperature, `${(recipe.quickSteps || []).length} steps`].filter(Boolean).join(" · ") : [recipe.category || "Uncategorized", recipe.prepTime || recipe.cookTime, recipe.servings].filter(Boolean).join(" · ")}</p>{recipe.description && <small>{recipe.description}</small>}<div className="recipe-tags">{(recipe.tags || []).slice(0, 6).map((tag) => <span key={tag}>{tag}</span>)}</div>{recipe.sourceUrl && <a href={recipe.sourceUrl} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>View original source ↗</a>}</div><button type="button" className={`recipe-favorite-button ${recipe.favorite ? "active" : ""}`} aria-label={recipe.favorite ? `Remove ${recipe.title} from favorites` : `Add ${recipe.title} to favorites`} onClick={(event) => { event.stopPropagation(); toggleFavorite(recipe); }}>{recipe.favorite ? "♥" : "♡"}</button>
       </article>)}</div> : <div className="recipe-empty-state"><span>{recipeView === "quick" ? "⏱" : selectedCategoryDetails?.icon || (selectedCategory === "favorites" ? "♡" : "🍲")}</span><h4>{recipeView === "quick" ? "No quick instructions yet" : "No recipes here yet"}</h4><p>{recipeView === "quick" ? "Add the exact routine you want to remember." : "Use the global Add button to bring in a recipe."}</p></div>}
     </section>
-    <RecipeDetailsOverlay recipe={selectedRecipe} cookingMode={focusMode} onClose={() => setSelectedRecipeId("")} onToggleFavorite={toggleFavorite} onEdit={(recipe) => setQuickEditorOpen(recipe)} />
-    {wizardOpen && <RecipeWizard categories={categories} onClose={() => setWizardOpen(false)} onSaved={loadRecipes} />}
+    <RecipeDetailsOverlay recipe={wizardOpen || quickEditorOpen ? null : selectedRecipe} cookingMode={focusMode} onClose={() => setSelectedRecipeId("")} onToggleFavorite={toggleFavorite} onEdit={canEditRecipes ? (recipe) => recipe.entryType === "quick-instruction" ? setQuickEditorOpen(recipe) : setWizardOpen(recipe) : undefined} />
+    {wizardOpen && <RecipeWizard recipe={wizardOpen.id ? wizardOpen : null} categories={categories} onClose={() => setWizardOpen(false)} onSaved={loadRecipes} />}
     {quickEditorOpen && <QuickInstructionEditor recipe={quickEditorOpen.id ? quickEditorOpen : null} onClose={() => setQuickEditorOpen(null)} onSaved={loadRecipes} />}
     {categoryEditor && <RecipeCategoryEditor category={categoryEditor.category} onClose={() => setCategoryEditor(null)} onSaved={() => { setCategoryEditor(null); loadRecipes(); }} onDeleted={(id) => { if (selectedCategory === id) setSelectedCategory("all"); setCategoryEditor(null); loadRecipes(); }} />}
   </div>;
@@ -49606,7 +49620,7 @@ const floatingActions = {
 	) : activeLibrary === "cloud" ? (
       <CloudLibraryV1 />
     ) : activeLibrary === "recipes" ? (
-      <RecipesPage setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setupConfig={setupConfig}/>
+      <RecipesPage setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} sessionUser={sessionUser}/>
 	) : activeLibrary === "arr" ? (
       <AutomationLibraryV1 setupConfig={setupConfig} />
     ) : activeLibrary === "calendar" ? (
@@ -49626,7 +49640,7 @@ const floatingActions = {
     ) : activeLibrary === "movies" ? ( 
       <MoviesPage mediaIndex={mediaIndex} setActiveLibrary={setActiveLibrary} query={query} watchlist={watchlist} setWatchlist={setWatchlist} requests={requests} setRequests={setRequests} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setupConfig={setupConfig} metadataMatchesVersion={metadataMatchesVersion} setRequestedMediaToolPage={setRequestedMediaToolPage} movieLibraryAppearance={mediaLibraryAppearance} onOpenMovieAppearance={() => { setMediaAppearanceInitialTab("detail"); setMediaAppearanceOpen(true); }}/>
     ) : activeLibrary === "tv" ? (
-      <TVShowsPage mediaIndex={mediaIndex} setActiveLibrary={setActiveLibrary} watchlist={watchlist} setWatchlist={setWatchlist} requests={requests} setRequests={setRequests} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} metadataMatchesVersion={metadataMatchesVersion} tvLibraryAppearance={mediaLibraryAppearance} onOpenTvAppearance={() => { setMediaAppearanceInitialTab("detail"); setMediaAppearanceOpen(true); }}/>
+      <TVShowsPage mediaIndex={mediaIndex} setActiveLibrary={setActiveLibrary} watchlist={watchlist} setWatchlist={setWatchlist} requests={requests} setRequests={setRequests} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} metadataMatchesVersion={metadataMatchesVersion} tvLibraryAppearance={mediaLibraryAppearance} onOpenTvAppearance={() => { setMediaAppearanceScope(activeAppearancePageScope.startsWith("tv:") ? "page" : "library"); setMediaAppearanceInitialTab("detail"); setMediaAppearanceOpen(true); }}/>
     ) : activeLibrary === "youtube" ? (
       <YouTubePage setHideSidebar={setHideSidebar} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} mediaIndex={mediaIndex} watchlist={watchlist} setWatchlist={setWatchlist} onOpenYouTubeAppearance={() => { setMediaAppearanceInitialTab("library"); setMediaAppearanceOpen(true); }}/>
 	) : activeLibrary === "photos" ? (
