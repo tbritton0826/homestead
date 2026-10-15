@@ -4,6 +4,8 @@
   "version": "0.6.8.64",
   "type": "module",
   "scripts": {
+    "test:ios-v36": "node --test scripts/test-ios-v36.cjs",
+    "lint:ios-v36": "eslint --config eslint.mobile-v12.config.mjs src/server/profile-media-folders.cjs src/server/book-local-files.cjs scripts/test-ios-v36.cjs",
     "test:mobile-v12": "node --test scripts/test-mobile-v12.cjs",
     "lint:mobile-v12": "eslint --config eslint.mobile-v12.config.mjs src/utils/mobile-polish.js src/server/recipe-edit.cjs scripts/test-mobile-v12.cjs",
     "artwork:recovery": "node scripts/artwork-recovery.cjs",
@@ -31,7 +33,7 @@
     "test:responsiveness": "node scripts/test-public-ui-responsiveness.cjs",
     "test:startup": "node scripts/test-public-startup-pass.cjs",
     "test:qa": "node scripts/test-public-qa.cjs",
-    "test": "npm run test:mobile-v12 && npm run test:artwork-recovery && npm run test:appearance && npm run test:responsiveness && npm run test:startup && node scripts/test-media-polish-pass.cjs && node scripts/test-full-public-pass.cjs && npm run test:qa"
+    "test": "npm run test:mobile-v12 && npm run test:artwork-recovery && npm run test:appearance && npm run test:responsiveness && npm run test:startup && node scripts/test-media-polish-pass.cjs && node scripts/test-full-public-pass.cjs && npm run test:qa && npm run test:ios-v36"
   },
   "dependencies": {
     "@fullcalendar/daygrid": "^6.1.20",
