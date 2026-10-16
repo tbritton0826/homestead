@@ -25088,8 +25088,8 @@ const pets = Object.values(scannedPets).map((petFolder) => {
     weight: metadata.weight || "—",
     age: metadata.age || "—",
     meals: metadata.meals || {},
-    poster: petFolder.poster || `/media/pets/${petFolder.id}/poster.jpg`,
-    banner: petFolder.banner || `/media/pets/${petFolder.id}/banner.jpg`,
+    poster: metadata.poster || petFolder.poster || `/media/pets/${petFolder.id}/poster.jpg`,
+    banner: metadata.banner || petFolder.banner || `/media/pets/${petFolder.id}/banner.jpg`,
     files: petFolder.files || [],
     metadata,
   };

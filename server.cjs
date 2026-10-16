@@ -22,6 +22,8 @@ const {
 const { normalizeTimeoutMs, runWithTimeout } = require("./src/server/async-timeout.cjs");
 const { createProfileFolderService, registerProfileFolderRoutes, canEditProfileFolder } = require("./src/server/profile-media-folders.cjs");
 const { registerBookLocalFiles } = require("./src/server/book-local-files.cjs");
+const { createPetProfiles, registerPetProfiles } = require("./src/server/pet-profiles.cjs");
+const { createComfyBridge, registerComfyBridge } = require("./src/server/comfy-bridge.cjs");
 const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
 const { parseTesseractTsv, tsvToReadableText, parsePersonalScheduleText, parsePositionedSchedule, applyCellTextRecovery, hoursBetween: recognizedScheduleHoursBetween } = require("./src/server/schedule-recognition.cjs");
 const { parseBillOcrText } = require("./src/server/bill-recognition.cjs");
@@ -240,6 +242,26 @@ const homesteadAccess = registerNextVersionRoutes({
 
 // Product entitlements are enforced at the API boundary. Hiding navigation is
 // useful UX, but it is never the security boundary for a paid feature.
+let petScanTimer;
+registerPetProfiles(app, {
+  express, access: homesteadAccess, config: readSetupConfig,
+  service: createPetProfiles({ roots: () => {
+    const config = readSetupConfig();
+    const mapped = normalizeFolderList(config.folderMappings?.pets);
+    return mapped.length ? mapped : [path.join(process.env.MEDIA_ROOT || config.mediaRoot || "/media", "pets")];
+  } }),
+  changed: () => {
+    clearTimeout(petScanTimer);
+    petScanTimer = setTimeout(() => { Promise.resolve(runMediaScan("pets")).catch(() => console.warn("[pets] Library scan could not complete; pet data remains saved.")); }, 2000);
+    petScanTimer.unref();
+  },
+});
+registerComfyBridge(app, {
+  access: homesteadAccess,
+  service: createComfyBridge({ directory: path.join(dataDir, "mobile-ai") }),
+  pluginEnabled: () => Boolean(pluginRegistry.get("homestead-ai-assistant")?.enabled),
+});
+
 app.use("/api/plugins", subscriptionService.requireFeature("plugins"));
 app.use("/api/plugin-catalog", subscriptionService.requireFeature("plugins"));
 app.use("/api/automation", subscriptionService.requireFeature("automation"));
@@ -6971,6 +6993,7 @@ function configuredBookRoots() {
   return [...new Set([
     ...normalizeFolderList(mappings.books),
     ...normalizeFolderList(mappings.ebooks),
+    ...normalizeFolderList(mappings.audiobooks),
     "/media/books",
   ].map((value) => path.resolve(String(value || ""))).filter((value) => {
     try { return fs.statSync(value).isDirectory(); } catch { return false; }
@@ -7105,9 +7128,6 @@ function reconcileNestedBooksMediaIndex() {
 registerBookLocalFiles(app, {
   requireSession: homesteadAccess.requireSession,
   authorizedIndex: (req) => {
-    if (nestedBooksLibraryCache.library && nestedBooksLibraryCache.expiresAt > Date.now()) {
-      return homesteadAccess.filterMediaIndex(req, { libraries: { books: nestedBooksLibraryCache.library } });
-    }
     const index = readJsonFile(path.join(dataDir, "media-index.json"), {});
     return homesteadAccess.filterMediaIndex(req, { libraries: {
       books: scanNestedBooksLibrary(index.libraries?.books || index.books || {}),
