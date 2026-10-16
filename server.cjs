@@ -7057,8 +7057,12 @@ function scanNestedBooksLibrary(existingLibrary = {}, { force = false } = {}) {
   const groups = new Map();
   for (const file of discoveredFiles) {
     const fileParent = path.dirname(file.absolutePath);
-    const audioContainer = file.type === "audiobook" && /^audio\s*books?$/i.test(path.basename(fileParent));
-    const bookFolder = audioContainer ? path.dirname(fileParent) : fileParent;
+    const formatContainer = file.type === "audiobook"
+      ? /^(audio\s*books?|audio)$/i.test(path.basename(fileParent))
+      : /^e\s*books?$/i.test(path.basename(fileParent));
+    // Both format directories belong to their parent work. Otherwise a cached
+    // ID shared by its root and ebook files can overwrite the audio-bearing row.
+    const bookFolder = formatContainer ? path.dirname(fileParent) : fileParent;
     const segments = path.relative(file.root, bookFolder).split(path.sep).filter(Boolean);
     const directInAuthorFolder = segments.length === 1;
     const title = directInAuthorFolder ? bookTitleFromFile(file.name) : segments.at(-1) || bookTitleFromFile(file.name);

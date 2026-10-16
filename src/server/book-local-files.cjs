@@ -3,7 +3,7 @@ function bookDirectory(row) {
   const folder = row.folderPath || row.profileDir || row.sourcePath;
   if (!folder || typeof folder !== 'string') return null;
   const normalized = path.resolve(folder);
-  return /^(audio\s*books?|audio)$/i.test(path.basename(normalized)) ? path.dirname(normalized) : normalized;
+  return /^(audio\s*books?|audio|e\s*books?)$/i.test(path.basename(normalized)) ? path.dirname(normalized) : normalized;
 }
 function relatedBookRecords(index, recordId) {
   const libraries = index.libraries || index;
