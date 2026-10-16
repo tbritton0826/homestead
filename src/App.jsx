@@ -24520,7 +24520,8 @@ useEffect(() => {
       readAlongBook: { id: book.id, title: book.title, author: book.author, poster: book.poster, ebookFiles: readableEbooks(book) },
     }));
     const queueIndex = Math.max(0, Math.min(startIndex, playbackQueue.length - 1));
-    setGlobalAudioTrack({ ...playbackQueue[queueIndex], playbackQueue, queueIndex });
+    setGlobalAudioTrack({ ...playbackQueue[queueIndex], playbackQueue, queueIndex, openPlayer: true });
+    setSelectedBook(null);
   };
 
   if (false && selectedBook) {
@@ -33499,6 +33500,12 @@ function GlobalAudioPlayer({ track, onClose, onTrackChange }) {
   const ebookFiles = readableEbooks(readAlongBook);
   const [ebookIndex, setEbookIndex] = useState(0);
   useEffect(() => { setEbookIndex(0); }, [readAlongBook?.id]);
+  useEffect(() => {
+    if (track?.openPlayer) {
+      setExpanded(true);
+      setActivePanel("");
+    }
+  }, [track]);
 
   const formatTime = (value = 0) => {
     if (!Number.isFinite(value)) return "0:00";
