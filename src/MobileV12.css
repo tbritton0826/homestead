@@ -1,0 +1,40 @@
+/* Focused V1.2 fixes; existing Public V1 tokens, tabs, and scope resolution remain authoritative. */
+.profile-metadata-pills { display: none; }
+.tv-detail-page.tv-detail-custom-appearance .tv-show-hero-bg {
+  filter: brightness(var(--tv-detail-banner-brightness, 100%)) saturate(1.05) blur(var(--tv-detail-background-blur, 0px)) !important;
+  opacity: var(--tv-detail-background-opacity, 1);
+  object-fit: var(--tv-detail-background-fit, cover) !important;
+  object-position: var(--tv-detail-background-position, center) !important;
+}
+.tv-detail-page.tv-detail-custom-appearance .tv-show-poster { max-width: 100%; }
+.tv-detail-page.tv-detail-custom-appearance .tv-show-hero-content { grid-template-columns: minmax(0, var(--tv-detail-poster-width, 300px)) minmax(0, 1fr); }
+.tv-detail-page.tv-detail-custom-appearance :is(.panel, .related-content-section) {
+  background: color-mix(in srgb, var(--media-panel-color, #05080f) calc(var(--tv-detail-panel-opacity, .84) * 100%), transparent) !important;
+}
+@media (max-width: 900px) {
+  .app-shell .main { padding-bottom: var(--homestead-mobile-bottom-clearance, calc(92px + env(safe-area-inset-bottom))) !important; }
+  /* Fixed TV pages do not inherit the main scroller's bottom padding. */
+  .app-shell .tv-detail-page { padding-bottom: var(--homestead-mobile-bottom-clearance, calc(92px + env(safe-area-inset-bottom))) !important; }
+  .profile-page .profile-metadata-pills {
+    display: flex; flex-wrap: nowrap; width: 100%; min-width: 0; max-width: 100%;
+    overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin;
+    gap: 8px; padding: 4px 2px; margin: 12px 0;
+  }
+  .profile-metadata-pills > .tab-button { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; width: auto !important; min-width: 0 !important; min-height: 44px; white-space: nowrap; padding: 10px 14px; }
+  .profile-page:has(.profile-metadata-pills) .glass-info-grid { display: none; }
+  .profile-page .profile-header, .profile-page .profile-info { min-width: 0; max-width: 100%; }
+  .image-viewer-backdrop { padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+  .image-viewer-shell { width: 100%; height: 100%; max-width: 100%; max-height: 100%; }
+  .image-viewer-topbar { top: 0; }
+  .image-viewer-bottombar { bottom: 8px; max-width: 100%; box-sizing: border-box; }
+  .image-viewer-bottombar button { min-width: 44px; min-height: 44px; }
+  .recipe-wizard-overlay { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .recipe-wizard-card { max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  .recipe-detail-body, .recipe-wizard-body { min-height: 0; overscroll-behavior-y: contain; }
+}
+@media (max-width: 600px) {
+  .tv-detail-page.tv-detail-custom-appearance .tv-show-hero-content { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .profile-metadata-pills { scroll-behavior: auto; }
+}

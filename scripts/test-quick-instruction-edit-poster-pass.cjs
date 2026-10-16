@@ -7,7 +7,7 @@ const app = fs.readFileSync(path.join(root, "src", "App.jsx"), "utf8");
 const css = fs.readFileSync(path.join(root, "src", "App.css"), "utf8");
 const server = fs.readFileSync(path.join(root, "server.cjs"), "utf8");
 
-assert(app.includes('title="Edit Quick Instruction"'));
+assert(app.includes('title={isQuickInstruction ? "Edit Quick Instruction" : "Edit Recipe"}'));
 assert(app.includes("function quickInstructionEditorDraft"));
 assert(app.includes('editing ? "PATCH" : "POST"'));
 assert(app.includes('accept="image/jpeg,image/png,image/webp"'));

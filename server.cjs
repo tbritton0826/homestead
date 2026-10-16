@@ -1,3 +1,4 @@
+const { recipeEditable, recipeEditSupplement } = require("./src/server/recipe-edit.cjs");
 const { sendIndexJson } = require("./src/server/json-response.cjs");
 const { createArtworkRecovery } = require("./src/server/artwork-recovery.cjs");
 const { createPluginRegistry } = require("./plugins/registry.cjs");
@@ -19,6 +20,10 @@ const {
   createRevertPatch: createAdultMetadataRevertPatch,
 } = require("./src/server/adult-metadata-service.cjs");
 const { normalizeTimeoutMs, runWithTimeout } = require("./src/server/async-timeout.cjs");
+const { createProfileFolderService, registerProfileFolderRoutes, canEditProfileFolder } = require("./src/server/profile-media-folders.cjs");
+const { registerBookLocalFiles } = require("./src/server/book-local-files.cjs");
+const { createPetProfiles, registerPetProfiles } = require("./src/server/pet-profiles.cjs");
+const { createComfyBridge, registerComfyBridge } = require("./src/server/comfy-bridge.cjs");
 const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
 const { parseTesseractTsv, tsvToReadableText, parsePersonalScheduleText, parsePositionedSchedule, applyCellTextRecovery, hoursBetween: recognizedScheduleHoursBetween } = require("./src/server/schedule-recognition.cjs");
 const { parseBillOcrText } = require("./src/server/bill-recognition.cjs");
@@ -237,6 +242,26 @@ const homesteadAccess = registerNextVersionRoutes({
 
 // Product entitlements are enforced at the API boundary. Hiding navigation is
 // useful UX, but it is never the security boundary for a paid feature.
+let petScanTimer;
+registerPetProfiles(app, {
+  express, access: homesteadAccess, config: readSetupConfig,
+  service: createPetProfiles({ roots: () => {
+    const config = readSetupConfig();
+    const mapped = normalizeFolderList(config.folderMappings?.pets);
+    return mapped.length ? mapped : [path.join(process.env.MEDIA_ROOT || config.mediaRoot || "/media", "pets")];
+  } }),
+  changed: () => {
+    clearTimeout(petScanTimer);
+    petScanTimer = setTimeout(() => { Promise.resolve(runMediaScan("pets")).catch(() => console.warn("[pets] Library scan could not complete; pet data remains saved.")); }, 2000);
+    petScanTimer.unref();
+  },
+});
+registerComfyBridge(app, {
+  access: homesteadAccess,
+  service: createComfyBridge({ directory: path.join(dataDir, "mobile-ai") }),
+  pluginEnabled: () => Boolean(pluginRegistry.get("homestead-ai-assistant")?.enabled),
+});
+
 app.use("/api/plugins", subscriptionService.requireFeature("plugins"));
 app.use("/api/plugin-catalog", subscriptionService.requireFeature("plugins"));
 app.use("/api/automation", subscriptionService.requireFeature("automation"));
@@ -3766,6 +3791,7 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
     const index = recipes.findIndex((recipe) => recipe.id === req.params.recipeId);
     if (index < 0) return res.status(404).json({ ok: false, message: "Recipe not found." });
     const current = recipes[index];
+    if (!recipeEditable(current, req.homesteadAccess?.user)) return res.status(403).json({ ok: false, message: "This recipe is read-only for this account." });
     const fullEdit = Object.prototype.hasOwnProperty.call(req.body || {}, "title");
     let next = {
       ...current,
@@ -3775,12 +3801,15 @@ app.patch("/api/recipes/:recipeId", homesteadAccess.requireSession, async (req, 
     if (fullEdit) {
       const title = cleanRecipeValue(req.body?.title, 240);
       if (!title) return res.status(400).json({ ok: false, message: "Enter a recipe title before saving." });
+      const supplement = recipeEditSupplement(current, req.body || {}, { categories: recipeCategoriesForRequest(req), cleanValue: cleanRecipeValue, cleanLines: cleanRecipeLines });
+      if (supplement.sourceUrl && recipes.some((entry) => entry.id !== current.id && String(entry.sourceUrl || "").toLowerCase() === supplement.sourceUrl.toLowerCase())) return res.status(409).json({ ok: false, message: "That source link is already saved in Recipes." });
       let image = current.image || "";
       if (req.body?.imageDataUrl) image = await saveRecipeArtwork(current.id, decodeRecipeImageDataUrl(req.body.imageDataUrl));
       else if (req.body?.imageUrl) image = await saveRecipeArtwork(current.id, cleanRecipeValue(req.body.imageUrl, 2000));
       next = {
         ...current,
         title,
+        ...supplement,
         entryType: current.entryType === "quick-instruction" || req.body?.entryType === "quick-instruction" ? "quick-instruction" : "recipe",
         description: cleanRecipeValue(req.body?.description, 8000),
         servings: cleanRecipeValue(req.body?.servings, 120),
@@ -6964,6 +6993,7 @@ function configuredBookRoots() {
   return [...new Set([
     ...normalizeFolderList(mappings.books),
     ...normalizeFolderList(mappings.ebooks),
+    ...normalizeFolderList(mappings.audiobooks),
     "/media/books",
   ].map((value) => path.resolve(String(value || ""))).filter((value) => {
     try { return fs.statSync(value).isDirectory(); } catch { return false; }
@@ -7094,6 +7124,17 @@ function reconcileNestedBooksMediaIndex() {
   writeJsonFile(indexPath, next);
   return next;
 }
+
+registerBookLocalFiles(app, {
+  requireSession: homesteadAccess.requireSession,
+  authorizedIndex: (req) => {
+    const index = readJsonFile(path.join(dataDir, "media-index.json"), {});
+    return homesteadAccess.filterMediaIndex(req, { libraries: {
+      books: scanNestedBooksLibrary(index.libraries?.books || index.books || {}),
+      audiobooks: index.libraries?.audiobooks || index.audiobooks || {},
+    } });
+  },
+});
 
 function buildLiveMediaIndex() {
   const indexPath = path.join(
@@ -17319,7 +17360,25 @@ function inferAdultUploadMediaType(importType = "photo", ext = "", contentType =
   return "image";
 }
 
-function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceName, index = 0, now = new Date().toISOString() }) {
+const profileFolderService = createProfileFolderService({
+  findProfile: (libraryType, profileId) => {
+    const direct = findAdultProfileDir({ libraryType, profileId });
+    if (direct) return direct;
+    return listAdultProfileDirs(libraryType).find(row =>
+      [row.file?.id, row.file?.localId, row.metadata?.id, row.metadata?.localId].some(value => String(value || "") === profileId)
+    )?.profileDir || null;
+  },
+  roots: getAdultProfileRootCandidates,
+  typeFolders: ADULT_IMPORT_TYPE_FOLDERS,
+});
+registerProfileFolderRoutes(app, {
+  service: profileFolderService,
+  requireAdmin: homesteadAccess.requireAdmin,
+  requireAdult: homesteadAccess.requireFeature("adult"),
+  canEditProfile: (req, library, id) => canEditProfileFolder(homesteadAccess.accessContext(req), readSetupConfig(), library, id),
+});
+
+function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceName, destinationFolder = "", index = 0, now = new Date().toISOString() }) {
   const originalBase = sanitizeAdultImportSegment(path.basename(file.originalName || `upload-${index + 1}`));
   const ext = path.extname(originalBase).toLowerCase() || extensionFromContentType(file.contentType, file.originalName || "");
   const normalizedImportType = ADULT_IMPORT_TYPE_FOLDERS.hasOwnProperty(importType) ? importType : "photo";
@@ -17348,14 +17407,17 @@ function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceN
     const folder = normalizedImportType === "nude" || normalizedImportType === "nudes" || normalizedImportType === "adultSet"
       ? "nudes"
       : (ADULT_IMPORT_TYPE_FOLDERS[normalizedImportType] || "photos");
-    const destinationDir = path.join(profileDir, folder);
+    const destinationDir = destinationFolder
+      ? profileFolderService.directory(profileDir, normalizedImportType, destinationFolder)
+      : path.join(profileDir, folder);
+    if (!destinationDir) throw new Error("The selected photo folder no longer exists. Refresh and select a destination.");
     fs.mkdirSync(destinationDir, { recursive: true });
     const withoutExt = sanitizeAdultImportSegment(path.basename(originalBase, path.extname(originalBase)) || `upload-${index + 1}`);
     destination = path.join(destinationDir, `${Date.now()}-${index + 1}-${withoutExt}${ext || (isVideo ? ".mp4" : ".jpg")}`);
   }
 
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.writeFileSync(destination, file.buffer);
+  fs.writeFileSync(destination, file.buffer, destinationFolder ? { flag: "wx" } : undefined);
 
   return {
     id: `adult-upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -17377,7 +17439,7 @@ function saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceN
 
 
 
-app.post("/api/adult/import-upload", async (req, res) => {
+app.post(["/api/adult/import-upload", "/api/adult/profile-media-upload"], homesteadAccess.requireAdmin, homesteadAccess.requireFeature("adult"), async (req, res) => {
   try {
     const contentType = req.headers["content-type"] || "";
     const boundary = String(contentType).match(/boundary=(?:(?:\"([^\"]+)\")|([^;]+))/i)?.[1] || String(contentType).match(/boundary=(?:(?:\"([^\"]+)\")|([^;]+))/i)?.[2];
@@ -17394,6 +17456,13 @@ app.post("/api/adult/import-upload", async (req, res) => {
     const profileId = String(fields.profileId || "").trim();
     const importType = String(fields.importType || "photo").trim();
     const sourceName = sanitizeAdultImportSegment(fields.sourceName || "device-upload");
+    const destinationFolder = fields.destinationFolder || "";
+    if (req.path === "/api/adult/profile-media-upload" && (!destinationFolder || fields.profileFolderVersion !== "1")) {
+      return res.status(400).json({ ok: false, message: "Select a valid v1 profile photo folder." });
+    }
+    if (destinationFolder && !canEditProfileFolder(homesteadAccess.accessContext(req), readSetupConfig(), targetLibrary, profileId)) {
+      return res.status(403).json({ ok: false, message: "This profile is read-only for your account." });
+    }
 
     if (!ADULT_IMPORT_TYPE_FOLDERS.hasOwnProperty(importType)) {
       return res.status(400).json({ ok: false, error: "Unsupported upload type." });
@@ -17402,14 +17471,19 @@ app.post("/api/adult/import-upload", async (req, res) => {
       return res.status(400).json({ ok: false, error: "No files were uploaded." });
     }
 
-    const profileDir = findAdultProfileDir({ libraryType: targetLibrary, profileId, profileName }) || getAdultImportProfileDir(targetLibrary, profileName || profileId);
+    const profileDir = destinationFolder
+      ? profileFolderService.resolveProfile(targetLibrary, profileId)
+      : findAdultProfileDir({ libraryType: targetLibrary, profileId, profileName }) || getAdultImportProfileDir(targetLibrary, profileName || profileId);
+    if (destinationFolder && !profileFolderService.directory(profileDir, importType, destinationFolder)) {
+      return res.status(404).json({ ok: false, message: "Selected photo folder not found." });
+    }
     const now = new Date().toISOString();
     const imported = [];
     const failed = [];
 
     for (const [index, file] of files.entries()) {
       try {
-        const record = saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceName, index, now });
+        const record = saveAdultUploadedMediaToProfile({ file, profileDir, importType, sourceName, destinationFolder, index, now });
         appendAdultImportRecord(profileDir, record);
         imported.push(record);
       } catch (error) {
@@ -17426,6 +17500,7 @@ app.post("/api/adult/import-upload", async (req, res) => {
     res.json({
       ok: true,
       importedAs: importType,
+      destinationFolder,
       imported,
       importedCount: imported.length,
       failed,

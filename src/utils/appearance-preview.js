@@ -42,5 +42,9 @@ export function appearanceNumericVariables(values) {
     result['--'+prefix+'-detail-panel-opacity'] = values.detailPanelOpacity ?? .84;
     result['--'+prefix+'-detail-panel-blur'] = (values.detailPanelBlur ?? 10) + 'px';
   }
+  result['--tv-detail-background-opacity'] = values.backgroundImage ? values.backgroundOpacity ?? .22 : 1;
+  result['--tv-detail-background-blur'] = (values.backgroundBlur ?? 0) + 'px';
+  result['--tv-detail-background-fit'] = values.backgroundFit || 'cover';
+  result['--tv-detail-background-position'] = values.backgroundPosition || 'center';
   return result;
 }
