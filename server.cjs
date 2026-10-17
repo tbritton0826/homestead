@@ -22,6 +22,7 @@ const {
 const { normalizeTimeoutMs, runWithTimeout } = require("./src/server/async-timeout.cjs");
 const { createProfileFolderService, registerProfileFolderRoutes, canEditProfileFolder } = require("./src/server/profile-media-folders.cjs");
 const { registerBookLocalFiles } = require("./src/server/book-local-files.cjs");
+const { registerNativeInventory, createInventoryRequests, inventoryPatch } = require("./src/server/native-inventory.cjs");
 const { createPetProfiles, registerPetProfiles } = require("./src/server/pet-profiles.cjs");
 const { createComfyBridge, registerComfyBridge } = require("./src/server/comfy-bridge.cjs");
 const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
@@ -19268,6 +19269,7 @@ function makeCanonicalTcgMetadata(record = {}, printing = {}, paths = {}) {
       ...printing,
       printings: undefined,
       totalQuantity: undefined,
+      _canonicalDirectory: undefined,
     },
     notes: record.notes || "",
     captures: [],
@@ -19284,7 +19286,23 @@ function persistTcgCanonicalRecord(record = {}) {
     : [record.tcg];
 
   printings.forEach((printing) => {
-    const paths = getTcgCanonicalPaths(record, printing);
+    let paths = getTcgCanonicalPaths(record, printing);
+    // Canonical reads supply this runtime hint. Keep an edited printing in its
+    // existing directory even when a set code/title changes; never delete an
+    // old recovery directory or allow an unverified caller path to redirect it.
+    if (printing._canonicalDirectory) {
+      try {
+        const previous = path.resolve(printing._canonicalDirectory);
+        const relative = path.relative(fs.realpathSync(tcgCanonicalRoot), fs.realpathSync(previous));
+        const metadataPath = path.join(previous, "metadata.json");
+        if (relative && !relative.startsWith("..") && !path.isAbsolute(relative) && fs.lstatSync(metadataPath).isFile()) {
+          const saved = readJsonFile(metadataPath, null);
+          if ((saved?.recordId || saved?.homesteadId) === (record.id || record.homesteadId) && saved?.tcg?.id === printing.id) {
+            paths = { ...paths, printingDir: previous, metadataPath, frontPath: path.join(previous, "front.jpg") };
+          }
+        }
+      } catch { /* A stale hint cannot authorize a new location. */ }
+    }
     fs.mkdirSync(paths.printingDir, { recursive: true });
     writeJsonFile(paths.metadataPath, makeCanonicalTcgMetadata(record, printing, paths));
 
@@ -19365,6 +19383,7 @@ function readCanonicalTcgRecords() {
           : metadata.tcg.selectedArtwork || metadata.tcg.selectedPrinting?.image || "";
         group.printings.push({
           ...metadata.tcg,
+          _canonicalDirectory: printingDir,
           selectedArtwork: frontUrl || metadata.tcg.selectedArtwork || "",
           selectedPrinting: metadata.tcg.selectedPrinting
             ? { ...metadata.tcg.selectedPrinting, image: frontUrl || metadata.tcg.selectedPrinting.image || "" }
@@ -19414,7 +19433,15 @@ function readIntakeLibraryRecords(libraryId = "inventory") {
     const isTcg = String(record?.category || "").toLowerCase() === "trading-cards" && record?.tcg;
     return !isTcg || !canonicalIds.has(record.id);
   });
-  return [...nonCanonicalInventory, ...canonical];
+  const indexedById = new Map(indexed.map((record) => [record.id, record]));
+  return [...nonCanonicalInventory, ...canonical.map((record) => {
+    const intake = indexedById.get(record.id) || {};
+    return { ...intake, ...record,
+      metadata: { ...(intake.metadata || {}), ...(record.metadata || {}) },
+      captures: intake.captures || record.captures || [],
+      mobileRequestId: intake.mobileRequestId || "", mobileRequestIds: intake.mobileRequestIds || [],
+    };
+  })];
 }
 
 function writeIntakeLibraryRecords(libraryId = "inventory", records = []) {
@@ -20166,7 +20193,7 @@ function parseYugiohRecognitionText(text = "", titleText = "", codeText = "") {
   return { cardName, setCode, confidence, text: combined.slice(0, 7000), titleText: String(titleText || "").slice(0, 1200), codeText: String(codeText || "").slice(0, 1200) };
 }
 
-app.post("/api/intake/tcg/yugioh/recognize", async (req, res) => {
+async function recognizeYugiohCard(req, res) {
   const cleanup = [];
   try {
     const imageData = String(req.body?.imageData || "");
@@ -20235,14 +20262,17 @@ app.post("/api/intake/tcg/yugioh/recognize", async (req, res) => {
   } finally {
     cleanup.forEach((filePath) => { try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {} });
   }
-});
+}
+app.post("/api/intake/tcg/yugioh/recognize", recognizeYugiohCard);
 
 app.get("/api/intake/tcg/yugioh/search", async (req, res) => {
   try {
     const name = String(req.query?.name || "").trim();
     const setCode = normalizeYugiohSetCode(req.query?.setCode || "");
-    if (!name && !setCode) return res.status(400).json({ ok: false, message: "Enter a card name or set code." });
-    const cards = await fetchYugiohCards({ name, setCode });
+    const cardId = String(req.query?.cardId || "").trim();
+    if (cardId && !/^\d{1,12}$/.test(cardId)) return res.status(400).json({ ok: false, message: "Enter a valid card passcode." });
+    if (!name && !setCode && !cardId) return res.status(400).json({ ok: false, message: "Enter a card name, passcode or set code." });
+    const cards = await fetchYugiohCards({ name, setCode, cardId });
     res.json({ ok: true, matches: mapYugiohMatches(cards, setCode) });
   } catch (error) {
     res.status(502).json({ ok: false, message: error.message || "Unable to search Yu-Gi-Oh! cards." });
@@ -21553,6 +21583,7 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
           existing.name,
         notes: queueItem.notes || existing.notes || "",
         tcg: summarizedTcg,
+        mobileRequestIds: [...new Set([...(existing.mobileRequestIds || []), existing.mobileRequestId, queueItem.mobileRequestId].filter(Boolean))].slice(-500),
         captures: [
           ...(Array.isArray(existing.captures) ? existing.captures : []),
           ...(Array.isArray(queueItem.captures) ? queueItem.captures : []),
@@ -21632,6 +21663,8 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
     },
     valuation: queueItem.valuation || null,
     notes: queueItem.notes || "",
+    ...(libraryId === "inventory" ? (queueItem.inventoryDetails || {}) : {}),
+    ...(queueItem.mobileRequestId ? { mobileRequestId: queueItem.mobileRequestId } : {}),
     category: libraryId === "inventory" ? (queueItem.inventoryCategory || "general") : "",
     tcg: queueItem.tcg && typeof queueItem.tcg === "object" ? queueItem.tcg : null,
     captures: Array.isArray(queueItem.captures) ? queueItem.captures : [],
@@ -21996,7 +22029,7 @@ app.get("/api/intake/library-records/:libraryId/:recordId", (req, res) => {
   res.json({ ok: true, record });
 });
 
-app.patch("/api/intake/library-records/:libraryId/:recordId", express.json({ limit: "2mb" }), (req, res) => {
+function updateIntakeLibraryRecord(req, res) {
   try {
     const libraryId = String(req.params.libraryId || "").trim();
     const recordId = String(req.params.recordId || "").trim();
@@ -22032,11 +22065,16 @@ app.patch("/api/intake/library-records/:libraryId/:recordId", express.json({ lim
           ...(incomingTcg.linkedDeckIds !== undefined ? { linkedDeckIds: Array.isArray(incomingTcg.linkedDeckIds) ? incomingTcg.linkedDeckIds.map(String) : [] } : {}),
           ...(incomingTcg.selectedPrinting !== undefined ? { selectedPrinting: { ...(current.tcg?.selectedPrinting || {}), ...(incomingTcg.selectedPrinting || {}) } } : {}),
         }
-      : current.tcg;
+      : current.tcg ? { ...current.tcg } : current.tcg;
+
+    if (libraryId === "inventory" && nextTcg && req.body?.title !== undefined) {
+      nextTcg.cardName = String(req.body.title || "").trim() || current.title;
+    }
 
     const previousLocation = current.tcg?.location || current.location || "";
     const updated = {
       ...current,
+      ...(libraryId === "inventory" ? inventoryPatch(req.body) : {}),
       ...(req.body?.title !== undefined ? { title: String(req.body.title || "").trim() || current.title } : {}),
       ...(req.body?.notes !== undefined ? { notes: String(req.body.notes || "").trim() } : {}),
       ...(req.body?.location !== undefined || incomingTcg?.location !== undefined ? { location: nextLocation } : {}),
@@ -22047,6 +22085,7 @@ app.patch("/api/intake/library-records/:libraryId/:recordId", express.json({ lim
 
     records[index] = updated;
     writeIntakeLibraryRecords(libraryId, records);
+    if (libraryId === "inventory" && updated.tcg) persistTcgCanonicalRecord(updated);
 
     if (previousLocation !== nextLocation) {
       const activity = readIntakeCollection(activityDataPath);
@@ -22074,12 +22113,10 @@ app.patch("/api/intake/library-records/:libraryId/:recordId", express.json({ lim
       message: error.message || "Unable to update inventory item.",
     });
   }
-});
+}
+app.patch("/api/intake/library-records/:libraryId/:recordId", express.json({ limit: "2mb" }), updateIntakeLibraryRecord);
 
-app.patch(
-  "/api/intake/library-records/inventory/:recordId/printings/:printingId",
-  express.json({ limit: "2mb" }),
-  (req, res) => {
+function updateIntakePrinting(req, res) {
     try {
       const recordId = String(req.params.recordId || "").trim();
       const printingId = String(req.params.printingId || "").trim();
@@ -22199,6 +22236,7 @@ app.patch(
 
       records[recordIndex] = updated;
       writeIntakeLibraryRecords("inventory", records);
+      persistTcgCanonicalRecord(updated);
 
       return res.json({
         ok: true,
@@ -22211,8 +22249,8 @@ app.patch(
         message: error.message || "Unable to update physical printing.",
       });
     }
-  }
-);
+}
+app.patch("/api/intake/library-records/inventory/:recordId/printings/:printingId", express.json({ limit: "2mb" }), updateIntakePrinting);
 
 app.delete(
   "/api/intake/library-records/inventory/:recordId/printings/:printingId",
@@ -22415,7 +22453,7 @@ app.get("/api/intake/queue", (req, res) => {
   res.json({ ok: true, count: items.length, items: items.slice().reverse() });
 });
 
-app.post("/api/intake/sessions/:sessionId/complete", express.json({ limit: "48mb" }), (req, res) => {
+function completeIntakeSession(req, res) {
   try {
     const sessions = readIntakeCollection(intakeSessionsPath);
     let session = sessions.find((item) => item.id === req.params.sessionId);
@@ -22562,6 +22600,8 @@ app.post("/api/intake/sessions/:sessionId/complete", express.json({ limit: "48mb
         }],
       } : null,
       inventoryCategory: String(req.body?.inventoryCategory || "general").trim().toLowerCase(),
+      ...(libraryId === "inventory" ? { inventoryDetails: inventoryPatch(req.body?.inventoryDetails || {}) } : {}),
+      ...(req.body?.mobileRequestId ? { mobileRequestId: String(req.body.mobileRequestId).slice(0, 200) } : {}),
       code,
       aliases: code ? [code] : [],
       linkedDestinations: req.body?.destinations && typeof req.body.destinations === "object" ? req.body.destinations : { [libraryId]: true },
@@ -22693,12 +22733,29 @@ app.post("/api/intake/sessions/:sessionId/complete", express.json({ limit: "48mb
     console.error("Unable to complete intake session:", error);
     res.status(500).json({ ok: false, message: error.message || "Unable to save intake session." });
   }
+}
+app.post("/api/intake/sessions/:sessionId/complete", express.json({ limit: "48mb" }), completeIntakeSession);
+registerNativeInventory(app, {
+  express, access: homesteadAccess.accessContext, feature: subscriptionService.requireFeature("inventory"), config: readSetupConfig,
+  records: () => readIntakeLibraryRecords("inventory"), binders: readTcgBinders, decks: readTcgDecks,
+  complete: completeIntakeSession, update: updateIntakeLibraryRecord, updatePrinting: updateIntakePrinting, recognize: recognizeYugiohCard,
+  lookupCode: async (code, category) => {
+    const identity = findIntakeIdentity(code);
+    if (identity) return { existing: true, code, libraryId: identity.libraryId, homesteadId: identity.homesteadId, record: identity.record || null };
+    if (category === "media" && /^\d{8,14}$/.test(code)) {
+      try {
+        const physical = await lookupUpcmdb(code);
+        if (physical.product?.title) return { existing: false, code, libraryId: "inventory", metadata: {
+          title: physical.product.title, description: physical.product.plot || "", thumbnail: physical.product.poster || "", provider: "UPCMDB",
+        } };
+      } catch { /* The existing generic lookup and manual entry remain available. */ }
+    }
+    const classification = classifyIntakeCode(code, "inventory");
+    return { existing: false, code, ...classification, metadata: await lookupIntakeMetadata(code, classification.codeType, classification.libraryId) };
+  },
+  searchCards: async (query) => mapYugiohMatches(await fetchYugiohCards(query), query.setCode),
+  requests: createInventoryRequests(path.join(dataDir, "mobile-inventory-requests")),
 });
-
-
-
-
-
 
 const GOOGLE_BOOKS_BASE_URL = "https://www.googleapis.com/books/v1";
 
