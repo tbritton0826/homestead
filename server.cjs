@@ -19846,7 +19846,18 @@ app.get("/api/intake/books/source-search", (req, res) => {
 
 
 function normalizeYugiohSetCode(value = "") {
-  return String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+  return String(value || "").trim().toUpperCase().replace(/[\u2010-\u2015\u2212]/g, "-").replace(/\s+/g, "");
+}
+
+function normalizeYugiohQuery({ name = "", setCode = "", cardId = "" } = {}) {
+  name = String(name || "").trim();
+  setCode = normalizeYugiohSetCode(setCode);
+  cardId = String(cardId || "").trim();
+  const typedCode = normalizeYugiohSetCode(name);
+  if (!setCode && /^[A-Z0-9]{2,12}-[A-Z]{0,4}\d{2,5}[A-Z]?$/.test(typedCode)) setCode = typedCode;
+  if (!setCode && !cardId && /^\d{1,12}$/.test(name)) cardId = name;
+  // A printed identifier must not be constrained by a stale or misspelled title.
+  return { name: setCode || cardId ? "" : name, setCode, cardId };
 }
 
 function normalizeYugiohRarity(value = "") {
@@ -19938,7 +19949,7 @@ async function fetchAllYugiohCardsCached({ force = false } = {}) {
 
   try {
     const response = await fetch(
-      "https://db.ygoprodeck.com/api/v7/cardinfo.php?tcgplayer_data=yes",
+      "https://db.ygoprodeck.com/api/v7/cardinfo.php",
       {
         headers: {
           Accept: "application/json",
@@ -19968,6 +19979,7 @@ async function fetchAllYugiohCardsCached({ force = false } = {}) {
 }
 
 async function fetchYugiohCards({ name = "", setCode = "", cardId = "" } = {}) {
+  ({ name, setCode, cardId } = normalizeYugiohQuery({ name, setCode, cardId }));
   const normalizedSetCode = normalizeYugiohSetCode(setCode);
 
   // Set codes live inside card_sets; YGOPRODeck does not treat them as card
@@ -19984,7 +19996,6 @@ async function fetchYugiohCards({ name = "", setCode = "", cardId = "" } = {}) {
   }
 
   const params = new URLSearchParams();
-  params.set("tcgplayer_data", "yes");
   if (cardId) params.set("id", cardId);
   else if (name) params.set("fname", name);
   else return [];
@@ -20006,6 +20017,7 @@ async function fetchYugiohCards({ name = "", setCode = "", cardId = "" } = {}) {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
+      if (response.status === 400 && /no card matching your query/i.test(data?.error || "")) return [];
       throw new Error(data?.error || "YGOPRODeck lookup failed.");
     }
 
@@ -20267,9 +20279,7 @@ app.post("/api/intake/tcg/yugioh/recognize", recognizeYugiohCard);
 
 app.get("/api/intake/tcg/yugioh/search", async (req, res) => {
   try {
-    const name = String(req.query?.name || "").trim();
-    const setCode = normalizeYugiohSetCode(req.query?.setCode || "");
-    const cardId = String(req.query?.cardId || "").trim();
+    const { name, setCode, cardId } = normalizeYugiohQuery(req.query || {});
     if (cardId && !/^\d{1,12}$/.test(cardId)) return res.status(400).json({ ok: false, message: "Enter a valid card passcode." });
     if (!name && !setCode && !cardId) return res.status(400).json({ ok: false, message: "Enter a card name, passcode or set code." });
     const cards = await fetchYugiohCards({ name, setCode, cardId });
@@ -22753,7 +22763,10 @@ registerNativeInventory(app, {
     const classification = classifyIntakeCode(code, "inventory");
     return { existing: false, code, ...classification, metadata: await lookupIntakeMetadata(code, classification.codeType, classification.libraryId) };
   },
-  searchCards: async (query) => mapYugiohMatches(await fetchYugiohCards(query), query.setCode),
+  searchCards: async (query) => {
+    const normalized = normalizeYugiohQuery(query);
+    return mapYugiohMatches(await fetchYugiohCards(normalized), normalized.setCode);
+  },
   requests: createInventoryRequests(path.join(dataDir, "mobile-inventory-requests")),
 });
 

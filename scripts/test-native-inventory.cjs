@@ -10,7 +10,8 @@ const { nativeInventoryDraft, inventoryPatch, inventoryAccess, createInventoryRe
 const serverSource = fs.readFileSync(path.join(__dirname, '../server.cjs'), 'utf8');
 function temporary(t) { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homestead-inventory-test-')); t.after(() => fs.rmSync(root, { recursive: true, force: true })); return root; }
 function actual(name, context) {
-  const start = serverSource.indexOf('function ' + name + '(');
+  let start = serverSource.indexOf('function ' + name + '(');
+  if (serverSource.slice(start - 6, start) === 'async ') start -= 6;
   const end = serverSource.indexOf('\n}', start) + 2;
   assert(start >= 0 && end > start, name);
   return vm.runInNewContext(serverSource.slice(start, end) + ';' + name, context);
@@ -47,7 +48,7 @@ test('inventory access respects entitlement boundary inputs, disabled library, a
   assert.equal(inventoryAccess({ user: { ...user, readOnly: true } }, {}).write, false);
 });
 
-async function httpFixture(t, mode = 'normal') {
+async function httpFixture(t, mode = 'normal', adapters = {}) {
   const root = temporary(t), rows = []; let submissions = 0;
   const app = express();
   registerNativeInventory(app, { express,
@@ -67,6 +68,7 @@ async function httpFixture(t, mode = 'normal') {
     lookupCode: async code => ({ existing: false, code, metadata: { title: 'Generated product' } }),
     searchCards: async query => [{ cardId: query.cardId || '1234', cardName: 'Generated card', setCode: query.setCode }],
     recognize: (req, res) => res.json({ ok: true, matches: [{ cardId: '1234', setCode: 'TEST-EN001' }], usedImage: req.body.imageData.startsWith('data:image/jpeg;') }),
+    ...adapters,
   });
   const listener = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
   t.after(() => new Promise(resolve => { listener.closeAllConnections(); listener.close(resolve); }));
@@ -133,6 +135,74 @@ test('card photo recognition uses the existing service, validates bounded image 
   assert.equal(f.submissions(), 0); assert.equal(f.rows.length, 0);
   assert.equal((await f.call('/recognize', { imageData: 'data:text/html;base64,YQ==' })).status, 400);
   assert.equal((await f.call('/recognize', { imageData }, { 'x-role': 'viewer' })).status, 403);
+});
+
+function cardCatalogContext(fetch) {
+  const context = { fetch, URLSearchParams, AbortController, setTimeout, clearTimeout };
+  context.normalizeYugiohSetCode = actual('normalizeYugiohSetCode', {});
+  context.normalizeYugiohQuery = actual('normalizeYugiohQuery', context);
+  return context;
+}
+
+test('printed codes alone, codes typed in the name field, and passcodes do not require or trust a title', () => {
+  const context = cardCatalogContext();
+  for (const query of [{ setCode: ' cori-en029 ' }, { name: 'Misspelled old title', setCode: 'CORI-EN029' }, { name: 'CORI–EN029' }]) {
+    assert.deepEqual(plain(context.normalizeYugiohQuery(query)), { name: '', setCode: 'CORI-EN029', cardId: '' });
+  }
+  assert.deepEqual(plain(context.normalizeYugiohQuery({ name: ' 12345678 ' })), { name: '', setCode: '', cardId: '12345678' });
+  assert.equal(context.normalizeYugiohQuery({ name: 'Seven Tools of the Bandit' }).name, 'Seven Tools of the Bandit');
+});
+
+test('full catalog uses the supported unparameterized endpoint and a fresh cache avoids another download', async t => {
+  const root = temporary(t), cache = path.join(root, 'catalog.json'), urls = [];
+  const context = { fs, getYugiohCachePath: () => cache, YGOPRODECK_CACHE_TTL_MS: 86400000, AbortController, setTimeout, clearTimeout,
+    fetch: async url => { urls.push(url); return { ok: true, json: async () => ({ data: [{ id: 1234, card_sets: [{ set_code: 'CORI-EN029' }] }] }) }; } };
+  const fetchAll = actual('fetchAllYugiohCardsCached', context);
+  assert.equal((await fetchAll()).length, 1);
+  assert.equal((await fetchAll()).length, 1);
+  assert.deepEqual(urls, ['https://db.ygoprodeck.com/api/v7/cardinfo.php']);
+});
+
+test('real provider search omits removed options, reports no-match normally, and retains actual provider failures', async () => {
+  const urls = []; let status = 200;
+  const context = cardCatalogContext(async url => {
+    urls.push(new URL(url));
+    return { ok: status === 200, status, json: async () => status === 200 ? { data: [{ id: 1234 }] } :
+      { error: status === 400 ? 'No card matching your query was found in the database.' : 'Catalog service unavailable' } };
+  });
+  const search = actual('fetchYugiohCards', context);
+  assert.equal((await search({ name: 'Example card' })).length, 1);
+  assert.equal(urls[0].searchParams.get('fname'), 'Example card');
+  await search({ cardId: '1234' });
+  assert.equal(urls[1].searchParams.get('id'), '1234');
+  assert(urls.every(url => !url.searchParams.has('tcgplayer_data')));
+  status = 400; assert.equal((await search({ name: 'Missing card' })).length, 0);
+  status = 503; await assert.rejects(search({ name: 'Example card' }), /Catalog service unavailable/);
+});
+
+test('native code-only lookup follows the production catalog path, selects the exact printing and saves once', async t => {
+  const context = cardCatalogContext(() => { throw Error('must not issue a name search'); });
+  context.fetchAllYugiohCardsCached = async () => [
+    { id: 1234, name: 'Generated card', card_sets: [{ set_code: 'CORI-EN029', set_rarity: 'Rare' }, { set_code: 'OTHER-EN001' }], card_images: [] },
+    { id: 5678, name: 'Different card', card_sets: [{ set_code: 'CORI-EN030' }] },
+  ];
+  context.yugiohPrintingPriceDetails = () => ({});
+  const search = actual('fetchYugiohCards', context), map = actual('mapYugiohMatches', context);
+  const f = await httpFixture(t, 'normal', { searchCards: async query => {
+    const normalized = context.normalizeYugiohQuery(query);
+    return map(await search(normalized), normalized.setCode);
+  } });
+  for (const query of ['setCode=CORI-EN029', 'setCode=CORI-EN029&name=Wrong%20name', 'name=CORI-EN029']) {
+    const response = await f.call('/cards?' + query); assert.equal(response.status, 200);
+    const data = await response.json(); assert.equal(data.matches.length, 1);
+    assert.equal(data.matches[0].setCode, 'CORI-EN029'); assert.equal(data.matches[0].cardId, '1234');
+  }
+  assert.equal(f.submissions(), 0, 'search must not import automatically');
+  const body = { title: 'Generated card', category: 'trading-cards', quantity: 1, requestId: crypto.randomUUID(),
+    tcg: { cardName: 'Generated card', providerCardId: '1234', setCode: 'CORI-EN029', rarity: 'Rare' } };
+  assert.equal((await (await f.call('/items', body)).json()).state, 'complete');
+  assert.equal((await (await f.call('/items', body)).json()).state, 'complete');
+  assert.equal(f.submissions(), 1);
 });
 
 test('save journals survive restart and fail closed on corrupt or linked request files', t => {
