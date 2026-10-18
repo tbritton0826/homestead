@@ -25,8 +25,8 @@ function refreshHoldings(record, card, summarize) {
   const holdings = record.tcg.printings?.length ? record.tcg.printings : [record.tcg];
   const list = holdings.map(holding => {
     const quote = printingPriceDetails(card, holding);
-    const manual = holding.priceSourceType === 'manual-override' || Number(holding.manualPriceOverride) > 0;
-    const marketValue = manual ? Number(holding.manualPriceOverride || holding.marketValue || 0) : quote.marketValue;
+    const manual = holding.priceSourceType === 'manual-override' || (holding.manualPriceOverride != null && Number.isFinite(Number(holding.manualPriceOverride)) && Number(holding.manualPriceOverride) >= 0);
+    const marketValue = manual ? Number(holding.manualPriceOverride ?? holding.marketValue ?? 0) : quote.marketValue;
     return { ...holding, ...quote, marketValue, priceAvailable: manual || quote.priceAvailable,
       priceSourceType: manual ? 'manual-override' : quote.priceSourceType,
       priceSource: manual ? 'Manual estimate' : quote.priceSource,

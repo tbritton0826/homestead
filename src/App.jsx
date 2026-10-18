@@ -34263,6 +34263,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   const barcodePhotoInputRef = useRef(null);
   const tcgPhotoInputRef = useRef(null);
   const documentInputRef = useRef(null);
+  const tcgSaveInFlight = useRef(false);
 
 
   const giveScannerFeedback = useCallback((kind = "success") => {
@@ -34774,7 +34775,12 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   function updateTcgPrintingDraft(patch) {
-    if (patch.marketValue !== undefined && patch.priceSourceType === undefined && patch.priceAvailable === undefined) patch = { ...patch, priceAvailable: true, priceSourceType: "manual-override", priceSource: "Manual estimate" };
+    if (patch.marketValue !== undefined && patch.priceSourceType === undefined && patch.priceAvailable === undefined) {
+      const value = patch.marketValue === "" ? null : Number(patch.marketValue);
+      patch = { ...patch, marketValue: value ?? 0, manualPriceOverride: value,
+        priceAvailable: value !== null, priceSourceType: value === null ? "unavailable" : "manual-override",
+        priceSource: value === null ? "Printing price unavailable" : "Manual estimate" };
+    }
     setTcgPrintingDraft((current) => ({
       ...(current || makeTcgPhysicalCopy()),
       ...patch,
@@ -34861,24 +34867,27 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       (Array.isArray(match.artworkVariants) && match.artworkVariants[0]) ||
       null;
 
-    updateTcgPrintingDraft({
-      setCode: String(match.setCode || "").toUpperCase(),
-      rarity: match.rarity || "",
-      edition: match.edition || match.setEdition || tcgEdition,
-      marketValue: Math.max(0, Number(match.marketValue || 0)),
-      printingPrice: Math.max(0, Number(match.printingPrice || 0)),
-      genericPrice: Math.max(0, Number(match.genericPrice || 0)),
-      priceSource: match.priceSource || "YGOPRODeck",
-      priceSourceType: match.priceSourceType || "",
-      priceAvailable: match.priceAvailable !== false,
-      priceDifferenceWarning: Boolean(match.priceDifferenceWarning),
-      productUrl: match.productUrl || match.setUrl || "",
-      selectedArtwork:
-        firstArtwork?.image ||
-        match.image ||
-        tcgSelectedArtwork ||
-        "",
-      selectedArtworkId: firstArtwork?.id || "",
+    setTcgPrintingDraft(current => {
+      const previous = current || makeTcgPhysicalCopy();
+      const samePrinting = String(previous.setCode || "").toUpperCase() === String(match.setCode || "").toUpperCase() &&
+        String(previous.rarity || "").toLowerCase() === String(match.rarity || "").toLowerCase();
+      const manual = samePrinting && previous.priceSourceType === "manual-override";
+      return { ...previous,
+        setCode: String(match.setCode || "").toUpperCase(),
+        rarity: match.rarity || "",
+        edition: samePrinting ? previous.edition : match.edition || match.setEdition || tcgEdition,
+        marketValue: manual ? previous.marketValue : Math.max(0, Number(match.marketValue || 0)),
+        manualPriceOverride: manual ? previous.marketValue : null,
+        printingPrice: Math.max(0, Number(match.printingPrice || 0)),
+        genericPrice: Math.max(0, Number(match.genericPrice || 0)),
+        priceSource: manual ? "Manual estimate" : match.priceSource || "YGOPRODeck",
+        priceSourceType: manual ? "manual-override" : match.priceSourceType || "",
+        priceAvailable: manual || match.priceAvailable !== false,
+        priceDifferenceWarning: Boolean(match.priceDifferenceWarning),
+        productUrl: match.productUrl || match.setUrl || "",
+        selectedArtwork: (samePrinting && previous.selectedArtwork) || firstArtwork?.image || match.image || tcgSelectedArtwork || "",
+        selectedArtworkId: (samePrinting && previous.selectedArtworkId) || firstArtwork?.id || "",
+      };
     });
   }
 
@@ -34886,6 +34895,10 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     const normalized = String(setCode || "").trim().toUpperCase();
     const matches = getTcgPrintingOptions({ setCode: normalized });
     const first = matches[0];
+    if (first) {
+      applyTcgMatchToPrintingDraft(first);
+      return;
+    }
 
     updateTcgPrintingDraft({
       setCode: normalized,
@@ -34893,26 +34906,29 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       marketValue: Math.max(0, Number(first?.marketValue || 0)),
       printingPrice: Math.max(0, Number(first?.printingPrice || 0)),
       genericPrice: Math.max(0, Number(first?.genericPrice || 0)),
-      priceSource: first?.priceSource || "",
-      priceSourceType: first?.priceSourceType || "",
+      priceSource: "Printing price unavailable",
+      priceSourceType: "unavailable",
+      priceAvailable: false,
+      manualPriceOverride: null,
       priceDifferenceWarning: Boolean(first?.priceDifferenceWarning),
     });
 
-    if (first) applyTcgMatchToPrintingDraft(first);
   }
 
   async function lookupTcgDraftSetCode(rawSetCode) {
     const setCode = String(rawSetCode || "").trim().toUpperCase();
     if (!setCode) return;
 
-    updateTcgPrintingDraft({
+    if (setCode !== String(tcgPrintingDraft?.setCode || "").toUpperCase()) updateTcgPrintingDraft({
       setCode,
       rarity: "",
       marketValue: 0,
       printingPrice: 0,
       genericPrice: 0,
       priceSource: "",
-      priceSourceType: "",
+      priceSourceType: "unavailable",
+      priceAvailable: false,
+      manualPriceOverride: null,
       priceDifferenceWarning: false,
     });
 
@@ -35081,6 +35097,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
             quantity: Math.max(1, Number(copy.quantity || 1)),
             purchasePrice: Math.max(0, Number(copy.purchasePrice || 0)),
             marketValue: Math.max(0, Number(copy.marketValue || 0)),
+            manualPriceOverride: copy.priceSourceType === "manual-override" ? Number(copy.marketValue || 0) : null,
             priceAvailable: copy.priceAvailable !== false,
             locationId: copy.locationId || copy.binderId || "loose",
             locationType: copy.locationType || (copy.binderId ? "binder" : "loose"),
@@ -35202,7 +35219,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   async function addCurrentTcgToBatch() {
-    if (busy) return;
+    if (busy || tcgSaveInFlight.current) return;
     const entries = getTcgEntriesForSave();
 
     if (!entries.length) {
@@ -35210,6 +35227,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       return;
     }
 
+    tcgSaveInFlight.current = true;
     setBusy(true);
     setStatus(`Adding ${entries.length} printing${entries.length === 1 ? "" : "s"}…`);
 
@@ -35254,7 +35272,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       setTcgBatch((current) => [...current, ...entries].slice(-50));
 
       if (failures.length) {
-        const message = `${added} printing${added === 1 ? "" : "s"} added; ${failures.length} need review.`;
+        const message = `${added} printing${added === 1 ? "" : "s"} added; ${failures.length} not confirmed. ${failures.map(failure => `${failure.entry.tcg.setCode}: ${failure.message}`).join(" ")} Your unsaved queue is retained; retry here.`;
         setTcgRecognitionMessage(message);
         setStatus(message);
         giveScannerFeedback("error");
@@ -35266,6 +35284,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
       onActivityChanged?.();
     } finally {
+      tcgSaveInFlight.current = false;
       setBusy(false);
     }
   }
@@ -35478,9 +35497,20 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   function selectTcgMatch(match) {
     const variants = Array.isArray(match?.artworkVariants) ? match.artworkVariants : [];
     const selected = variants[0] || { id: "default", image: match?.image || "", thumbnail: match?.image || "" };
+    const sameCard = tcgSelectedMatch && String(tcgSelectedMatch.cardId || tcgSelectedMatch.cardName) === String(match.cardId || match.cardName);
+    const manual = sameCard && tcgPrintingDraft?.priceSourceType === "manual-override" &&
+      String(tcgPrintingDraft.setCode).toUpperCase() === String(match.setCode).toUpperCase() &&
+      String(tcgPrintingDraft.rarity).toLowerCase() === String(match.rarity).toLowerCase();
+    const marketValue = manual ? tcgPrintingDraft.marketValue : match.marketValue ?? 0;
     setTcgSelectedMatch(match); setTcgSelectedArtwork(selected.image || match.image || ""); setTcgSelectedArtworkId(selected.id || "");
-    setTcgCardName(match.cardName || ""); setTcgSetCode(match.setCode || ""); setTcgRarity(match.rarity || ""); setTcgMarketValue(match.marketValue != null ? String(match.marketValue) : ""); setTitle(match.cardName || title);
-    setTcgPhysicalCopies([]);
+    setTcgCardName(match.cardName || ""); setTcgSetCode(match.setCode || ""); setTcgRarity(match.rarity || ""); setTcgMarketValue(String(marketValue)); setTitle(match.cardName || title);
+    if (!sameCard) setTcgPhysicalCopies([]);
+    if (sameCard && tcgPrintingDraft &&
+        String(tcgPrintingDraft.setCode).toUpperCase() === String(match.setCode).toUpperCase() &&
+        String(tcgPrintingDraft.rarity).toLowerCase() === String(match.rarity).toLowerCase()) {
+      applyTcgMatchToPrintingDraft(match);
+      return;
+    }
     setTcgPrintingDraft({
       id: cryptoRandomId(),
       setCode: String(match.setCode || "").toUpperCase(),
@@ -35490,19 +35520,13 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       language: tcgLanguage,
       quantity: Math.max(1, Number(tcgQuantity || 1)),
       purchasePrice: Math.max(0, Number(tcgPurchasePrice || 0)),
-      marketValue: Math.max(
-        0,
-        Number(
-          match.marketValue !== null && match.marketValue !== undefined
-            ? match.marketValue
-            : (tcgMarketValue || 0)
-        )
-      ),
+      marketValue: Math.max(0, Number(marketValue)),
+      manualPriceOverride: manual ? marketValue : null,
       printingPrice: Math.max(0, Number(match.printingPrice || 0)),
       genericPrice: Math.max(0, Number(match.genericPrice || 0)),
-      priceSource: match.priceSource || "YGOPRODeck",
-      priceSourceType: match.priceSourceType || "",
-      priceAvailable: match.priceAvailable !== false,
+      priceSource: manual ? "Manual estimate" : match.priceSource || "YGOPRODeck",
+      priceSourceType: manual ? "manual-override" : match.priceSourceType || "",
+      priceAvailable: manual || match.priceAvailable !== false,
       priceDifferenceWarning: Boolean(match.priceDifferenceWarning),
       selectedArtwork: selected.image || match.image || "",
       selectedArtworkId: selected.id || "",
@@ -35515,7 +35539,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   async function completeIntake() {
-    if (busy) return;
+    if (busy || tcgSaveInFlight.current) return;
+    tcgSaveInFlight.current = true;
     setBusy(true);
     setStatus("Saving intake session…");
     try {
@@ -35528,6 +35553,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         const saved = [];
         for (const entry of entries) {
           saved.push(await saveSingleTcgBatchEntry(entry));
+          setTcgPhysicalCopies(current => current.filter(copy => copy.id !== entry.id));
         }
 
         setCreatedRecord({
@@ -35611,12 +35637,20 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     } catch (error) {
       setStatus(error.message || "Unable to save intake session.");
     } finally {
+      tcgSaveInFlight.current = false;
       setBusy(false);
     }
   }
 
   function cryptoRandomId() {
-    try { return crypto.randomUUID(); } catch { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+    // randomUUID is unavailable on ordinary HTTP LAN addresses. getRandomValues
+    // remains available there; keep the UUID contract required by save receipts.
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
   const selectedLibrary = HOMESTEAD_INTAKE_LIBRARY_OPTIONS.find(([id]) => id === libraryId);
@@ -35628,7 +35662,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         <header className="intake-header">
           <div>
             <p className="intake-kicker">Homestead Intake</p>
-            <h2>{mode === "complete" ? "Intake saved" : mode === "tcg-scan" ? "Scan trading card" : mode === "tcg-recognizing" ? "Identifying card" : mode === "tcg-match" ? "Confirm card match" : mode === "review" ? "Confirm item" : mode === "capture" ? "Capture documentation" : "Add or scan anything"}</h2>
+            <h2>{mode === "complete" ? "Intake saved" : mode === "tcg-scan" ? "Scan trading card" : mode === "tcg-recognizing" ? "Identifying card" : mode === "tcg-match" ? "Confirm card match" : mode === "tcg-review" ? "Review queued printings" : mode === "review" ? "Confirm item" : mode === "capture" ? "Capture documentation" : "Add or scan anything"}</h2>
             <span>{capabilities.zebra ? "Zebra scanner" : capabilities.mobile ? "Mobile device" : "Desktop"} · {session?.id ? `Session ${session.id.slice(-6)}` : "local fallback"}</span>
           </div>
           <button type="button" className="intake-close" onClick={onClose}>×</button>
@@ -36046,10 +36080,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                         placeholder="Price unavailable — enter a manual estimate"
                         onChange={(event) =>
                           updateTcgPrintingDraft({
-                            marketValue: Math.max(
-                              0,
-                              Number(event.target.value || 0)
-                            ),
+                            marketValue: event.target.value === "" ? "" : Math.max(0, Number(event.target.value)),
                           })
                         }
                       />
@@ -36076,7 +36107,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                     <TcgLocationFields value={tcgPrintingDraft.locationId || tcgPrintingDraft.binderId || "loose"} locations={tcgLocations}
                       onCreated={row => { setTcgLocations(current => [...current, row]); if (row.kind === "binder") setTcgBinderOptions(current => [...current, row]); }}
                       onChange={(id, created) => { const row = created || tcgLocations.find(item => item.id === id); updateTcgPrintingDraft({ locationId: id, locationType: row?.kind || "loose", binderId: row?.kind === "binder" ? id : "" }); }} />
-                    <p className="muted">Set/rarity estimates do not quote edition, condition or language. Missing quotes stay unavailable. Manual estimates are preserved.</p>
+                    <p className="muted">Set/rarity estimates do not quote edition, condition or language. {tcgPrintingDraft.priceAvailable === false ? "YGOPRODeck has no usable quote for this exact set and rarity. You can enter a manual estimate." : tcgPrintingDraft.priceSourceType === "manual-override" ? "Your manual estimate will be saved with this printing." : "Provider estimates can be replaced with your own."}</p>
                     <label>
                       <span>Page</span>
                       <input
@@ -36218,12 +36249,30 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
               onClick={() => {
                 setLibraryId("inventory");
                 setInventoryCategory("trading-cards");
-                setMode("review");
+                setMode("tcg-review");
               }}
             >
               Review {tcgPhysicalCopies.length} queued print{tcgPhysicalCopies.length === 1 ? "" : "s"}
             </button>
           )}</div>
+        </div>}
+
+        {mode === "tcg-review" && <div className="intake-review-step">
+          <p>These are the printing groups that will be saved, including your manual estimates.</p>
+          <div className="intake-tcg-printing-queue-list">
+            {tcgPhysicalCopies.map(copy => <article key={copy.id}>
+              <div className="intake-tcg-queue-art">{copy.selectedArtwork ? <img src={copy.selectedArtwork} alt="" /> : <span>🃏</span>}</div>
+              <div><strong>{tcgCardName || title}</strong><small>{copy.quantity}× {copy.setCode} · {copy.rarity}</small>
+                <small>{[copy.edition, copy.condition, copy.language, tcgLocations.find(row => row.id === copy.locationId)?.name || "Loose Cards"].filter(Boolean).join(" · ")}</small>
+                <small>{copy.captures?.length || 0} photos · Purchase price ${Number(copy.purchasePrice || 0).toFixed(2)} each</small></div>
+              <div className="intake-tcg-queue-price"><strong>{tcgEstimateLabel(copy)} each</strong>
+                <small>{copy.priceSourceType === "manual-override" ? "Manual estimate" : copy.priceSource || "Printing price unavailable"}</small></div>
+            </article>)}
+          </div>
+          <div className="intake-footer-actions">
+            <button type="button" className="secondary-button" disabled={busy} onClick={() => setMode("tcg-match")}>Back to printing queue</button>
+            <button type="button" className="primary-button" disabled={busy || !tcgPhysicalCopies.length} onClick={completeIntake}>{busy ? "Saving…" : "Save queued printings"}</button>
+          </div>
         </div>}
 
         {mode === "media-scan" && <div className="intake-media-workspace">

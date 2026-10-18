@@ -400,6 +400,28 @@ function canonicalContext(root) {
   for (const name of ['slugifyTcgPathPart', 'getTcgCanonicalPaths', 'makeCanonicalTcgMetadata', 'getTcgHoldingPaths', 'summarizeTcgPrintings', 'readCanonicalTcgRecords', 'persistTcgCanonicalRecord']) context[name] = actual(name, context);
   return context;
 }
+
+test('manual intake estimates survive validation, canonical share reopen and provider refresh, including explicit zero', t => {
+  const root = temporary(t), context = canonicalContext(root);
+  const make = actual('makeTcgPrinting', { makeIntakeId: () => crypto.randomUUID(), readTcgBinders: () => [], normalizeYugiohSetCode: value => value });
+  const holdings = [8.75, 0].map((amount, index) => {
+    const draft = nativeInventoryDraft({ title: 'Blazing Cartesia, the Virtuous', category: 'trading-cards', quantity: 2, purchasePrice: 1.25,
+      tcg: { providerCardId: '95515789', setCode: 'MP23-EN162', rarity: 'Prismatic Secret Rare', marketValue: amount,
+        priceSourceType: 'manual-override', priceSource: 'Manual estimate', priceAvailable: false } });
+    assert.equal(draft.tcg.priceAvailable, true); assert.equal(draft.tcg.manualPriceOverride, amount);
+    return make({ ...draft.tcg, id: 'manual-' + index });
+  });
+  const record = { id: 'manual-intake', title: 'Blazing Cartesia, the Virtuous', tcg: { cardName: 'Blazing Cartesia, the Virtuous', printings: holdings } };
+  context.persistTcgCanonicalRecord(record);
+  const reopened = canonicalContext(root).readCanonicalTcgRecords()[0];
+  assert.equal(reopened.tcg.printings.length, 2);
+  const refreshed = refreshHoldings(reopened, { card_sets: [{ set_code: 'MP23-EN162', set_rarity: 'Prismatic Secret Rare', set_price: '0' }], card_prices: [{ tcgplayer_price: '0.26' }] }, context.summarizeTcgPrintings);
+  assert.deepEqual(Array.from(refreshed.tcg.printings, row => row.marketValue), [8.75, 0]);
+  for (const row of refreshed.tcg.printings) { assert.equal(row.priceAvailable, true); assert.equal(row.priceSourceType, 'manual-override'); assert.equal(row.purchasePrice, 1.25); assert.equal(row.quantity, 2); }
+  context.persistTcgCanonicalRecord(refreshed);
+  assert.equal(canonicalContext(root).readCanonicalTcgRecords()[0].tcg.printings[0].manualPriceOverride, 8.75);
+});
+
 test('actual canonical writer and cold reader retain multiple holdings in one set folder, edits, photos and removed groups', t => {
   const root = temporary(t), context = canonicalContext(root);
   const capture = { id: 'front', dataUrl: 'data:image/jpeg;base64,' + Buffer.from('generated-photo-fixture').toString('base64') };

@@ -21187,7 +21187,7 @@ function makeTcgPrinting(payload = {}) {
     _canonicalParentHoldingId: payload._canonicalParentHoldingId,
     manualPriceOverride: payload.manualPriceOverride,
     priceHistory: Array.isArray(payload.priceHistory) ? payload.priceHistory.slice(-365) : [],
-    priceAvailable: payload.priceAvailable !== false && Number(payload.marketValue || 0) > 0,
+    priceAvailable: payload.priceSourceType === "manual-override" || (payload.priceAvailable !== false && Number(payload.marketValue || 0) > 0),
     binderId: resolvedBinder?.id || requestedBinderId,
     binder: resolvedBinder?.name || requestedBinderName,
     page: String(payload.page || "").trim(),
@@ -22572,6 +22572,7 @@ function completeIntakeSession(req, res) {
         priceSourceType: String(
           req.body.tcg.priceSourceType || ""
         ),
+        manualPriceOverride: req.body.tcg.priceSourceType === "manual-override" ? Math.max(0, Number(req.body.tcg.marketValue || 0)) : null,
         priceDifferenceWarning: Boolean(
           req.body.tcg.priceDifferenceWarning
         ),
