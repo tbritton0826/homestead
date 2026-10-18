@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { prepareTcgPhotos } from "./utils/tcg-photos.js";
+import { TcgLocationFields, TcgLocationsPanel, TcgHoldingMoves, TcgWishlistPanel } from "./components/TcgStorage.jsx";
 import { lazyFeature, FeatureReloadButton } from "./components/LazyFeature.jsx";
 import { createProfileStartupLoader, initialStartupProfileList, mergeStartupProfileList } from "./utils/profile-startup.js";
 import { loadEpub, loadHls, loadBarcodeReader } from "./utils/feature-loaders.js";
@@ -34203,6 +34205,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   const [tcgSelectedArtworkId, setTcgSelectedArtworkId] = useState("");
   const [tcgDeckOptions, setTcgDeckOptions] = useState([]);
   const [tcgBinderOptions, setTcgBinderOptions] = useState([]);
+  const [tcgLocations, setTcgLocations] = useState([]);
   const [tcgBinderId, setTcgBinderId] = useState("");
   const [tcgBinderPage, setTcgBinderPage] = useState("");
   const [tcgBinderPocket, setTcgBinderPocket] = useState("");
@@ -34239,9 +34242,11 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     Promise.all([
       fetch("/api/intake/tcg/decks", { cache: "no-store" }).then((response) => response.json()).catch(() => ({})),
       fetch("/api/intake/tcg/binders", { cache: "no-store" }).then((response) => response.json()).catch(() => ({})),
-    ]).then(([deckData, binderData]) => {
+      fetch("/api/inventory/native", { cache: "no-store" }).then(response => response.json()).catch(() => ({})),
+    ]).then(([deckData, binderData, inventoryData]) => {
       setTcgDeckOptions(Array.isArray(deckData?.decks) ? deckData.decks : []);
       setTcgBinderOptions(Array.isArray(binderData?.binders) ? binderData.binders : []);
+      setTcgLocations(inventoryData.locations || []);
     });
   }, []);
   const videoRef = useRef(null);
@@ -34759,6 +34764,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       selectedArtwork: tcgSelectedArtwork || tcgSelectedMatch?.image || "",
       selectedArtworkId: tcgSelectedArtworkId || "",
       binderId: tcgBinderId,
+      locationId: tcgBinderId || "loose", locationType: tcgBinderId ? "binder" : "loose",
+      priceAvailable: false,
       page: tcgBinderPage,
       pocket: tcgBinderPocket,
       linkedDeckIds: [...tcgLinkedDeckIds],
@@ -34767,6 +34774,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   function updateTcgPrintingDraft(patch) {
+    if (patch.marketValue !== undefined && patch.priceSourceType === undefined && patch.priceAvailable === undefined) patch = { ...patch, priceAvailable: true, priceSourceType: "manual-override", priceSource: "Manual estimate" };
     setTcgPrintingDraft((current) => ({
       ...(current || makeTcgPhysicalCopy()),
       ...patch,
@@ -34862,6 +34870,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       genericPrice: Math.max(0, Number(match.genericPrice || 0)),
       priceSource: match.priceSource || "YGOPRODeck",
       priceSourceType: match.priceSourceType || "",
+      priceAvailable: match.priceAvailable !== false,
       priceDifferenceWarning: Boolean(match.priceDifferenceWarning),
       productUrl: match.productUrl || match.setUrl || "",
       selectedArtwork:
@@ -34950,9 +34959,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         applyTcgMatchToPrintingDraft(matches[0]);
         setTcgLookupMessage(
           matches.length === 1
-            ? `${setCode} matched ${matches[0].rarity || "a printing"} at $${Number(
-                matches[0].marketValue || 0
-              ).toFixed(2)}.`
+            ? `${setCode} matched ${matches[0].rarity || "a printing"} · ${tcgEstimateLabel(matches[0])}.`
             : `${matches.length} rarity options found for ${setCode}.`
         );
       } else {
@@ -34967,7 +34974,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     }
   }
 
-  function addDraftPrintingToQueue() {
+  async function addDraftPrintingToQueue() {
+    if (busy) return;
     const draft = tcgPrintingDraft || makeTcgPhysicalCopy();
     const setCode = String(draft.setCode || "").trim().toUpperCase();
 
@@ -34981,9 +34989,15 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       return;
     }
 
+    let preparedPhotos;
+    setBusy(true);
+    try { preparedPhotos = await prepareTcgPhotos(captures); }
+    catch (error) { setTcgRecognitionMessage(error.message || "The photos could not be prepared."); return; }
+    finally { setBusy(false); }
     const queued = {
       ...draft,
-      id: cryptoRandomId(),
+      id: draft.id || cryptoRandomId(),
+      captures: preparedPhotos,
       setCode,
       rarity: String(draft.rarity || "").trim(),
       quantity: Math.max(1, Number(draft.quantity || 1)),
@@ -34992,6 +35006,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
     };
 
     setTcgPhysicalCopies((current) => [...current, queued]);
+    setCaptures([]);
     setTcgRecognitionMessage(
       `${queued.quantity}× ${queued.setCode} · ${queued.rarity} added to queue.`
     );
@@ -35024,7 +35039,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   function editQueuedTcgPrinting(copy) {
-    setTcgPrintingDraft({ ...copy, id: cryptoRandomId() });
+    setTcgPrintingDraft({ ...copy });
+    setCaptures(copy.captures || []);
     setTcgPhysicalCopies((current) =>
       current.filter((entry) => entry.id !== copy.id)
     );
@@ -35051,9 +35067,9 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
           ) || tcgSelectedMatch;
 
         return {
-          id: cryptoRandomId(),
+          id: copy.id,
           title: cardName,
-          capture: captures[0] || null,
+          captures: copy.captures || [],
           tcg: {
             game: tcgGame,
             cardName,
@@ -35065,6 +35081,9 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
             quantity: Math.max(1, Number(copy.quantity || 1)),
             purchasePrice: Math.max(0, Number(copy.purchasePrice || 0)),
             marketValue: Math.max(0, Number(copy.marketValue || 0)),
+            priceAvailable: copy.priceAvailable !== false,
+            locationId: copy.locationId || copy.binderId || "loose",
+            locationType: copy.locationType || (copy.binderId ? "binder" : "loose"),
             printingPrice: Math.max(
               0,
               Number(copy.printingPrice ?? matchForCopy?.printingPrice ?? 0)
@@ -35114,7 +35133,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
             binder: binder?.name || "",
             page: copy.page || "",
             pocket: copy.pocket || "",
-            location: binder?.location || "",
+            location: tcgLocations.find(row => row.id === (copy.locationId || copy.binderId))?.name || binder?.name || "Loose Cards",
             cardIdentityKey:
               String(matchForCopy?.cardId || tcgSelectedMatch?.cardId || cardName)
                 .trim()
@@ -35173,44 +35192,13 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
   }
 
   async function saveSingleTcgBatchEntry(entry) {
-    const sessionResponse = await fetch("/api/intake/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        device: capabilities,
-        source: "tcg-batch",
-        requestedLibrary: "inventory",
-      }),
+    const response = await fetch("/api/inventory/native/batches", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: entry.id, retry: true, entries: [{ ...entry, category: "trading-cards", quantity: entry.tcg.quantity, condition: entry.tcg.condition, location: entry.tcg.location, purchasePrice: entry.tcg.purchasePrice, notes: notes.trim() }] }),
     });
-    const sessionData = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !sessionData.ok) {
-      throw new Error(sessionData.message || "Unable to create trading-card intake session.");
-    }
-
-    const completeResponse = await fetch(
-      `/api/intake/sessions/${encodeURIComponent(sessionData.session.id)}/complete`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: entry.tcg.setCode || "",
-          libraryId: "inventory",
-          title: entry.title,
-          notes: notes.trim(),
-          valuation: valuationEstimate,
-          inventoryCategory: "trading-cards",
-          captures: entry.capture ? [entry.capture] : [],
-          destinations: { inventory: true },
-          duplicateAction: "copy",
-          tcg: entry.tcg,
-        }),
-      }
-    );
-    const completed = await completeResponse.json().catch(() => ({}));
-    if (!completeResponse.ok || !completed.ok) {
-      throw new Error(completed.message || `Unable to save ${entry.title}.`);
-    }
-    return completed;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || data.state !== "complete") throw new Error(data.message || data.entries?.[0]?.message || "Save is unconfirmed. Keep this queue and check Inventory before adding these copies again.");
+    return data;
   }
 
   async function addCurrentTcgToBatch() {
@@ -35233,6 +35221,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
         try {
           await saveSingleTcgBatchEntry(entry);
           added += 1;
+          setTcgPhysicalCopies(current => current.filter(copy => copy.id !== entry.id));
           setTcgRecentItems((current) => [
             {
               id: entry.id,
@@ -35513,6 +35502,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
       genericPrice: Math.max(0, Number(match.genericPrice || 0)),
       priceSource: match.priceSource || "YGOPRODeck",
       priceSourceType: match.priceSourceType || "",
+      priceAvailable: match.priceAvailable !== false,
       priceDifferenceWarning: Boolean(match.priceDifferenceWarning),
       selectedArtwork: selected.image || match.image || "",
       selectedArtworkId: selected.id || "",
@@ -35861,10 +35851,10 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                   </strong>
                   <span>
                     {tcgPhysicalCopies.length} print
-                    {tcgPhysicalCopies.length === 1 ? "" : "s"}
+                    {tcgPhysicalCopies.length === 1 ? "" : "s"} · {tcgPhysicalCopies.filter(copy => copy.priceAvailable === false).length} unpriced groups
                   </span>
                   <span>
-                    ${tcgPhysicalCopies
+                    Known estimates: ${tcgPhysicalCopies
                       .reduce(
                         (sum, copy) =>
                           sum +
@@ -35879,6 +35869,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
               {tcgPrintingDraft && (
                 <div className="intake-tcg-active-printing">
+                  <label>Photos for this printing group<input type="file" accept="image/*" multiple onChange={event => { addCaptureFiles(event.target.files, "card-photo"); event.target.value = ""; }} /></label>
+                  <div>{captures.map(photo => <div key={photo.id}><span>{photo.name}</span><button type="button" onClick={() => setCaptures(current => current.filter(row => row.id !== photo.id))}>Remove photo</button></div>)}</div>
                   <div className="intake-tcg-active-printing-grid">
                     <label className="wide">
                       <span>Set code</span>
@@ -35969,7 +35961,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                           >
                             {[
                               option.rarity || "Unknown rarity",
-                              `$${Number(option.marketValue || 0).toFixed(2)}`,
+                              tcgEstimateLabel(option),
                             ].join(" · ")}
                           </option>
                         ))}
@@ -36050,7 +36042,8 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                         type="number"
                         min="0"
                         step="0.01"
-                        value={tcgPrintingDraft.marketValue || 0}
+                        value={tcgPrintingDraft.priceAvailable === false ? "" : tcgPrintingDraft.marketValue ?? ""}
+                        placeholder="Price unavailable — enter a manual estimate"
                         onChange={(event) =>
                           updateTcgPrintingDraft({
                             marketValue: Math.max(
@@ -36080,25 +36073,10 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                       />
                     </label>
 
-                    <label>
-                      <span>Binder</span>
-                      <select
-                        value={tcgPrintingDraft.binderId || ""}
-                        onChange={(event) =>
-                          updateTcgPrintingDraft({
-                            binderId: event.target.value,
-                          })
-                        }
-                      >
-                        <option value="">No binder</option>
-                        {tcgBinderOptions.map((binder) => (
-                          <option key={binder.id} value={binder.id}>
-                            {binder.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
+                    <TcgLocationFields value={tcgPrintingDraft.locationId || tcgPrintingDraft.binderId || "loose"} locations={tcgLocations}
+                      onCreated={row => { setTcgLocations(current => [...current, row]); if (row.kind === "binder") setTcgBinderOptions(current => [...current, row]); }}
+                      onChange={(id, created) => { const row = created || tcgLocations.find(item => item.id === id); updateTcgPrintingDraft({ locationId: id, locationType: row?.kind || "loose", binderId: row?.kind === "binder" ? id : "" }); }} />
+                    <p className="muted">Set/rarity estimates do not quote edition, condition or language. Missing quotes stay unavailable. Manual estimates are preserved.</p>
                     <label>
                       <span>Page</span>
                       <input
@@ -36136,7 +36114,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                       <span>
                         {tcgPrintingDraft.rarity || "No rarity selected"}
                         {" · "}
-                        ${Number(tcgPrintingDraft.marketValue || 0).toFixed(2)}
+                        {tcgEstimateLabel(tcgPrintingDraft)}
                         {" each"}
                       </span>
                     </div>
@@ -36197,7 +36175,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
                                 Math.max(1, Number(copy.quantity || 1))).toFixed(2)}
                             </strong>
                             <small>
-                              ${Number(copy.marketValue || 0).toFixed(2)} each
+                              {tcgEstimateLabel(copy)} each
                             </small>
                           </div>
                           <div className="intake-tcg-queue-actions">
@@ -36420,7 +36398,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
               <label><span>Estimated market value per card</span><input type="number" min="0" step="0.01" value={tcgMarketValue} onChange={(event) => setTcgMarketValue(event.target.value)} placeholder="0.00" /></label>
             </div>
             <div className="intake-tcg-actions"><button type="button" className="secondary-button" disabled={tcgLookupBusy || (!tcgCardName.trim() && !tcgSetCode.trim() && !title.trim())} onClick={searchYugiohCards}>{tcgLookupBusy ? "Searching…" : "Search Yu-Gi-Oh! catalog"}</button>{tcgLookupMessage && <span>{tcgLookupMessage}</span>}</div>
-            {tcgMatches.length > 0 && <div className="intake-tcg-match-grid">{tcgMatches.map((match) => <button type="button" key={`${match.cardId}-${match.setCode}`} className={tcgSelectedMatch?.cardId === match.cardId && tcgSelectedMatch?.setCode === match.setCode ? "selected" : ""} onClick={() => selectTcgMatch(match)}>{match.image ? <img src={match.image} alt="" /> : <span className="tcg-card-placeholder">🃏</span>}<div><strong>{match.cardName}</strong><small>{match.setCode || "Unknown set"} · {match.rarity || "Unknown rarity"}</small><em>${Number(match.marketValue || 0).toFixed(2)} estimated</em></div></button>)}</div>}
+            {tcgMatches.length > 0 && <div className="intake-tcg-match-grid">{tcgMatches.map((match) => <button type="button" key={`${match.cardId}-${match.setCode}`} className={tcgSelectedMatch?.cardId === match.cardId && tcgSelectedMatch?.setCode === match.setCode ? "selected" : ""} onClick={() => selectTcgMatch(match)}>{match.image ? <img src={match.image} alt="" /> : <span className="tcg-card-placeholder">🃏</span>}<div><strong>{match.cardName}</strong><small>{match.setCode || "Unknown set"} · {match.rarity || "Unknown rarity"}</small><em>{tcgEstimateLabel(match)}</em></div></button>)}</div>}
             <div className="intake-tcg-finance-preview"><span>Cost basis <strong>${(Math.max(0, Number(tcgPurchasePrice || 0)) * Math.max(1, Number(tcgQuantity || 1))).toFixed(2)}</strong></span><span>Estimated value <strong>${(Math.max(0, Number(tcgMarketValue || 0)) * Math.max(1, Number(tcgQuantity || 1))).toFixed(2)}</strong></span><span className={(Number(tcgMarketValue || 0) - Number(tcgPurchasePrice || 0)) >= 0 ? "positive" : "negative"}>Unrealized {(Number(tcgMarketValue || 0) - Number(tcgPurchasePrice || 0)) >= 0 ? "profit" : "deficit"} <strong>${Math.abs((Number(tcgMarketValue || 0) - Number(tcgPurchasePrice || 0)) * Math.max(1, Number(tcgQuantity || 1))).toFixed(2)}</strong></span></div>
           </section>}
           {(libraryId !== "inventory" || inventoryCategory === "media") && (
@@ -37674,11 +37652,12 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
       ? Math.max(0, Number(record.tcg.totalMarketValue))
       : Math.max(0, Number(record.tcg?.marketValue || 0)) * quantity;
 
+    totals.unpriced += record.tcg?.priceAvailable === false ? quantity - Number(record.tcg?.pricedQuantity || 0) : 0;
     totals.cards += quantity;
     totals.cost += cost;
     totals.value += value;
     return totals;
-  }, { cards: 0, cost: 0, value: 0 });
+  }, { cards: 0, cost: 0, value: 0, unpriced: 0 });
   tcgTotals.change = tcgTotals.value - tcgTotals.cost;
 
   const tcgFilterOptions = useMemo(() => {
@@ -38416,11 +38395,11 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
       {tab === "tcg" && <>
         <div className="inventory-tcg-summary-strip">
           <span><strong>{tcgTotals.cards}</strong> Cards</span>
-          <span><strong>${tcgTotals.value.toFixed(2)}</strong> Value</span>
+          <span><strong>${tcgTotals.value.toFixed(2)}</strong> Known estimates · {tcgTotals.unpriced} unpriced copies</span>
           <span><strong>${tcgTotals.cost.toFixed(2)}</strong> Invested</span>
           <span className={tcgTotals.change >= 0 ? "positive" : "negative"}>
             <strong>{tcgTotals.change >= 0 ? "+" : "-"}${Math.abs(tcgTotals.change).toFixed(2)}</strong>
-            {tcgTotals.change >= 0 ? " Gain" : " Deficit"}
+            {tcgTotals.unpriced ? " Difference (incomplete pricing)" : tcgTotals.change >= 0 ? " Gain" : " Deficit"}
           </span>
         </div>
 
@@ -38430,6 +38409,7 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
               ["cards", "Cards"],
               ["binders", "Binders"],
               ["decks", "Decks"],
+              ["storage", "Locations"], ["boxes", "Bins / Boxes"], ["loose", "Loose Cards"], ["custom", "Custom Locations"],
               ["wishlist", "Wishlist"],
             ].map(([id, label]) => (
               <button
@@ -38803,16 +38783,12 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
           </div>}
         </section>}
 
+        {tcgView === "decks" && <TcgLocationsPanel kind="deck" records={tcgRecords} onSelect={setSelectedRecord} onChanged={loadInventory} />}
         {tcgView === "decks" && <section><div className="tcg-decks-heading"><div><h3>Deck Builds</h3><p>Build decks with references to owned cards. Use the global Add button to create one.</p></div></div>{tcgDecks.length ? <div className="tcg-deck-grid">{tcgDecks.map((deck) => <button className="tcg-deck-card" type="button" key={deck.id} onClick={() => openEditDeckWizard(deck)}><span>🧩</span><strong>{deck.name}</strong><small>{deck.format}</small><em>{(deck.cards || []).length} entries</em></button>)}</div> : <InventoryPlaceholder title="No deck builds yet" icon="🧩" text="Create a deck and link existing cards." />}</section>}
 
-        {tcgView === "wishlist" && (
-          <InventoryPlaceholder
-            title="Wishlist"
-            icon="⭐"
-            text="Track cards you want, missing deck copies, target printings, and expected acquisition cost."
-            onAdd={onNewIntake}
-          />
-        )}
+        {["storage", "boxes", "loose", "custom"].includes(tcgView) && <TcgLocationsPanel kind={{ boxes: "box", loose: "loose", custom: "custom" }[tcgView]} records={tcgRecords} onSelect={setSelectedRecord} onChanged={loadInventory} />}
+        {tcgView === "wishlist" && <TcgWishlistPanel />}
+
       </>}
 
       {tab === "electronics" && <>
@@ -39218,7 +39194,8 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
                 })()}
               </section>
             )}
-            {selectedRecord.tcg && <section className="inventory-tcg-detail"><strong>Trading Card valuation</strong><dl><div><dt>Set code</dt><dd>{selectedRecord.tcg.setCode || "—"}</dd></div><div><dt>Rarity</dt><dd>{selectedRecord.tcg.rarity || "—"}</dd></div><div><dt>Condition</dt><dd>{selectedRecord.tcg.condition || "—"}</dd></div><div><dt>Quantity</dt><dd>{selectedRecord.tcg.quantity || 1}</dd></div><div><dt>Location</dt><dd>{selectedRecord.tcg.location || selectedRecord.location || "—"}</dd></div><div><dt>Binder</dt><dd>{selectedRecord.tcg.binder || "—"}</dd></div><div><dt>Page / pocket</dt><dd>{[selectedRecord.tcg.page && `Page ${selectedRecord.tcg.page}`, selectedRecord.tcg.pocket && `Pocket ${selectedRecord.tcg.pocket}`].filter(Boolean).join(" · ") || "—"}</dd></div><div><dt>Purchase price</dt><dd>${Number(selectedRecord.tcg.purchasePrice || 0).toFixed(2)} each</dd></div><div><dt>Estimated value</dt><dd>${Number(selectedRecord.tcg.marketValue || 0).toFixed(2)} each</dd></div><div><dt>Price source</dt><dd>{selectedRecord.tcg.priceSource || "YGOPRODeck"}</dd></div>{Number(selectedRecord.tcg.printingPrice || 0) > 0 && <div><dt>Exact printing</dt><dd>${Number(selectedRecord.tcg.printingPrice || 0).toFixed(2)}</dd></div>}{Number(selectedRecord.tcg.genericPrice || 0) > 0 && <div><dt>Generic card</dt><dd>${Number(selectedRecord.tcg.genericPrice || 0).toFixed(2)}</dd></div>}{selectedRecord.tcg.priceDifferenceWarning && <div className="inventory-tcg-price-warning"><dt>Pricing warning</dt><dd>Exact printing and generic prices differ significantly.</dd></div>}<div><dt>Position</dt><dd className={(Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) >= 0 ? "positive" : "negative"}>{(Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) >= 0 ? "+" : "-"}${Math.abs((Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) * Math.max(1, Number(selectedRecord.tcg.quantity || 1))).toFixed(2)}</dd></div></dl></section>}
+            {selectedRecord.tcg && <TcgHoldingMoves record={selectedRecord} onUpdated={record => { setSelectedRecord(record); setRecords(current => current.map(row => row.id === record.id ? record : row)); }} />}
+            {selectedRecord.tcg && <section className="inventory-tcg-detail"><strong>Trading Card valuation</strong><dl><div><dt>Set code</dt><dd>{selectedRecord.tcg.setCode || "—"}</dd></div><div><dt>Rarity</dt><dd>{selectedRecord.tcg.rarity || "—"}</dd></div><div><dt>Condition</dt><dd>{selectedRecord.tcg.condition || "—"}</dd></div><div><dt>Quantity</dt><dd>{selectedRecord.tcg.quantity || 1}</dd></div><div><dt>Location</dt><dd>{selectedRecord.tcg.location || selectedRecord.location || "—"}</dd></div><div><dt>Binder</dt><dd>{selectedRecord.tcg.binder || "—"}</dd></div><div><dt>Page / pocket</dt><dd>{[selectedRecord.tcg.page && `Page ${selectedRecord.tcg.page}`, selectedRecord.tcg.pocket && `Pocket ${selectedRecord.tcg.pocket}`].filter(Boolean).join(" · ") || "—"}</dd></div><div><dt>Purchase price</dt><dd>${Number(selectedRecord.tcg.purchasePrice || 0).toFixed(2)} each</dd></div><div><dt>Estimated value</dt><dd>{tcgEstimateLabel(selectedRecord.tcg)} each</dd></div><div><dt>Price source</dt><dd>{selectedRecord.tcg.priceSource || "YGOPRODeck"}</dd></div>{Number(selectedRecord.tcg.printingPrice || 0) > 0 && <div><dt>Set/rarity estimate</dt><dd>${Number(selectedRecord.tcg.printingPrice || 0).toFixed(2)}</dd></div>}{Number(selectedRecord.tcg.genericPrice || 0) > 0 && <div><dt>Generic card</dt><dd>${Number(selectedRecord.tcg.genericPrice || 0).toFixed(2)}</dd></div>}{selectedRecord.tcg.priceDifferenceWarning && <div className="inventory-tcg-price-warning"><dt>Pricing warning</dt><dd>The set/rarity estimate differs from the generic card estimate. Edition and condition are not separately quoted.</dd></div>}<div><dt>Position {selectedRecord.tcg.priceAvailable === false ? "(incomplete pricing)" : ""}</dt><dd className={(Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) >= 0 ? "positive" : "negative"}>{(Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) >= 0 ? "+" : "-"}${Math.abs((Number(selectedRecord.tcg.marketValue || 0) - Number(selectedRecord.tcg.purchasePrice || 0)) * Math.max(1, Number(selectedRecord.tcg.quantity || 1))).toFixed(2)}</dd></div></dl></section>}
             {selectedRecord.tcg &&
               Array.isArray(selectedRecord.tcg.printings) &&
               selectedRecord.tcg.printings.length > 0 && (
@@ -39672,38 +39649,21 @@ function TcgRecordGrid({ records, loading, onSelect, emptyText }) {
             <div className="inventory-tcg-poster-meta">
               <strong>{record.title || record.tcg?.cardName || "Untitled card"}</strong>
               <span>{record.tcg?.rarity || "Unknown rarity"}</span>
-              <span className="inventory-tcg-price-and-prints">
-                <strong>
-                  ${Number(
-                    record.tcg?.totalMarketValue ??
-                    record.tcg?.marketValue ??
-                    0
-                  ).toFixed(2)}
-                  {Array.isArray(record.tcg?.printings) &&
-                  record.tcg.printings.length > 1
-                    ? " total"
-                    : ""}
-                </strong>
-                {Array.isArray(record.tcg?.printings) &&
-                  record.tcg.printings.length > 0 && (
-                    <em>
-                      {record.tcg.printings.length} print
-                      {record.tcg.printings.length === 1 ? "" : "s"}
-                    </em>
-                  )}
-              </span>
-              <span>
-                {Array.isArray(record.tcg?.printings) &&
-                record.tcg.printings.length > 1
-                  ? `${record.tcg.totalQuantity || record.tcg.quantity || 0} cards`
-                  : record.tcg?.setCode || "Unknown set"}
-              </span>
+              <span>{record.tcg?.quantity || 0} owned · {record.tcg?.printings?.length || 1} holding groups</span>
+              <span>{record.tcg?.priceAvailable === false ? "Some printing prices unavailable" : "Estimated total: $" + Number(record.tcg?.totalMarketValue || 0).toFixed(2)}</span>
+              {[...new Map((record.tcg?.printings || []).map(row => [row.location || "Loose Cards", 0])).keys()].map(name => <small key={name}>{name}: {(record.tcg?.printings || []).filter(row => (row.location || "Loose Cards") === name).reduce((total, row) => total + Number(row.quantity || 0), 0)}</small>)}
             </div>
           </button>
         );
       })}
     </div>
   );
+}
+
+function tcgEstimateLabel(value = {}) {
+  if (value.priceAvailable === false || value.priceSourceType === "unavailable") return "Price unavailable";
+  const amount = Number(value.marketValue);
+  return Number.isFinite(amount) && amount >= 0 ? `$${amount.toFixed(2)}` : "Price unavailable";
 }
 
 function getInventoryArtwork(record = {}) {
@@ -39743,7 +39703,7 @@ function InventoryRecordGrid({ records, loading, onSelect, emptyText }) {
     const linked = Object.keys(record.linkedDestinations || {}).filter((id) => id !== "inventory" && record.linkedDestinations?.[id]);
     return <button className="inventory-v1-card" type="button" key={record.id} onClick={() => onSelect(record)}>
       <div className="inventory-v1-card-image">{image ? <img src={image} alt="" /> : <span>📦</span>}<em>{record.code || "No code"}</em></div>
-      <div className="inventory-v1-card-body"><strong>{record.title || record.name || "Untitled item"}</strong><small>{record.tcg ? `${record.tcg.setCode || "Unknown set"} · ${record.tcg.rarity || "Unknown rarity"}` : record.notes || record.metadata?.brand || "Inventory item"}</small>{record.tcg && <div className="inventory-v1-link-pills"><span>${Number(record.tcg.marketValue || 0).toFixed(2)} ea.</span><span>{record.tcg.quantity || 1} owned</span></div>}{record.category && record.category !== "general" && <div className="inventory-v1-link-pills"><span>{record.category}</span></div>}{linked.length > 0 && <div className="inventory-v1-link-pills">{linked.map((id) => <span key={id}>{id}</span>)}</div>}</div>
+      <div className="inventory-v1-card-body"><strong>{record.title || record.name || "Untitled item"}</strong><small>{record.tcg ? `${record.tcg.setCode || "Unknown set"} · ${record.tcg.rarity || "Unknown rarity"}` : record.notes || record.metadata?.brand || "Inventory item"}</small>{record.tcg && <div className="inventory-v1-link-pills"><span>{tcgEstimateLabel(record.tcg)} ea.</span><span>{record.tcg.quantity || 1} owned</span></div>}{record.category && record.category !== "general" && <div className="inventory-v1-link-pills"><span>{record.category}</span></div>}{linked.length > 0 && <div className="inventory-v1-link-pills">{linked.map((id) => <span key={id}>{id}</span>)}</div>}</div>
     </button>;
   })}</div>;
 }

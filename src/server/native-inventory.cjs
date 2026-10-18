@@ -57,6 +57,8 @@ function nativeInventoryDraft(input = {}) {
       selectedArtwork: text(tcg.selectedArtwork, 2000), selectedArtworkId: text(tcg.selectedArtworkId, 80),
       selectedPrinting: Object.fromEntries(['cardId', 'cardName', 'setCode', 'setName', 'rarity', 'image', 'description', 'cardType', 'race', 'attribute', 'priceSource', 'priceSourceType'].filter(key => selectedPrinting[key] !== undefined).map(key => [key, text(selectedPrinting[key])])),
       binderId: text(tcg.binderId, 150), page: text(tcg.page, 20), pocket: text(tcg.pocket, 20),
+      locationId: text(tcg.locationId || tcg.binderId || 'loose', 150), locationType: text(tcg.locationType || (tcg.binderId ? 'binder' : 'loose'), 20),
+      captureGroupId: text(tcg.captureGroupId, 100), priceAvailable: tcg.priceAvailable !== false,
       printingPrice: number(tcg.printingPrice || 0, 'printing price'), genericPrice: number(tcg.genericPrice || 0, 'generic price'),
       priceSource: text(tcg.priceSource || tcg.provider || 'manual', 100), priceSourceType: text(tcg.priceSourceType, 80), priceDifferenceWarning: tcg.priceDifferenceWarning === true,
       artworkVariants: Array.isArray(tcg.artworkVariants) ? tcg.artworkVariants.slice(0, 30).map(row => ({ id: text(row.id, 80), image: text(row.image, 2000), thumbnail: text(row.thumbnail, 2000) })) : [],
@@ -111,30 +113,151 @@ function createInventoryRequests(directory) {
   return { read, begin, finish };
 }
 function inventorySummary(record) {
-  const captures = (record.captures || []).map((capture, index) => {
+  function photos(values, holding = '') { return (values || []).map((capture, index) => {
     const details = { ...capture }; delete details.dataUrl;
-    return { ...details, url: `/api/inventory/native/items/${encodeURIComponent(record.id)}/photos/${index}?v=${encodeURIComponent(record.updatedAt || '')}` };
-  });
-  return { ...record, captures, poster: record.poster || record.tcg?.selectedArtwork || record.metadata?.thumbnail || captures[0]?.url || '' };
+    return { ...details, url: capture.url || `/api/inventory/native/items/${encodeURIComponent(record.id)}/photos/${index}?holding=${encodeURIComponent(holding)}&v=${encodeURIComponent(record.updatedAt || '')}` };
+  }); }
+  const captures = photos(record.captures);
+  const tcg = record.tcg ? { ...record.tcg, printings: (record.tcg.printings || []).map(row => ({ ...row, _canonicalDirectory: undefined, captures: photos(row.captures, row.id) })) } : record.tcg;
+  return { ...record, tcg, captures, poster: record.poster || record.tcg?.selectedArtwork || record.metadata?.thumbnail || captures[0]?.url || '' };
 }
-function registerNativeInventory(app, { express, access, feature, config, records, binders, decks, complete, update, updatePrinting, recognize, lookupCode, searchCards, requests }) {
+function registerNativeInventory(app, { express, access, feature, config, records, binders, decks, complete, update, updatePrinting, recognize, lookupCode, searchCards, requests,
+  locations = () => [], saveLocation, repair, wishlist = () => [], writeWishlist, move, saveConfirmed = () => true }) {
   const inFlight = new Set();
   const gate = (req, res, next) => {
     const permissions = inventoryAccess(access(req), config());
     if (!permissions.read || (req.method !== 'GET' && !permissions.write)) return res.status(403).json({ ok: false, message: 'This account cannot access or change Inventory.' });
     req.inventoryAccess = permissions; next();
   };
-  app.use('/api/inventory/native', feature, gate, express.json({ limit: '12mb' }));
+  app.use('/api/inventory/native', feature, gate, express.json({ limit: '32mb' }));
   app.get('/api/inventory/native', (req, res) => {
-    try { res.setHeader('Cache-Control', 'no-store'); res.json({ ok: true, version: 1, accountId: access(req).user.id, canEdit: req.inventoryAccess.write, records: records().slice().reverse().map(inventorySummary), binders: binders(), decks: decks() }); }
+    try { res.setHeader('Cache-Control', 'no-store'); res.json({ ok: true, version: 1, capabilities: { printingQueue: true, locations: true }, accountId: access(req).user.id, canEdit: req.inventoryAccess.write, records: records().slice().reverse().map(inventorySummary), binders: binders(), decks: decks(), locations: locations(), wishlist: wishlist() }); }
     catch { res.status(500).json({ ok: false, message: 'Inventory could not load. Retry when the server is ready.' }); }
   });
   const userId = req => access(req).user.id;
+  function validateLocation(body) {
+    if (!body.tcg) return;
+    const id = body.tcg.locationId;
+    const row = locations().find(item => item.id === id);
+    if (id !== 'loose' && !row) throw fail('Choose an existing card location.');
+    if (row) { body.tcg.location = row.name; body.tcg.locationType = row.kind; body.tcg.binderId = row.kind === 'binder' ? row.id : ''; }
+  }
+  app.post('/api/inventory/native/locations', (req, res) => {
+    try {
+      if (!saveLocation) throw fail('Update the server to create card locations.', 503);
+      const row = saveLocation(req.body, {}); res.status(201).json({ ok: true, location: row });
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'The location could not be saved to the Inventory share.' }); }
+  });
+  app.patch('/api/inventory/native/locations/:locationId', (req, res) => {
+    try {
+      const current = locations().find(row => row.id === req.params.locationId);
+      if (!current) throw fail('Location not found.', 404);
+      if (req.body.kind && req.body.kind !== current.kind) throw fail('Location types cannot change after creation.');
+      res.json({ ok: true, location: saveLocation(req.body, current) });
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'The location could not be updated.' }); }
+  });
+  app.post('/api/inventory/native/items/:recordId/holdings/:holdingId/move', (req, res) => {
+    try {
+      const record = records().find(row => row.id === req.params.recordId);
+      const destination = locations().find(row => row.id === req.body.locationId) || (req.body.locationId === 'loose' ? { id: 'loose', kind: 'loose', name: 'Loose Cards' } : null);
+      if (!record?.tcg || !destination) throw fail('Card or location not found.', 404);
+      const requestId = text(req.body.requestId).toLowerCase();
+      req.params.requestId = requestId;
+      const body = { recordId: record.id, holdingId: req.params.holdingId, quantity: req.body.quantity, locationId: destination.id };
+      const reservation = requests.begin(userId(req), requestId, body);
+      if (!reservation.fresh) return res.json(status(req, reservation.value));
+      const identity = `${userId(req)}:${requestId}`;
+      const updated = move(record, req.params.holdingId, Number(req.body.quantity), destination, identity);
+      const value = { ...reservation.value, state: 'complete', recordId: updated.id };
+      requests.finish(userId(req), requestId, value);
+      res.json({ ok: true, state: 'complete', record: inventorySummary(updated) });
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'The selected copies could not be moved.' }); }
+  });
+  app.post('/api/inventory/native/wishlist', (req, res) => {
+    try {
+      const draft = nativeInventoryDraft({ ...req.body, category: 'trading-cards' });
+      const rows = wishlist(), row = { id: crypto.randomUUID(), title: draft.title, tcg: draft.tcg, createdAt: new Date().toISOString() };
+      rows.push(row); writeWishlist(rows); res.status(201).json({ ok: true, wish: row });
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'The wishlist could not be saved.' }); }
+  });
+  app.delete('/api/inventory/native/wishlist/:wishId', (req, res) => {
+    try { writeWishlist(wishlist().filter(row => row.id !== req.params.wishId)); res.json({ ok: true }); }
+    catch { res.status(500).json({ ok: false, message: 'The wishlist could not be updated.' }); }
+  });
+  function batchStatus(req, value) {
+    const all = records();
+    const entries = (value.entries || []).map(entry => {
+      const identity = `${userId(req)}:${req.params.requestId.toLowerCase()}:${entry.id}`;
+      const record = all.find(row => row.mobileRequestId === identity || row.mobileRequestIds?.includes(identity));
+      const confirmed = record && saveConfirmed(record, identity);
+      return { id: entry.id, state: confirmed ? 'complete' : record ? 'uncertain' : entry.state || 'pending', record: record ? inventorySummary(record) : null, message: confirmed ? '' : record ? 'The card entry exists but its share save is unconfirmed. Review it before retrying.' : entry.message || '' };
+    });
+    return { ok: true, state: entries.length && entries.every(entry => entry.state === 'complete') ? 'complete' : 'partial', entries };
+  }
+  app.get('/api/inventory/native/batches/:requestId', (req, res) => {
+    try { const value = requests.read(userId(req), req.params.requestId); res.json(value?.entries ? batchStatus(req, value) : { ok: true, state: 'unknown', entries: [] }); }
+    catch (error) { res.status(error.status || 500).json({ ok: false, message: 'The printing queue status could not be checked.' }); }
+  });
+  app.post('/api/inventory/native/batches/:requestId/repair', (req, res) => {
+    try {
+      if (inFlight.has(`${userId(req)}:${req.params.requestId.toLowerCase()}`)) throw fail("This queue is still saving. Check its status shortly.", 409);
+      const value = requests.read(userId(req), req.params.requestId);
+      if (!value?.entries || req.body.confirmed !== true || !repair) throw fail('Review the saved queue before repairing its share files.');
+      const current = batchStatus(req, value), all = records(), repaired = new Set();
+      for (const entry of current.entries) {
+        if (entry.state !== 'uncertain' || !entry.record || repaired.has(entry.record.id)) continue;
+        const record = all.find(row => row.id === entry.record.id);
+        repair(record); repaired.add(record.id);
+      }
+      res.json(batchStatus(req, value));
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'Share files could not be repaired. No additional copies were added.' }); }
+  });
+  app.post('/api/inventory/native/batches', async (req, res) => {
+    let key, ownsFlight = false;
+    try {
+      req.params.requestId = text(req.body.requestId).toLowerCase();
+      const entries = req.body.entries;
+      if (!Array.isArray(entries) || !entries.length || entries.length > 30) throw fail('Choose between one and 30 printing groups.');
+      const ids = new Set(); let photoBytes = 0;
+      const drafts = entries.map(entry => {
+        if (!/^[a-f0-9-]{36}$/i.test(entry.id) || ids.has(entry.id)) throw fail('Invalid or repeated printing group.');
+        ids.add(entry.id);
+        const body = nativeInventoryDraft({ ...entry, category: 'trading-cards' }); validateLocation(body);
+        photoBytes += body.captures.reduce((sum, photo) => sum + photo.size, 0);
+        body.tcg.captureGroupId = body.captures.length ? entry.id : '';
+        return { id: entry.id, body };
+      });
+      if (photoBytes > 20 * 1024 * 1024) throw fail('The printing queue photos exceed 20 MB. Save a smaller batch.');
+      key = `${userId(req)}:${req.params.requestId}`;
+      if (inFlight.has(key)) throw fail('This printing queue is still saving. Check its status.', 409);
+      const reservation = requests.begin(userId(req), req.params.requestId, drafts);
+      let value = reservation.value;
+      if (!reservation.fresh && req.body.retry !== true) return res.json(batchStatus(req, value));
+      value = { ...value, entries: value.entries || drafts.map(entry => ({ id: entry.id, state: 'pending' })) };
+      requests.finish(userId(req), req.params.requestId, value); inFlight.add(key); ownsFlight = true;
+      for (const draft of drafts) {
+        const index = value.entries.findIndex(entry => entry.id === draft.id);
+        const previous = batchStatus(req, value).entries[index];
+        if (previous.state === 'complete' || previous.record) continue;
+        try {
+          const output = await new Promise((resolve, reject) => {
+            const reply = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(result) { resolve({ code: this.statusCode, result }); return this; } };
+            try { complete({ ...req, params: { sessionId: 'new' }, body: { ...draft.body, mobileRequestId: `${key}:${draft.id}` } }, reply); } catch (error) { reject(error); }
+          });
+          value.entries[index] = { id: draft.id, state: output.result.record ? 'complete' : 'failed', message: output.result.record ? '' : output.result.message || 'Check Inventory before retrying this printing.' };
+        } catch { value.entries[index] = { id: draft.id, state: 'uncertain', message: 'Check saved copies before retrying this printing.' }; }
+        requests.finish(userId(req), req.params.requestId, value);
+      }
+      res.json(batchStatus(req, value));
+    } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'The printing queue could not be confirmed. Check its save status.' }); }
+    finally { if (ownsFlight) inFlight.delete(key); }
+  });
   function status(req, value) {
     if (!value) return { ok: true, state: 'unknown' };
     const identity = `${userId(req)}:${req.params.requestId.toLowerCase()}`;
     const record = records().find(row => row.id === value.recordId || row.mobileRequestId === identity || row.mobileRequestIds?.includes(identity));
-    return { ok: true, state: record ? 'complete' : value.state, record: record ? inventorySummary(record) : null, message: value.message || '' };
+    const confirmed = record && saveConfirmed(record, identity);
+    return { ok: true, state: confirmed ? 'complete' : record ? 'uncertain' : value.state, record: record ? inventorySummary(record) : null, message: record && !confirmed ? 'The card entry exists, but its Inventory share save is unconfirmed. Check the card before adding copies again.' : value.message || '' };
   }
   app.get('/api/inventory/native/requests/:requestId', (req, res) => {
     try { res.setHeader('Cache-Control', 'no-store'); res.json(status(req, requests.read(userId(req), req.params.requestId))); }
@@ -144,7 +267,7 @@ function registerNativeInventory(app, { express, access, feature, config, record
     try {
       if (!/^\d{1,2}$/.test(req.params.index)) return res.sendStatus(404);
       const record = records().find(row => row.id === req.params.recordId);
-      const photo = record?.captures?.[Number(req.params.index)];
+      const photo = req.query.holding ? record?.tcg?.printings?.find(row => row.id === req.query.holding)?.captures?.[Number(req.params.index)] : record?.captures?.[Number(req.params.index)];
       const match = String(photo?.dataUrl || '').match(/^data:image\/(jpeg|jpg|png|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/i);
       if (!match || match[2].length > 16 * 1024 * 1024) return res.sendStatus(404);
       res.setHeader('Cache-Control', 'private, max-age=60'); res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -156,6 +279,7 @@ function registerNativeInventory(app, { express, access, feature, config, record
     let activeKey;
     try {
       const body = nativeInventoryDraft(req.body);
+      validateLocation(body);
       req.params.requestId = String(req.body.requestId || '').toLowerCase();
       reservation = requests.begin(userId(req), req.params.requestId, body);
       if (!reservation.fresh) return res.json(status(req, reservation.value));
@@ -194,7 +318,13 @@ function registerNativeInventory(app, { express, access, feature, config, record
   app.patch('/api/inventory/native/items/:recordId/printings/:printingId', (req, res) => {
     try {
       const body = inventoryPatch(req.body);
-      for (const key of ['setCode', 'rarity', 'edition', 'language', 'binderId', 'page', 'pocket']) if (req.body[key] !== undefined) body[key] = text(req.body[key], 150);
+      if (req.body.marketValue !== undefined) body.marketValue = number(req.body.marketValue, 'estimated value');
+      for (const key of ['setCode', 'rarity', 'edition', 'language', 'binderId', 'page', 'pocket', 'locationId', 'locationType']) if (req.body[key] !== undefined) body[key] = text(req.body[key], 150);
+      if (req.body.locationId !== undefined) {
+        const location = locations().find(row => row.id === req.body.locationId) || (req.body.locationId === 'loose' ? { id: 'loose', kind: 'loose', name: 'Loose Cards' } : null);
+        if (!location) throw fail('Location not found.', 404);
+        body.location = location.name; body.locationType = location.kind;
+      }
       req.body = body; updatePrinting(req, res);
     } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'Card printing could not be updated.' }); }
   });
