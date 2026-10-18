@@ -1,6 +1,8 @@
 import js from '@eslint/js';
 import globals from 'globals';
 export default [
+  { files: ['src/server/tcg-price-lookup.cjs', 'scripts/test-v314.cjs'], languageOptions: { sourceType: 'commonjs', globals: globals.node }, rules: js.configs.recommended.rules },
+  { files: ['scripts/verify-book-reader-browser.mjs'], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['scripts/verify-tcg-intake-browser.mjs'], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['src/server/native-inventory.cjs', 'src/server/tcg-pricing.cjs', 'src/server/tcg-organizations.cjs', 'scripts/test-native-inventory.cjs', 'scripts/test-tcg-intake.cjs'], languageOptions: { sourceType: 'commonjs', globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['src/server/pet-profiles.cjs', 'src/server/comfy-bridge.cjs', 'scripts/test-ios-v37.cjs', 'scripts/test-book-format-recovery.cjs'], languageOptions: { sourceType: 'commonjs', globals: globals.node }, rules: js.configs.recommended.rules },

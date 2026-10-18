@@ -18619,9 +18619,13 @@ app.post("/api/collections/custom", homesteadAccess.requireAdmin, (req, res) => 
   }
 });
 
-app.delete("/api/collections/custom/:collectionId", (req, res) => {
+app.delete("/api/collections/custom/:collectionId", homesteadAccess.requireAdmin, (req, res) => {
+  if (homesteadAccess.accessContext(req).user?.readOnly) return res.status(403).json({ ok: false, message: "This account cannot delete groups." });
   try {
     const { filePath, safeId } = getCustomCollectionPath(req.params.collectionId);
+    const existing = readJsonFile(filePath, {});
+    const library = existing.library || existing.items?.[0]?.library || "movies";
+    if (!homesteadAccess.canAccessLibrary(req, library)) return res.status(403).json({ ok: false, message: "This library is unavailable to this account." });
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     res.json({ ok: true, id: safeId, message: "Custom collection deleted." });
   } catch (error) {
@@ -20272,7 +20276,10 @@ app.post("/api/intake/tcg/yugioh/refresh-prices", homesteadAccess.requireAdmin, 
   let updated = 0;
   let failed = 0;
   let warnings = 0;
+  let deferred = 0;
+  const pricingStarted = Date.now();
   for (let index = 0; index < records.length; index += 1) {
+    if (Date.now() - pricingStarted > 45000) { deferred = records.slice(index).filter(row => row.tcg?.game === "yugioh").length; break; }
     const record = records[index];
     if (
       String(record.category || "").toLowerCase() !== "trading-cards" ||
@@ -20294,6 +20301,14 @@ app.post("/api/intake/tcg/yugioh/refresh-prices", homesteadAccess.requireAdmin, 
       }
 
       const refreshed = require("./src/server/tcg-pricing.cjs").refreshHoldings(record, card, summarizeTcgPrintings);
+      if (tcgPriceLookup.status().enabled && tcgPriceLookup.status().configured) {
+        const holdings = [];
+        for (const holding of refreshed.tcg.printings) {
+          const quote = holding.priceSourceType === "manual-override" ? null : await tcgPriceLookup.quote({ cardName: record.tcg.cardName || record.title, ...holding });
+          holdings.push(quote?.priceAvailable ? { ...holding, ...quote } : holding);
+        }
+        refreshed.tcg = summarizeTcgPrintings(refreshed.tcg, holdings);
+      }
       persistTcgCanonicalRecord(refreshed);
       records[index] = refreshed;
       warnings += refreshed.tcg.printings.filter(item => item.priceDifferenceWarning || item.priceAvailable === false).length;
@@ -20304,7 +20319,7 @@ app.post("/api/intake/tcg/yugioh/refresh-prices", homesteadAccess.requireAdmin, 
   }
 
   writeIntakeLibraryRecords("inventory", records);
-  res.json({ ok: true, updated, failed, warnings });
+  res.json({ ok: true, updated, failed, warnings, deferred });
 });
 
 
@@ -21156,6 +21171,7 @@ function makeTcgPrinting(payload = {}) {
     null;
 
   return {
+    ...require("./src/server/tcg-pricing.cjs").pricingMetadata(payload),
     id: String(payload.printingId || payload.id || makeIntakeId("printing")),
     setCode: normalizeYugiohSetCode(payload.setCode || ""),
     rarity: String(payload.rarity || "").trim(),
@@ -22064,7 +22080,7 @@ function updateIntakeLibraryRecord(req, res) {
         if (index !== 0) return holding;
         const result = { ...holding, ...changes };
         if (changes.binderId !== undefined) { const binder = readTcgBinders().find(item => item.id === changes.binderId); result.locationId = binder?.id || "loose"; result.locationType = binder ? "binder" : "loose"; result.location = binder?.name || "Loose Cards"; result.binder = binder?.name || ""; }
-        if (changes.marketValue !== undefined) { result.priceAvailable = true; result.priceSourceType = "manual-override"; result.priceSource = "Manual estimate"; }
+        if (changes.marketValue !== undefined) { result.priceAvailable = true; result.priceSourceType = "manual-override"; result.priceSource = "Manual estimate"; result.manualPriceOverride = result.marketValue; }
         for (const key of ["selectedArtwork", "selectedArtworkId", "artworkVariants"]) if (incomingTcg[key] !== undefined) result[key] = incomingTcg[key];
         return result;
       });
@@ -22176,7 +22192,7 @@ function updateIntakePrinting(req, res) {
           ? { purchasePrice: Math.max(0, Number(incoming.purchasePrice || 0)) }
           : {}),
         ...(incoming.marketValue !== undefined
-          ? { marketValue: Math.max(0, Number(incoming.marketValue || 0)), ...(incoming.priceSourceType === undefined ? { priceAvailable: true, priceSourceType: "manual-override", priceSource: "Manual estimate" } : {}) }
+          ? { marketValue: Math.max(0, Number(incoming.marketValue || 0)), manualPriceOverride: incoming.priceSourceType === undefined || incoming.priceSourceType === "manual-override" ? Math.max(0, Number(incoming.marketValue || 0)) : null, ...(incoming.priceSourceType === undefined ? { priceAvailable: true, priceSourceType: "manual-override", priceSource: "Manual estimate" } : {}) }
           : {}),
         ...(incoming.printingPrice !== undefined
           ? { printingPrice: Math.max(0, Number(incoming.printingPrice || 0)) }
@@ -22190,6 +22206,7 @@ function updateIntakePrinting(req, res) {
         ...(incoming.priceSourceType !== undefined
           ? { priceSourceType: String(incoming.priceSourceType || "").trim() }
           : {}),
+        ...require("./src/server/tcg-pricing.cjs").pricingMetadata(incoming),
         ...(incoming.selectedArtwork !== undefined
           ? { selectedArtwork: String(incoming.selectedArtwork || "") }
           : {}),
@@ -22216,7 +22233,10 @@ function updateIntakePrinting(req, res) {
 
       const oldPrinting = current.tcg.printings[printingIndex];
       const changedVariant = ["setCode", "rarity"].some(key => incoming[key] !== undefined && String(incoming[key]).toLowerCase() !== String(oldPrinting[key] || "").toLowerCase());
-      if (changedVariant && printings[printingIndex].priceSourceType !== "manual-override") {
+      const incomingQuoteMatches = incoming.priceAvailable === true && incoming.priceSourceType === "exact-printing" &&
+        normalizeYugiohSetCode(incoming.pricedSetCode || "") === printings[printingIndex].setCode &&
+        String(incoming.pricedRarity || "").trim().toLowerCase() === String(printings[printingIndex].rarity || "").trim().toLowerCase();
+      if (changedVariant && printings[printingIndex].priceSourceType !== "manual-override" && !incomingQuoteMatches) {
         Object.assign(printings[printingIndex], { marketValue: 0, printingPrice: 0, priceAvailable: false, priceSourceType: "unavailable", priceSource: "Refresh this printing's price after changing its set or rarity" });
       }
 
@@ -22573,6 +22593,7 @@ function completeIntakeSession(req, res) {
           req.body.tcg.priceSourceType || ""
         ),
         manualPriceOverride: req.body.tcg.priceSourceType === "manual-override" ? Math.max(0, Number(req.body.tcg.marketValue || 0)) : null,
+        ...require("./src/server/tcg-pricing.cjs").pricingMetadata(req.body.tcg),
         priceDifferenceWarning: Boolean(
           req.body.tcg.priceDifferenceWarning
         ),
@@ -22750,6 +22771,10 @@ function completeIntakeSession(req, res) {
   }
 }
 app.post("/api/intake/sessions/:sessionId/complete", express.json({ limit: "48mb" }), completeIntakeSession);
+const { createTcgPriceLookup, registerTcgPriceLookup } = require("./src/server/tcg-price-lookup.cjs");
+const tcgPriceLookup = createTcgPriceLookup({ file: path.join(dataDir, "tcg-price-lookup.json") });
+registerTcgPriceLookup(app, { service: tcgPriceLookup, access: homesteadAccess.accessContext, config: readSetupConfig, feature: [subscriptionService.requireFeature("inventory"), subscriptionService.requireFeature("externalIntegrations")] });
+
 registerNativeInventory(app, {
   express, access: homesteadAccess.accessContext, feature: subscriptionService.requireFeature("inventory"), config: readSetupConfig,
   records: () => readIntakeLibraryRecords("inventory"), binders: readTcgBinders, decks: readTcgDecks,

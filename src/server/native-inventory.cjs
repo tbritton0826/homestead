@@ -50,6 +50,7 @@ function nativeInventoryDraft(input = {}) {
     if (providerCardId && !/^\d{1,12}$/.test(providerCardId)) throw fail('Invalid card identity.');
     const selectedPrinting = tcg.selectedPrinting && typeof tcg.selectedPrinting === 'object' ? tcg.selectedPrinting : {};
     draft.tcg = { game: 'yugioh', cardName, providerCardId, cardIdentityKey: providerCardId || cardName.toLowerCase(),
+      ...require('./tcg-pricing.cjs').pricingMetadata(tcg),
       provider: providerCardId ? 'YGOPRODeck' : 'manual',
       setCode: text(tcg.setCode, 40).toUpperCase(), rarity: text(tcg.rarity, 120), edition: text(tcg.edition || 'Unlimited', 80),
       language: text(tcg.language || 'English', 80), condition: details.condition || 'Near Mint', quantity: details.quantity || 1,
@@ -320,6 +321,14 @@ function registerNativeInventory(app, { express, access, feature, config, record
     try {
       const body = inventoryPatch(req.body);
       if (req.body.marketValue !== undefined) body.marketValue = number(req.body.marketValue, 'estimated value');
+      if (req.body.printingPrice !== undefined) body.printingPrice = number(req.body.printingPrice, 'printing price');
+      if (req.body.priceAvailable !== undefined) body.priceAvailable = req.body.priceAvailable === true;
+      if (req.body.priceSource !== undefined) body.priceSource = text(req.body.priceSource, 200);
+      if (req.body.priceSourceType !== undefined) {
+        if (!['manual-override', 'exact-printing', 'unavailable'].includes(req.body.priceSourceType)) throw fail('Invalid pricing source.');
+        body.priceSourceType = req.body.priceSourceType;
+      }
+      Object.assign(body, require('./tcg-pricing.cjs').pricingMetadata(req.body));
       for (const key of ['setCode', 'rarity', 'edition', 'language', 'binderId', 'page', 'pocket', 'locationId', 'locationType']) if (req.body[key] !== undefined) body[key] = text(req.body[key], 150);
       if (req.body.locationId !== undefined) {
         const location = locations().find(row => row.id === req.body.locationId) || (req.body.locationId === 'loose' ? { id: 'loose', kind: 'loose', name: 'Loose Cards' } : null);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { prepareTcgPhotos } from "./utils/tcg-photos.js";
+import { TcgPricingSettings, TcgPriceCheck } from "./components/TcgPricing.jsx";
 import { TcgLocationFields, TcgLocationsPanel, TcgHoldingMoves, TcgWishlistPanel } from "./components/TcgStorage.jsx";
 import { lazyFeature, FeatureReloadButton } from "./components/LazyFeature.jsx";
 import { createProfileStartupLoader, initialStartupProfileList, mergeStartupProfileList } from "./utils/profile-startup.js";
@@ -48,6 +49,7 @@ import AddAdultProfileModal from "./components/adult/AddAdultProfileModal";
 import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
 import "./mobile.css";
 import "./MobileV12.css";
+import "./V314Polish.css";
 import { profileMetadataPills, recipeEditorDraft, recipeEditingAllowed } from "./utils/mobile-polish.js";
 
 
@@ -32514,6 +32516,7 @@ return (
 {settingsTab === "integrations" && integrationsAvailable && (
   <div className="panel">
     <h3>Integrations</h3>
+    <TcgPricingSettings />
 
     <div className="settings-toggle-grid">
       {settingsIntegrationIds.map((id) => {
@@ -35098,6 +35101,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
             purchasePrice: Math.max(0, Number(copy.purchasePrice || 0)),
             marketValue: Math.max(0, Number(copy.marketValue || 0)),
             manualPriceOverride: copy.priceSourceType === "manual-override" ? Number(copy.marketValue || 0) : null,
+            ...Object.fromEntries(["priceProviderId", "priceCurrency", "priceCheckedAt", "priceUpdatedAt", "pricedSetCode", "pricedRarity", "pricedEdition", "pricedCondition"].filter(key => copy[key] !== undefined).map(key => [key, copy[key]])),
             priceAvailable: copy.priceAvailable !== false,
             locationId: copy.locationId || copy.binderId || "loose",
             locationType: copy.locationType || (copy.binderId ? "binder" : "loose"),
@@ -35903,6 +35907,7 @@ function UniversalIntakeModal({ activeLibrary = "inventory", initialMode = "home
 
               {tcgPrintingDraft && (
                 <div className="intake-tcg-active-printing">
+                  <TcgPriceCheck draft={{ ...tcgPrintingDraft, cardName: tcgCardName }} setDraft={setTcgPrintingDraft} />
                   <label>Photos for this printing group<input type="file" accept="image/*" multiple onChange={event => { addCaptureFiles(event.target.files, "card-photo"); event.target.value = ""; }} /></label>
                   <div>{captures.map(photo => <div key={photo.id}><span>{photo.name}</span><button type="button" onClick={() => setCaptures(current => current.filter(row => row.id !== photo.id))}>Remove photo</button></div>)}</div>
                   <div className="intake-tcg-active-printing-grid">
@@ -38376,7 +38381,7 @@ function InventoryPage({ setupConfig, onNewIntake, setActiveLibrary }) {
       const response = await fetch("/api/intake/tcg/yugioh/refresh-prices", { method: "POST" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) throw new Error(data.message || "Unable to refresh card prices.");
-      setTcgRefreshMessage(`Updated ${data.updated || 0} card${data.updated === 1 ? "" : "s"}.`);
+      setTcgRefreshMessage(`Updated ${data.updated || 0} cards · ${data.failed || 0} failed · ${data.deferred || 0} deferred. ${data.deferred ? "Refresh again to continue using cached progress." : "Manual estimates are preserved."}`);
       await loadInventory();
     } catch (error) { setTcgRefreshMessage(error.message || "Unable to refresh card prices."); }
     finally { setTcgRefreshing(false); }

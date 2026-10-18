@@ -35,4 +35,11 @@ function refreshHoldings(record, card, summarize) {
   });
   return { ...record, tcg: summarize(record.tcg, list), updatedAt: now };
 }
-module.exports = { printingPriceDetails, refreshHoldings };
+function pricingMetadata(input = {}) {
+  const result = {};
+  for (const key of ['priceProviderId', 'priceCurrency', 'priceCheckedAt', 'priceUpdatedAt', 'pricedSetCode', 'pricedRarity', 'pricedEdition', 'pricedCondition']) {
+    if (input[key] !== undefined) result[key] = String(input[key] || '').trim().slice(0, 200);
+  }
+  return result;
+}
+module.exports = { printingPriceDetails, refreshHoldings, pricingMetadata };

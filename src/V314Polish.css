@@ -1,0 +1,18 @@
+/* Home tidy-up keeps existing widget choices, artwork sizing and theme tokens. */
+.dashboard-home .dashboard-grid { gap: 18px; }
+.dashboard-home .home-overview-row { gap: 16px; min-width: 0; }
+.dashboard-home .dashboard-panel { min-width: 0; }
+.dashboard-home .panel-header { gap: 12px; flex-wrap: wrap; align-items: center; }
+.dashboard-home .panel-header h3 { margin: 0; }
+.dashboard-home .mini-poster-row { scroll-snap-type: x proximity; scroll-padding-inline: 8px; padding-bottom: 10px; }
+.dashboard-home .mini-poster-row > * { scroll-snap-align: start; }
+.dashboard-home .mini-poster-row:empty { display: none; }
+.tcg-pricing-settings { margin-block: 16px 24px; padding: 16px; border: 1px solid var(--border-color, #465063); border-radius: 14px; }
+.tcg-pricing-settings label { display: block; margin-block: 12px; }
+.tcg-pricing-settings input[type=password] { display: block; width: min(100%, 480px); margin-top: 6px; }
+.tcg-pricing-settings button { min-height: 44px; margin: 4px 8px 4px 0; }
+@media (max-width: 640px) {
+  .dashboard-home .dashboard-grid { gap: 14px; }
+  .dashboard-home .home-overview-row { gap: 12px; }
+  .dashboard-home .panel-header button { min-height: 44px; }
+}
