@@ -26,6 +26,7 @@ const server = await createServer({ root, configFile: false, logLevel: 'error', 
       import {createRoot} from 'react-dom/client'; import {createPortal} from 'react-dom';
       import {prepareTcgPhotos} from '/src/utils/tcg-photos.js';
       import {TcgLocationFields} from '/src/components/TcgStorage.jsx';
+      import {TcgPriceCheck} from '/src/components/TcgPricing.jsx';
       const FeatureReloadButton=()=>null; const loadBarcodeReader=()=>Promise.reject(Error('Not used in fixture'));
       ${modal}\n${priceLabel}
       // Simulate a normal HTTP LAN browser even though localhost is trusted.
@@ -39,6 +40,7 @@ const server = await createServer({ root, configFile: false, logLevel: 'error', 
       if (req.url === '/') { res.setHeader('Content-Type', 'text/html'); res.end('<div id="root"></div><script type="module" src="/intake-fixture.jsx"></script>'); return; }
       if (!req.url.startsWith('/api/')) return next();
       res.setHeader('Content-Type', 'application/json');
+      if (req.url.startsWith('/api/inventory/native/pricing/quote')) return res.end(JSON.stringify({ ok: true, quote: { priceAvailable: false, pricingStatus: 'not-configured' } }));
       if (req.url.startsWith('/api/intake/tcg/yugioh/search')) return res.end(JSON.stringify({ ok: true, matches: [quote] }));
       if (req.url === '/api/inventory/native/batches') {
         let raw = ''; for await (const chunk of req) raw += chunk;

@@ -12,6 +12,7 @@ const { nativeInventoryDraft, inventoryPatch, inventoryAccess, createInventoryRe
 const serverSource = fs.readFileSync(path.join(__dirname, '../server.cjs'), 'utf8');
 function temporary(t) { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homestead-inventory-test-')); t.after(() => fs.rmSync(root, { recursive: true, force: true })); return root; }
 function actual(name, context) {
+  context.require ||= require("node:module").createRequire(path.join(__dirname, "../server.cjs"));
   let start = serverSource.indexOf('function ' + name + '(');
   if (serverSource.slice(start - 6, start) === 'async ') start -= 6;
   const end = serverSource.indexOf('\n}', start) + 2;
@@ -19,6 +20,17 @@ function actual(name, context) {
   return vm.runInNewContext(serverSource.slice(start, end) + ';' + name, context);
 }
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('native printing edits retain verified quote provenance through the real request sanitizer', async t => {
+  const f = await httpFixture(t, 'normal', { updatePrinting: (req, res) => res.json({ ok: true, patch: req.body }) });
+  const body = { marketValue: 3.25, printingPrice: 3.25, priceAvailable: true, priceSourceType: 'exact-printing', priceSource: 'TCG Price Lookup / TCGplayer', pricedSetCode: 'BACH-EN050', pricedRarity: 'Super Rare', priceProviderId: 'fixture', priceCurrency: 'USD' };
+  const response = await f.call('/items/card/printings/printing', body, {}, 'PATCH');
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.patch.marketValue, 3.25); assert.equal(result.patch.priceSourceType, 'exact-printing');
+  assert.equal(result.patch.pricedSetCode, 'BACH-EN050'); assert.equal(result.patch.priceProviderId, 'fixture');
+  assert.equal(result.patch.priceAvailable, true);
+});
 
 test('native draft uses the existing inventory schema, exact card identity and printing, with no extra destinations', () => {
   const input = { title: 'Example card', category: 'trading-cards', quantity: 3, condition: 'Near Mint', location: 'Shelf', requestId: crypto.randomUUID(),
