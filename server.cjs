@@ -18533,7 +18533,7 @@ function getCustomCollectionPath(collectionId = "") {
 
 function normalizeCustomCollectionItem(item = {}, index = 0) {
   const requestedLibrary = String(item.library || "movies");
-  const library = ["movies", "tv", "books", "youtube"].includes(requestedLibrary) ? requestedLibrary : "movies";
+  const library = ["movies", "tv", "books", "youtube", "music"].includes(requestedLibrary) ? requestedLibrary : "movies";
   const sourceId = String(item.sourceId || item.id || item.localId || "").trim();
   const title = String(item.title || item.name || "").trim();
   if (!sourceId && !title) return null;
@@ -18563,6 +18563,8 @@ function normalizeCustomCollectionPayload(payload = {}, existing = null) {
   return {
     id,
     name,
+    library: ["music", "youtube"].includes(payload.library ?? existing?.library) ? (payload.library ?? existing.library) : "",
+    libraryTab: ["playlists", "series", "collections"].includes(payload.libraryTab ?? existing?.libraryTab) ? (payload.libraryTab ?? existing.libraryTab) : "",
     generatedCollectionId: String(payload.generatedCollectionId ?? existing?.generatedCollectionId ?? "").trim(),
     description: String(payload.description ?? existing?.description ?? "").trim(),
     poster: String(payload.poster ?? existing?.poster ?? "").trim(),
@@ -18599,8 +18601,10 @@ app.get("/api/collections/custom", (req, res) => {
   }
 });
 
-app.post("/api/collections/custom", (req, res) => {
+app.post("/api/collections/custom", homesteadAccess.requireAdmin, (req, res) => {
   try {
+    const requestedLibrary = req.body?.library;
+    if (["music", "youtube"].includes(requestedLibrary) && (!homesteadAccess.canAccessLibrary(req, requestedLibrary) || homesteadAccess.accessContext(req).user?.readOnly)) return res.status(403).json({ ok: false, message: "This account cannot edit that library." });
     const incomingId = sanitizeCustomCollectionId(req.body?.id || req.body?.name || "collection");
     const { filePath } = getCustomCollectionPath(incomingId);
     const existing = fs.existsSync(filePath) ? readJsonFile(filePath, null) : null;
@@ -19187,12 +19191,14 @@ const intakeLibraryRecordsDir = path.join(intakeDataDir, "library-records");
 
 // Canonical on-disk trading-card library. JSON library records remain a fast index,
 // while these folders are the durable source that survives browser/container rebuilds.
-const TCG_STORAGE_FIX_VERSION = "2026-08-06-media-inventory-v2";
+const TCG_STORAGE_FIX_VERSION = "2026-10-17-holdings-v3";
 const tcgCanonicalRoot = path.resolve(process.env.HOMESTEAD_INVENTORY_ROOT || "/media/inventory", "tcg");
 if (tcgCanonicalRoot.startsWith(path.resolve(dataDir) + path.sep)) {
   throw new Error(`Refusing to store canonical TCG files inside app data: ${tcgCanonicalRoot}`);
 }
 console.log(`[Homestead] TCG canonical storage ${TCG_STORAGE_FIX_VERSION}: ${tcgCanonicalRoot}`);
+const { createTcgOrganizations, moveHolding } = require("./src/server/tcg-organizations.cjs");
+const tcgOrganizations = createTcgOrganizations(path.dirname(tcgCanonicalRoot));
 
 function slugifyTcgPathPart(value = "", fallback = "unknown") {
   const slug = String(value || "")
@@ -19279,59 +19285,66 @@ function makeCanonicalTcgMetadata(record = {}, printing = {}, paths = {}) {
   };
 }
 
+function getTcgHoldingPaths(record, printing) {
+  let paths = getTcgCanonicalPaths(record, printing);
+  if (printing._canonicalDirectory) {
+    try {
+      const previous = path.resolve(printing._canonicalDirectory);
+      const relative = path.relative(fs.realpathSync(tcgCanonicalRoot), fs.realpathSync(previous));
+      const metadataPath = path.join(previous, "metadata.json");
+      if (relative && !relative.startsWith("..") && !path.isAbsolute(relative) && fs.lstatSync(metadataPath).isFile()) {
+        const saved = readJsonFile(metadataPath, null);
+        const identities = saved?.holdings || [saved?.tcg || {}];
+        if ((saved?.recordId || saved?.homesteadId) === (record.id || record.homesteadId) && identities.some(item => item.id === printing.id || item.id === printing._canonicalParentHoldingId)) {
+          paths = { ...paths, printingDir: previous, metadataPath, frontPath: path.join(previous, "front.jpg") };
+        }
+      }
+    } catch { /* A stale runtime hint cannot authorize a location. */ }
+  }
+  return paths;
+}
+
 function persistTcgCanonicalRecord(record = {}) {
   if (!record?.tcg) return;
-  const printings = Array.isArray(record.tcg.printings) && record.tcg.printings.length
-    ? record.tcg.printings
-    : [record.tcg];
-
-  printings.forEach((printing) => {
-    let paths = getTcgCanonicalPaths(record, printing);
-    // Canonical reads supply this runtime hint. Keep an edited printing in its
-    // existing directory even when a set code/title changes; never delete an
-    // old recovery directory or allow an unverified caller path to redirect it.
-    if (printing._canonicalDirectory) {
-      try {
-        const previous = path.resolve(printing._canonicalDirectory);
-        const relative = path.relative(fs.realpathSync(tcgCanonicalRoot), fs.realpathSync(previous));
-        const metadataPath = path.join(previous, "metadata.json");
-        if (relative && !relative.startsWith("..") && !path.isAbsolute(relative) && fs.lstatSync(metadataPath).isFile()) {
-          const saved = readJsonFile(metadataPath, null);
-          if ((saved?.recordId || saved?.homesteadId) === (record.id || record.homesteadId) && saved?.tcg?.id === printing.id) {
-            paths = { ...paths, printingDir: previous, metadataPath, frontPath: path.join(previous, "front.jpg") };
-          }
-        }
-      } catch { /* A stale hint cannot authorize a new location. */ }
-    }
-    fs.mkdirSync(paths.printingDir, { recursive: true });
-    writeJsonFile(paths.metadataPath, makeCanonicalTcgMetadata(record, printing, paths));
-
-    if (fs.existsSync(paths.frontPath)) return;
-
-    const capture = (Array.isArray(record.captures) ? record.captures : []).find(
-      (item) => /^data:image\//i.test(String(item?.dataUrl || ""))
-    );
-    const artwork = String(
-      printing.selectedArtwork ||
-      printing.selectedPrinting?.image ||
-      record.tcg?.selectedArtwork ||
-      record.tcg?.selectedPrinting?.image ||
-      ""
-    ).trim();
-
-    // Prefer the selected catalog artwork. The phone capture is used only as a
-    // fallback so recognition photos do not replace the clean card-front image.
-    if (/^data:image\//i.test(artwork)) {
-      writeTcgFrontFromDataUrl(artwork, paths.frontPath);
-    } else if (/^https?:\/\//i.test(artwork)) {
-      downloadTcgFrontImage(artwork, paths.frontPath).catch((error) => {
-        console.warn("Unable to cache canonical TCG artwork:", error.message || error);
-        if (capture?.dataUrl) writeTcgFrontFromDataUrl(capture.dataUrl, paths.frontPath);
-      });
-    } else if (capture?.dataUrl) {
-      writeTcgFrontFromDataUrl(capture.dataUrl, paths.frontPath);
-    }
-  });
+  const groups = new Map();
+  const previous = readCanonicalTcgRecords().find(item => item.id === record.id);
+  const printings = Array.isArray(record.tcg.printings) ? record.tcg.printings : [record.tcg];
+  for (const printing of printings) {
+    const paths = getTcgHoldingPaths(record, printing);
+    tcgOrganizations.safe(paths.metadataPath, true);
+    const existing = readJsonFile(paths.metadataPath, null);
+    if (existing && (existing.recordId || existing.homesteadId) !== record.id) throw Object.assign(new Error("A different card owns this share folder. Review the matching card identity before saving."), { status: 409 });
+    const group = groups.get(paths.metadataPath) || { paths, holdings: [] };
+    const captures = (printing.captures || record.captures || []).map((capture, index) => {
+      const data = String(capture.dataUrl || "").match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/]+={0,2})$/);
+      if (!data) return { ...capture, dataUrl: undefined };
+      const photoPath = path.join(paths.printingDir, "photos", slugifyTcgPathPart(printing.id || "legacy"), String(index) + (data[1] === "png" ? ".png" : ".jpg"));
+      tcgOrganizations.safe(photoPath, true);
+      fs.writeFileSync(photoPath, Buffer.from(data[2], "base64"));
+      return { ...capture, dataUrl: undefined, relativePath: path.relative(paths.printingDir, photoPath), url: `/api/file?path=${encodeURIComponent(photoPath)}` };
+    });
+    group.holdings.push({ ...printing, _canonicalDirectory: undefined, _canonicalParentHoldingId: undefined, captures });
+    groups.set(paths.metadataPath, group);
+  }
+  for (const { paths, holdings } of groups.values()) {
+    const metadata = makeCanonicalTcgMetadata(record, holdings[0], paths);
+    tcgOrganizations.write(paths.metadataPath, { ...metadata, schemaVersion: 2, holdings,
+      metadata: record.metadata || {}, mobileRequestId: record.mobileRequestId,
+      mobileRequestIds: record.mobileRequestIds || [] });
+    if (fs.existsSync(paths.frontPath)) continue;
+    const primary = holdings[0];
+    const artwork = String(primary.selectedArtwork || primary.selectedPrinting?.image || "").trim();
+    if (/^data:image\//i.test(artwork)) writeTcgFrontFromDataUrl(artwork, paths.frontPath);
+    else if (/^https?:\/\//i.test(artwork)) downloadTcgFrontImage(artwork, paths.frontPath).catch(() => console.warn("[TCG] Artwork cache unavailable; metadata was saved."));
+  }
+  for (const directory of new Set((previous?.tcg?.printings || []).map(item => item._canonicalDirectory).filter(Boolean))) {
+    const file = path.join(directory, "metadata.json");
+    if (!groups.has(file)) tcgOrganizations.write(file, { ...readJsonFile(file, {}), archived: true, updatedAt: new Date().toISOString() });
+  }
+  const savedHoldings = [...groups.values()].flatMap(group => group.holdings.map(item => ({ ...item, _canonicalDirectory: group.paths.printingDir })));
+  tcgOrganizations.saveCard({ ...record, captures: savedHoldings.flatMap(item => item.captures || []), tcg: summarizeTcgPrintings(record.tcg, savedHoldings) });
+  tcgOrganizations.syncRecord(record, readTcgLocations());
+  tcgOrganizations.confirm(record);
 }
 
 function readCanonicalTcgRecords() {
@@ -19347,8 +19360,9 @@ function readCanonicalTcgRecords() {
         const printingDir = path.join(cardDir, printingEntry.name);
         const metadataPath = path.join(printingDir, "metadata.json");
         if (!fs.existsSync(metadataPath)) return;
+        tcgOrganizations.safe(metadataPath);
         const metadata = readJsonFile(metadataPath, null);
-        if (!metadata || metadata.type !== "tcg-printing" || !metadata.tcg) return;
+        if (!metadata || metadata.archived || metadata.type !== "tcg-printing" || !metadata.tcg || (metadata.holdings && !metadata.holdings.length)) return;
 
         const recordId = String(metadata.recordId || metadata.homesteadId || `tcg-${gameEntry.name}-${cardEntry.name}`);
         if (!grouped.has(recordId)) {
@@ -19381,20 +19395,20 @@ function readCanonicalTcgRecords() {
         const frontUrl = fs.existsSync(frontPath)
           ? `/api/file?path=${encodeURIComponent(frontPath)}`
           : metadata.tcg.selectedArtwork || metadata.tcg.selectedPrinting?.image || "";
-        group.printings.push({
-          ...metadata.tcg,
-          _canonicalDirectory: printingDir,
-          selectedArtwork: frontUrl || metadata.tcg.selectedArtwork || "",
-          selectedPrinting: metadata.tcg.selectedPrinting
-            ? { ...metadata.tcg.selectedPrinting, image: frontUrl || metadata.tcg.selectedPrinting.image || "" }
-            : metadata.tcg.selectedPrinting,
-        });
+        for (const holding of metadata.holdings || [metadata.tcg]) {
+          if (group.printings.some(item => item.id && item.id === holding.id)) continue;
+          group.printings.push({ ...holding, _canonicalDirectory: printingDir,
+            selectedArtwork: holding.selectedArtwork || frontUrl,
+            selectedPrinting: holding.selectedPrinting || metadata.tcg.selectedPrinting });
+        }
+        group.metadata = { ...(group.metadata || {}), ...(metadata.metadata || {}) };
+        group.mobileRequestIds = [...new Set([...(group.mobileRequestIds || []), metadata.mobileRequestId, ...(metadata.mobileRequestIds || [])].filter(Boolean))];
         if (new Date(metadata.updatedAt || 0) > new Date(group.updatedAt || 0)) group.updatedAt = metadata.updatedAt;
       });
     });
   });
 
-  return [...grouped.values()].map((group) => {
+  const legacyRecords = [...grouped.values()].map((group) => {
     const tcg = summarizeTcgPrintings(group.tcgBase, group.printings);
     return {
       id: group.id,
@@ -19405,8 +19419,9 @@ function readCanonicalTcgRecords() {
       notes: group.notes,
       category: "trading-cards",
       tcg,
-      captures: [],
-      metadata: { thumbnail: tcg.selectedArtwork || "" },
+      metadata: { ...(group.metadata || {}), thumbnail: tcg.selectedArtwork || "" },
+      mobileRequestIds: group.mobileRequestIds || [],
+      captures: group.printings.flatMap(item => item.captures || []),
       poster: tcg.selectedArtwork || "",
       source: group.source,
       status: group.status,
@@ -19414,6 +19429,15 @@ function readCanonicalTcgRecords() {
       updatedAt: group.updatedAt,
     };
   });
+  const records = new Map(legacyRecords.map(record => [record.id, record]));
+  const archivedIDs = [];
+  for (const saved of tcgOrganizations.readCards()) {
+    if (saved.archived) { records.delete(saved.record.id); archivedIDs.push(saved.record.id); }
+    else records.set(saved.record.id, saved.record);
+  }
+  const result = [...records.values()];
+  Object.defineProperty(result, "archivedIDs", { value: archivedIDs });
+  return result;
 }
 
 function intakeLibraryRecordsPath(libraryId = "inventory") {
@@ -19422,10 +19446,11 @@ function intakeLibraryRecordsPath(libraryId = "inventory") {
 }
 
 function readIntakeLibraryRecords(libraryId = "inventory") {
-  const indexed = readIntakeCollection(intakeLibraryRecordsPath(libraryId));
+  let indexed = readIntakeCollection(intakeLibraryRecordsPath(libraryId));
   if (libraryId !== "inventory") return indexed;
 
   const canonical = readCanonicalTcgRecords();
+  indexed = indexed.filter(record => !(canonical.archivedIDs || []).includes(record.id));
   if (!canonical.length) return indexed;
 
   const canonicalIds = new Set(canonical.map((record) => record.id));
@@ -19438,8 +19463,9 @@ function readIntakeLibraryRecords(libraryId = "inventory") {
     const intake = indexedById.get(record.id) || {};
     return { ...intake, ...record,
       metadata: { ...(intake.metadata || {}), ...(record.metadata || {}) },
-      captures: intake.captures || record.captures || [],
-      mobileRequestId: intake.mobileRequestId || "", mobileRequestIds: intake.mobileRequestIds || [],
+      captures: record.captures?.length ? record.captures : intake.captures || [],
+      mobileRequestId: record.mobileRequestId || intake.mobileRequestId || "",
+      mobileRequestIds: [...new Set([record.mobileRequestId, intake.mobileRequestId, ...(intake.mobileRequestIds || []), ...(record.mobileRequestIds || [])].filter(Boolean))],
     };
   })];
 }
@@ -19864,57 +19890,8 @@ function normalizeYugiohRarity(value = "") {
   return String(value || "").toLowerCase().replace(/[\s_-]+/g, "");
 }
 
-function yugiohPrintingPriceDetails(card = {}, {
-  setCode = "",
-  rarity = "",
-  edition = "",
-  language = "",
-} = {}) {
-  const normalizedSet = normalizeYugiohSetCode(setCode);
-  const normalizedRarity = normalizeYugiohRarity(rarity);
-  const ranked = (Array.isArray(card.card_sets) ? card.card_sets : [])
-    .map((printing) => {
-      const printingSet = normalizeYugiohSetCode(printing?.set_code);
-      const printingRarity = normalizeYugiohRarity(printing?.set_rarity || "");
-      let score = 0;
-      if (normalizedSet && printingSet === normalizedSet) score += 100;
-      else if (normalizedSet && (printingSet.includes(normalizedSet) || normalizedSet.includes(printingSet))) score += 40;
-      if (normalizedRarity && printingRarity === normalizedRarity) score += 50;
-      else if (normalizedRarity && printingRarity && (printingRarity.includes(normalizedRarity) || normalizedRarity.includes(printingRarity))) score += 20;
-      return {
-        printing,
-        score,
-        value: Number(printing?.set_price || 0),
-      };
-    })
-    .filter((entry) => Number.isFinite(entry.value) && entry.value > 0)
-    .sort((a, b) => b.score - a.score || b.value - a.value);
-
-  const exact = ranked[0] || null;
-  const general = card.card_prices?.[0] || {};
-  const genericPrice = [
-    Number(general.tcgplayer_price || 0),
-    Number(general.cardmarket_price || 0),
-    Number(general.ebay_price || 0),
-    Number(general.amazon_price || 0),
-  ].find((value) => Number.isFinite(value) && value > 0) || 0;
-  const printingPrice = exact?.value || 0;
-
-  return {
-    marketValue: printingPrice || genericPrice || 0,
-    printingPrice,
-    genericPrice,
-    priceSourceType: printingPrice ? "exact-printing" : "generic-card",
-    priceSource: printingPrice ? "YGOPRODeck set_price" : "YGOPRODeck card_prices",
-    pricedSetCode: normalizeYugiohSetCode(exact?.printing?.set_code || setCode),
-    pricedRarity: exact?.printing?.set_rarity || rarity || "",
-    pricedEdition: edition || "",
-    pricedLanguage: language || "",
-    priceDifferenceWarning:
-      printingPrice > 0 &&
-      genericPrice > 0 &&
-      Math.max(printingPrice, genericPrice) / Math.min(printingPrice, genericPrice) >= 3,
-  };
+function yugiohPrintingPriceDetails(card = {}, options = {}) {
+  return require("./src/server/tcg-pricing.cjs").printingPriceDetails(card, options);
 }
 
 function yugiohPriceFromCard(card = {}, setCode = "", rarity = "") {
@@ -20074,7 +20051,7 @@ function mapYugiohMatches(cards = [], requestedSetCode = "") {
       });
     });
   });
-  return matches.sort((a, b) => (wanted && a.setCode === wanted ? -1 : 0) - (wanted && b.setCode === wanted ? -1 : 0) || a.cardName.localeCompare(b.cardName)).slice(0, 60);
+  return matches.sort((a, b) => (wanted && a.setCode === wanted ? -1 : 0) - (wanted && b.setCode === wanted ? -1 : 0) || a.cardName.localeCompare(b.cardName)).slice(0, 500);
 }
 
 
@@ -20289,13 +20266,12 @@ app.get("/api/intake/tcg/yugioh/search", async (req, res) => {
   }
 });
 
-app.post("/api/intake/tcg/yugioh/refresh-prices", async (req, res) => {
+app.post("/api/intake/tcg/yugioh/refresh-prices", homesteadAccess.requireAdmin, async (req, res) => {
+  if (!homesteadAccess.canAccessLibrary(req, "inventory") || homesteadAccess.accessContext(req).user?.readOnly) return res.status(403).json({ ok: false, message: "This account cannot change Inventory prices." });
   const records = readIntakeLibraryRecords("inventory");
   let updated = 0;
   let failed = 0;
   let warnings = 0;
-  const now = new Date().toISOString();
-
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (
@@ -20310,54 +20286,17 @@ app.post("/api/intake/tcg/yugioh/refresh-prices", async (req, res) => {
         setCode: record.tcg?.setCode,
       });
       const card =
-        cards.find((entry) => String(entry.id || "") === String(record.tcg?.providerCardId || "")) ||
-        cards[0];
+        record.tcg?.providerCardId ? cards.find(entry => String(entry.id) === String(record.tcg.providerCardId)) :
+        cards.find(entry => String(entry.name || "").toLowerCase() === String(record.tcg?.cardName || record.title || "").toLowerCase());
       if (!card) {
         failed += 1;
         continue;
       }
 
-      const details = yugiohPrintingPriceDetails(card, {
-        setCode: record.tcg?.setCode,
-        rarity: record.tcg?.rarity,
-        edition: record.tcg?.edition,
-        language: record.tcg?.language,
-      });
-      const manualOverride = Number(record.tcg?.manualPriceOverride || 0);
-      const marketValue = manualOverride > 0 ? manualOverride : details.marketValue;
-      const history = Array.isArray(record.tcg?.priceHistory) ? record.tcg.priceHistory : [];
-      if (details.priceDifferenceWarning) warnings += 1;
-
-      records[index] = {
-        ...record,
-        tcg: {
-          ...(record.tcg || {}),
-          marketValue,
-          printingPrice: details.printingPrice,
-          genericPrice: details.genericPrice,
-          priceSource: manualOverride > 0 ? "Manual override" : details.priceSource,
-          priceSourceType: manualOverride > 0 ? "manual-override" : details.priceSourceType,
-          pricedSetCode: details.pricedSetCode,
-          pricedRarity: details.pricedRarity,
-          pricedEdition: details.pricedEdition,
-          pricedLanguage: details.pricedLanguage,
-          priceDifferenceWarning: details.priceDifferenceWarning,
-          lastPriceRefresh: now,
-          priceHistory: [
-            ...history,
-            {
-              at: now,
-              provider: manualOverride > 0 ? "Manual override" : details.priceSource,
-              marketValue,
-              printingPrice: details.printingPrice,
-              genericPrice: details.genericPrice,
-              setCode: details.pricedSetCode,
-              rarity: details.pricedRarity,
-            },
-          ].slice(-365),
-        },
-        updatedAt: now,
-      };
+      const refreshed = require("./src/server/tcg-pricing.cjs").refreshHoldings(record, card, summarizeTcgPrintings);
+      persistTcgCanonicalRecord(refreshed);
+      records[index] = refreshed;
+      warnings += refreshed.tcg.printings.filter(item => item.priceDifferenceWarning || item.priceAvailable === false).length;
       updated += 1;
     } catch {
       failed += 1;
@@ -20372,13 +20311,35 @@ app.post("/api/intake/tcg/yugioh/refresh-prices", async (req, res) => {
 
 const tcgBindersDataPath = path.join(dataDir, "intake", "tcg-binders.json");
 
-function readTcgBinders() {
-  const value = readJsonFile(tcgBindersDataPath, []);
-  return Array.isArray(value) ? value : [];
+function readTcgLocations() {
+  const legacy = [
+    ...readJsonFile(tcgBindersDataPath, []).map(row => ({ ...row, kind: "binder" })),
+    ...readJsonFile(tcgDecksDataPath, []).map(row => ({ ...row, kind: "deck" })),
+  ];
+  return [...new Map([...legacy, ...tcgOrganizations.readLocations(true)].map(row => [row.id, row])).values()].filter(row => !row.archived);
 }
-
+function saveTcgLocation(input, current) {
+  const saved = tcgOrganizations.save(input, current);
+  if (current.id && saved.name !== current.name) {
+    const records = readIntakeLibraryRecords("inventory");
+    let changed = false;
+    for (let index = 0; index < records.length; index++) {
+      const record = records[index];
+      if (!record.tcg?.printings?.some(item => (item.locationId || item.binderId) === saved.id)) continue;
+      const list = record.tcg.printings.map(item => (item.locationId || item.binderId) === saved.id ? { ...item, location: saved.name, binder: saved.kind === "binder" ? saved.name : "" } : item);
+      const updated = { ...record, tcg: summarizeTcgPrintings(record.tcg, list), updatedAt: new Date().toISOString() };
+      persistTcgCanonicalRecord(updated); records[index] = updated; changed = true;
+    }
+    if (changed) writeIntakeLibraryRecords("inventory", records);
+  }
+  return saved;
+}
+function readTcgBinders() {
+  return readTcgLocations().filter(row => row.kind === "binder");
+}
 function writeTcgBinders(binders = []) {
-  writeJsonFile(tcgBindersDataPath, Array.isArray(binders) ? binders : []);
+  tcgOrganizations.mirror(binders, "binder");
+  writeJsonFile(tcgBindersDataPath, binders);
 }
 
 function sanitizeBinder(input = {}, current = {}) {
@@ -20743,6 +20704,8 @@ app.patch("/api/intake/tcg/binders/:binderId", express.json({ limit: "2mb" }), (
 });
 
 app.delete("/api/intake/tcg/binders/:binderId", (req, res) => {
+  const occupied = readIntakeLibraryRecords("inventory").some(record => record.tcg?.printings?.some(item => (item.locationId || item.binderId) === req.params.binderId));
+  if (occupied) return res.status(409).json({ ok: false, message: "Move this binder's copies to another location before deleting it." });
   const binders = readTcgBinders();
   const next = binders.filter((binder) => binder.id !== req.params.binderId);
   if (next.length === binders.length) return res.status(404).json({ ok: false, message: "Binder not found." });
@@ -21122,8 +21085,8 @@ app.get("/api/public/tcg/binder/:shareToken", (req, res) => {
 });
 
 const tcgDecksDataPath = path.join(dataDir, "intake", "tcg-decks.json");
-function readTcgDecks() { const value = readJsonFile(tcgDecksDataPath, []); return Array.isArray(value) ? value : []; }
-function writeTcgDecks(value = []) { writeJsonFile(tcgDecksDataPath, Array.isArray(value) ? value : []); }
+function readTcgDecks() { return readTcgLocations().filter(row => row.kind === "deck"); }
+function writeTcgDecks(value = []) { tcgOrganizations.mirror(value, "deck"); writeJsonFile(tcgDecksDataPath, value); }
 function sanitizeTcgDeckCards(cards = []) {
   return (Array.isArray(cards) ? cards : []).map((card) => ({
     id: String(card?.id || makeIntakeId("deck-card")),
@@ -21167,7 +21130,10 @@ function normalizeTcgPrintingKey(printing = {}) {
     String(printing.edition || "").trim().toLowerCase(),
     String(printing.condition || "").trim().toLowerCase(),
     String(printing.language || "").trim().toLowerCase(),
-    String(printing.binderId || "").trim(),
+    String(printing.locationId || printing.binderId || "loose").trim(),
+    String(printing.location || "").trim(),
+    String(printing.purchasePrice || 0),
+    String(printing.captureGroupId || ""),
     String(printing.page || "").trim(),
     String(printing.pocket || "").trim(),
     String(printing.selectedArtworkId || "").trim(),
@@ -21190,7 +21156,7 @@ function makeTcgPrinting(payload = {}) {
     null;
 
   return {
-    id: String(payload.printingId || makeIntakeId("printing")),
+    id: String(payload.printingId || payload.id || makeIntakeId("printing")),
     setCode: normalizeYugiohSetCode(payload.setCode || ""),
     rarity: String(payload.rarity || "").trim(),
     edition: String(payload.edition || "").trim(),
@@ -21213,13 +21179,21 @@ function makeTcgPrinting(payload = {}) {
     selectedArtwork: String(payload.selectedArtwork || payload.selectedPrinting?.image || ""),
     selectedArtworkId: String(payload.selectedArtworkId || ""),
     artworkVariants: Array.isArray(payload.artworkVariants) ? payload.artworkVariants : [],
+    locationId: String(payload.locationId || resolvedBinder?.id || requestedBinderId || "loose"),
+    locationType: String(payload.locationType || (resolvedBinder || requestedBinderId ? "binder" : "loose")),
+    captures: Array.isArray(payload.captures) ? payload.captures : [],
+    captureGroupId: String(payload.captureGroupId || ""),
+    _canonicalDirectory: payload._canonicalDirectory,
+    _canonicalParentHoldingId: payload._canonicalParentHoldingId,
+    manualPriceOverride: payload.manualPriceOverride,
+    priceHistory: Array.isArray(payload.priceHistory) ? payload.priceHistory.slice(-365) : [],
+    priceAvailable: payload.priceAvailable !== false && Number(payload.marketValue || 0) > 0,
     binderId: resolvedBinder?.id || requestedBinderId,
     binder: resolvedBinder?.name || requestedBinderName,
     page: String(payload.page || "").trim(),
     pocket: String(payload.pocket || "").trim(),
     location:
-      resolvedBinder?.location ||
-      String(payload.location || "").trim(),
+      String(payload.location || resolvedBinder?.name || "Loose Cards").trim(),
     linkedDeckIds: Array.isArray(payload.linkedDeckIds)
       ? [...new Set(payload.linkedDeckIds.map(String))]
       : [],
@@ -21256,6 +21230,9 @@ function summarizeTcgPrintings(baseTcg = {}, printings = []) {
     quantity: totalQuantity,
     totalQuantity,
     totalMarketValue,
+    pricedQuantity: list.filter(item => item.priceAvailable !== false).reduce((sum, item) => sum + Number(item.quantity || 1), 0),
+    priceAvailable: list.length > 0 && list.every(item => item.priceAvailable !== false),
+    priceSource: "Sum of owned printing estimates; unpriced copies excluded",
     totalPurchaseCost,
     marketValue: totalQuantity ? totalMarketValue / totalQuantity : 0,
     purchasePrice: totalQuantity ? totalPurchaseCost / totalQuantity : 0,
@@ -21566,7 +21543,7 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
           : existing.tcg
           ? [makeTcgPrinting(existing.tcg)]
           : [];
-      const printings = mergeTcgPrinting(legacyPrintings, queueItem.tcg);
+      const printings = mergeTcgPrinting(legacyPrintings, { ...queueItem.tcg, captures: queueItem.captures || [] });
       const summarizedTcg = summarizeTcgPrintings(
         {
           ...(existing.tcg || {}),
@@ -21613,6 +21590,7 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
         updatedAt: now,
       };
 
+      persistTcgCanonicalRecord(updated);
       records[existingIndex] = updated;
       writeIntakeLibraryRecords(libraryId, records);
 
@@ -21640,7 +21618,6 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
         decksChanged = true;
       });
       if (decksChanged) writeTcgDecks(decks);
-      persistTcgCanonicalRecord(updated);
 
       return updated;
     }
@@ -21650,7 +21627,7 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
         ...queueItem.tcg,
         cardIdentityKey: incomingIdentity,
       },
-      [makeTcgPrinting(queueItem.tcg)]
+      [makeTcgPrinting({ ...queueItem.tcg, captures: queueItem.captures || [] })]
     );
   }
 
@@ -21691,10 +21668,8 @@ function createLibraryRecordFromIntake({ queueItem, session, metadata, duplicate
   const index = records.findIndex((item) => item.id === record.id);
   if (index >= 0) records[index] = { ...records[index], ...record, createdAt: records[index].createdAt || now };
   else records.push(record);
+  if (libraryId === "inventory" && record.tcg) persistTcgCanonicalRecord(record);
   writeIntakeLibraryRecords(libraryId, records);
-  if (libraryId === "inventory" && record.tcg) {
-    persistTcgCanonicalRecord(record);
-  }
   if (libraryId === "inventory" && record.tcg && Array.isArray(record.tcg.linkedDeckIds)) {
     const decks = readTcgDecks(); let changed = false;
     decks.forEach((deck) => {
@@ -22059,7 +22034,7 @@ function updateIntakeLibraryRecord(req, res) {
         ? String(req.body.location || "").trim()
         : current.tcg?.location || current.location || "";
 
-    const nextTcg = incomingTcg
+    let nextTcg = incomingTcg
       ? {
           ...(current.tcg || {}),
           ...(incomingTcg.location !== undefined ? { location: nextLocation } : {}),
@@ -22081,6 +22056,21 @@ function updateIntakeLibraryRecord(req, res) {
       nextTcg.cardName = String(req.body.title || "").trim() || current.title;
     }
 
+    if (libraryId === "inventory" && incomingTcg && current.tcg?.printings?.length) {
+      const keys = ["location", "binderId", "binder", "page", "pocket", "condition", "quantity", "purchasePrice", "marketValue"];
+      const changes = Object.fromEntries(keys.filter(key => incomingTcg[key] !== undefined && String(incomingTcg[key]) !== String(current.tcg[key] ?? "")).map(key => [key, incomingTcg[key]]));
+      if (current.tcg.printings.length > 1 && Object.keys(changes).length) return res.status(400).json({ ok: false, message: "Edit an owned printing to change quantities, condition, cost or storage for a card with multiple holdings." });
+      const list = current.tcg.printings.map((holding, index) => {
+        if (index !== 0) return holding;
+        const result = { ...holding, ...changes };
+        if (changes.binderId !== undefined) { const binder = readTcgBinders().find(item => item.id === changes.binderId); result.locationId = binder?.id || "loose"; result.locationType = binder ? "binder" : "loose"; result.location = binder?.name || "Loose Cards"; result.binder = binder?.name || ""; }
+        if (changes.marketValue !== undefined) { result.priceAvailable = true; result.priceSourceType = "manual-override"; result.priceSource = "Manual estimate"; }
+        for (const key of ["selectedArtwork", "selectedArtworkId", "artworkVariants"]) if (incomingTcg[key] !== undefined) result[key] = incomingTcg[key];
+        return result;
+      });
+      nextTcg = summarizeTcgPrintings(nextTcg, list);
+    }
+
     const previousLocation = current.tcg?.location || current.location || "";
     const updated = {
       ...current,
@@ -22093,9 +22083,9 @@ function updateIntakeLibraryRecord(req, res) {
       updatedAt: new Date().toISOString(),
     };
 
+    if (libraryId === "inventory" && updated.tcg) persistTcgCanonicalRecord(updated);
     records[index] = updated;
     writeIntakeLibraryRecords(libraryId, records);
-    if (libraryId === "inventory" && updated.tcg) persistTcgCanonicalRecord(updated);
 
     if (previousLocation !== nextLocation) {
       const activity = readIntakeCollection(activityDataPath);
@@ -22186,7 +22176,7 @@ function updateIntakePrinting(req, res) {
           ? { purchasePrice: Math.max(0, Number(incoming.purchasePrice || 0)) }
           : {}),
         ...(incoming.marketValue !== undefined
-          ? { marketValue: Math.max(0, Number(incoming.marketValue || 0)) }
+          ? { marketValue: Math.max(0, Number(incoming.marketValue || 0)), ...(incoming.priceSourceType === undefined ? { priceAvailable: true, priceSourceType: "manual-override", priceSource: "Manual estimate" } : {}) }
           : {}),
         ...(incoming.printingPrice !== undefined
           ? { printingPrice: Math.max(0, Number(incoming.printingPrice || 0)) }
@@ -22208,11 +22198,13 @@ function updateIntakePrinting(req, res) {
           : {}),
         ...(incoming.binderId !== undefined
           ? {
-              binderId,
+              binderId, locationId: binderId || "loose", locationType: binderId ? "binder" : "loose",
               binder: binder?.name || "",
-              location: binder?.location || "",
+              location: binder?.name || "Loose Cards",
             }
           : {}),
+        ...(incoming.locationId !== undefined ? { locationId: String(incoming.locationId), locationType: String(incoming.locationType || "custom"), location: String(incoming.location || ""), binderId: incoming.locationType === "binder" ? String(incoming.locationId) : "", binder: incoming.locationType === "binder" ? String(incoming.location || "") : "" } : {}),
+        ...(incoming.priceAvailable !== undefined ? { priceAvailable: incoming.priceAvailable === true } : {}),
         ...(incoming.page !== undefined
           ? { page: String(incoming.page || "").trim() }
           : {}),
@@ -22221,6 +22213,12 @@ function updateIntakePrinting(req, res) {
           : {}),
         updatedAt: new Date().toISOString(),
       };
+
+      const oldPrinting = current.tcg.printings[printingIndex];
+      const changedVariant = ["setCode", "rarity"].some(key => incoming[key] !== undefined && String(incoming[key]).toLowerCase() !== String(oldPrinting[key] || "").toLowerCase());
+      if (changedVariant && printings[printingIndex].priceSourceType !== "manual-override") {
+        Object.assign(printings[printingIndex], { marketValue: 0, printingPrice: 0, priceAvailable: false, priceSourceType: "unavailable", priceSource: "Refresh this printing's price after changing its set or rarity" });
+      }
 
       const summarizedTcg = summarizeTcgPrintings(
         current.tcg || {},
@@ -22244,9 +22242,9 @@ function updateIntakePrinting(req, res) {
         updatedAt: new Date().toISOString(),
       };
 
+      persistTcgCanonicalRecord(updated);
       records[recordIndex] = updated;
       writeIntakeLibraryRecords("inventory", records);
-      persistTcgCanonicalRecord(updated);
 
       return res.json({
         ok: true,
@@ -22295,6 +22293,7 @@ app.delete(
       }
 
       if (!remaining.length) {
+        persistTcgCanonicalRecord({ ...current, tcg: { ...current.tcg, printings: [] } });
         records.splice(recordIndex, 1);
         writeIntakeLibraryRecords("inventory", records);
 
@@ -22373,6 +22372,7 @@ app.delete("/api/intake/library-records/:libraryId/:recordId", (req, res) => {
     }
 
     const [removed] = records.splice(index, 1);
+    if (libraryId === "inventory" && removed.tcg) persistTcgCanonicalRecord({ ...removed, tcg: { ...removed.tcg, printings: [] } });
     writeIntakeLibraryRecords(libraryId, records);
 
     if (libraryId === "inventory" && removed?.tcg) {
@@ -22575,6 +22575,10 @@ function completeIntakeSession(req, res) {
         priceDifferenceWarning: Boolean(
           req.body.tcg.priceDifferenceWarning
         ),
+        locationId: String(req.body.tcg.locationId || req.body.tcg.binderId || "loose").trim(),
+        locationType: String(req.body.tcg.locationType || (req.body.tcg.binderId ? "binder" : "loose")),
+        captureGroupId: String(req.body.tcg.captureGroupId || ""),
+        priceAvailable: req.body.tcg.priceAvailable !== false,
         binderId: String(req.body.tcg.binderId || "").trim(),
         binder: String(req.body.tcg.binder || "").trim(),
         page: String(req.body.tcg.page || "").trim(),
@@ -22766,6 +22770,27 @@ registerNativeInventory(app, {
   searchCards: async (query) => {
     const normalized = normalizeYugiohQuery(query);
     return mapYugiohMatches(await fetchYugiohCards(normalized), normalized.setCode);
+  },
+  locations: readTcgLocations, saveLocation: saveTcgLocation,
+  repair: record => {
+    persistTcgCanonicalRecord(record);
+    const records = readIntakeLibraryRecords("inventory");
+    const index = records.findIndex(item => item.id === record.id);
+    if (index >= 0) records[index] = record; else records.push(record);
+    writeIntakeLibraryRecords("inventory", records);
+    return record;
+  },
+  saveConfirmed: (record, identity) => !record.tcg || tcgOrganizations.confirmed(record, identity),
+  wishlist: () => tcgOrganizations.wishlist(), writeWishlist: rows => tcgOrganizations.writeWishlist(rows),
+  move: (record, holdingID, quantity, destination, identity) => {
+    let updated = moveHolding(record, holdingID, quantity, destination, summarizeTcgPrintings);
+    updated = { ...updated, mobileRequestIds: [...new Set([...(updated.mobileRequestIds || []), identity].filter(Boolean))] };
+    persistTcgCanonicalRecord(updated);
+    const records = readIntakeLibraryRecords("inventory");
+    const index = records.findIndex(item => item.id === updated.id);
+    if (index >= 0) records[index] = updated; else records.push(updated);
+    writeIntakeLibraryRecords("inventory", records);
+    return updated;
   },
   requests: createInventoryRequests(path.join(dataDir, "mobile-inventory-requests")),
 });

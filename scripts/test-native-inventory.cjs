@@ -6,6 +6,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
 const express = require('express');
+const { createTcgOrganizations, moveHolding } = require('../src/server/tcg-organizations.cjs');
+const { printingPriceDetails, refreshHoldings } = require('../src/server/tcg-pricing.cjs');
 const { nativeInventoryDraft, inventoryPatch, inventoryAccess, createInventoryRequests, registerNativeInventory } = require('../src/server/native-inventory.cjs');
 const serverSource = fs.readFileSync(path.join(__dirname, '../server.cjs'), 'utf8');
 function temporary(t) { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homestead-inventory-test-')); t.after(() => fs.rmSync(root, { recursive: true, force: true })); return root; }
@@ -284,13 +286,207 @@ test('editing a set code retains its verified canonical directory and does not l
   const root = temporary(t), prior = path.join(root, 'card', 'OLD-SET'), newDirectory = path.join(root, 'card', 'NEW-SET');
   fs.mkdirSync(prior, { recursive: true });
   fs.writeFileSync(path.join(prior, 'metadata.json'), JSON.stringify({ recordId: 'card', tcg: { id: 'printing', setCode: 'OLD-SET' } }));
-  const context = { fs, path, tcgCanonicalRoot: root,
+  const context = { fs, path, tcgCanonicalRoot: root, tcgOrganizations: createTcgOrganizations(root), readTcgLocations: () => [], readCanonicalTcgRecords: () => [], summarizeTcgPrintings: (base, list) => ({ ...base, printings: list }),
     readJsonFile: (file, fallback) => { try { return JSON.parse(fs.readFileSync(file)); } catch { return fallback; } },
     writeJsonFile: (file, value) => fs.writeFileSync(file, JSON.stringify(value)),
     getTcgCanonicalPaths: () => ({ printingDir: newDirectory, metadataPath: path.join(newDirectory, 'metadata.json'), frontPath: path.join(newDirectory, 'front.jpg') }),
     makeCanonicalTcgMetadata: (record, printing) => ({ recordId: record.id, tcg: printing }),
   };
+  context.getTcgHoldingPaths = actual('getTcgHoldingPaths', context);
   actual('persistTcgCanonicalRecord', context)({ id: 'card', tcg: { printings: [{ id: 'printing', setCode: 'NEW-SET', _canonicalDirectory: prior }] } });
   assert.equal(fs.existsSync(newDirectory), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(prior, 'metadata.json'))).tcg.setCode, 'NEW-SET');
+});
+
+
+test('exact set and rarity pricing never borrows a positive unrelated printing or generic price', () => {
+  const card = { card_sets: [
+    { set_code: 'RA01-EN043', set_rarity: 'Secret Rare', set_price: '0' },
+    { set_code: 'GEIM-EN050', set_rarity: "Collector's Rare", set_price: '1.88' },
+    { set_code: 'MP22-EN264', set_rarity: 'Prismatic Secret Rare', set_price: '8.69' },
+  ], card_prices: [{ tcgplayer_price: '115.97' }] };
+  const absent = printingPriceDetails(card, { setCode: 'RA01-EN043', rarity: 'Secret Rare' });
+  assert.equal(absent.priceAvailable, false); assert.equal(absent.marketValue, 0); assert.equal(absent.genericPrice, 115.97);
+  assert.equal(absent.pricedSetCode, '');
+  const exact = printingPriceDetails(card, { setCode: 'mp22-en264', rarity: 'Prismatic Secret Rare', edition: '1st Edition' });
+  assert.equal(exact.marketValue, 8.69); assert.equal(exact.pricedEdition, ''); assert.match(exact.priceSource, /edition and condition not quoted/);
+  assert.equal(printingPriceDetails(card, { setCode: 'MP22-EN264', rarity: 'Ultra Rare' }).priceAvailable, false);
+  card.card_sets.push({ set_code: 'MP22-EN264', set_rarity: 'Prismatic Secret Rare', set_price: '10' });
+  assert.equal(printingPriceDetails(card, { setCode: 'MP22-EN264', rarity: 'Prismatic Secret Rare' }).priceAvailable, false);
+});
+
+test('refresh updates each holding separately and preserves manual estimates, purchase costs and quantities', () => {
+  const record = { tcg: { printings: [
+    { id: 'manual', marketValue: 7, priceSourceType: 'manual-override', quantity: 2, purchasePrice: 4 },
+    { id: 'unpriced', setCode: 'ONE', rarity: 'Rare', marketValue: 99, quantity: 3, purchasePrice: 5 },
+  ] } };
+  const refreshed = refreshHoldings(record, { card_sets: [] }, (base, list) => ({ ...base, printings: list }));
+  assert.equal(refreshed.tcg.printings[0].marketValue, 7); assert.equal(refreshed.tcg.printings[0].purchasePrice, 4);
+  assert.equal(refreshed.tcg.printings[1].priceAvailable, false); assert.equal(refreshed.tcg.printings[1].marketValue, 0);
+  assert.equal(refreshed.tcg.printings[1].quantity, 3); assert.equal(record.tcg.printings[1].marketValue, 99);
+});
+
+test('real location folders, membership quantities, archive persistence, wishlist and save receipts survive reopen', t => {
+  const root = temporary(t), service = createTcgOrganizations(root);
+  const binder = service.save({ kind: 'binder', name: 'Expensive cards' });
+  const box = service.save({ kind: 'box', name: 'Commons' });
+  let record = { id: 'ash', title: 'Ash Blossom', mobileRequestId: 'owner:save', tcg: { printings: [
+    { id: 'first', locationId: binder.id, quantity: 2, rarity: 'Rare', captures: [{ dataUrl: 'private' }] },
+    { id: 'second', locationId: box.id, quantity: 6, rarity: 'Common' },
+  ] } };
+  service.syncRecord(record, service.readLocations()); service.confirm(record);
+  const file = path.join(root, 'tcg', 'locations', 'binder', binder.id, 'cards', 'ash.json');
+  assert.equal(JSON.parse(fs.readFileSync(file)).quantity, 2); assert(!fs.readFileSync(file, 'utf8').includes('private'));
+  record = moveHolding(record, 'first', 1, box, (base, list) => ({ ...base, printings: list }));
+  assert.equal(record.tcg.printings.reduce((n, p) => n + p.quantity, 0), 8);
+  assert.equal(record.tcg.printings[0].quantity, 1); assert.equal(record.tcg.printings[2].rarity, 'Rare');
+  assert.throws(() => moveHolding(record, 'first', 2, box, () => {}));
+  service.syncRecord(record, service.readLocations()); assert.equal(JSON.parse(fs.readFileSync(file)).quantity, 1);
+  service.save({ name: 'High value' }, binder);
+  service.writeWishlist([{ id: 'wish', quantity: 3 }]);
+  const reopened = createTcgOrganizations(root);
+  assert.equal(reopened.readLocations().find(r => r.id === binder.id).name, 'High value');
+  assert.equal(reopened.wishlist()[0].id, 'wish'); assert.equal(reopened.confirmed(record, 'owner:save'), true);
+  assert.equal(reopened.confirmed(record, 'other:save'), false);
+  service.mirror([], 'binder'); assert.equal(reopened.readLocations().some(r => r.id === binder.id), false);
+  assert.equal(reopened.readLocations(true).find(r => r.id === binder.id).archived, true);
+});
+
+test('unsafe or unavailable share destinations fail before writing outside Inventory', t => {
+  const root = temporary(t), service = createTcgOrganizations(root);
+  assert.throws(() => service.safe(path.join(root, '..', 'outside.json')));
+  assert.throws(() => createTcgOrganizations(path.join(root, 'missing')).save({ kind: 'box', name: 'Box' }), e => e.status === 503);
+  assert.throws(() => service.save({ kind: '../outside', name: 'Box' }));
+  assert.throws(() => service.syncRecord({ id: '../outside', tcg: { printings: [] } }, []));
+});
+
+test('printing batches retain successful entries, retry failed entries only and keep account identities isolated', async t => {
+  let calls = 0, rows, failSecond = true;
+  const f = await httpFixture(t, 'normal', { complete: (req, res) => {
+    calls++;
+    if (req.body.title === 'Second' && failSecond) return res.json({ ok: false, record: null, message: 'Simulated write failure' });
+    const record = { id: 'record-' + calls, title: req.body.title, mobileRequestId: req.body.mobileRequestId };
+    rows.push(record); return res.json({ ok: true, record });
+  } }); rows = f.rows;
+  const body = { requestId: crypto.randomUUID(), entries: ['First', 'Second'].map(title => ({ id: crypto.randomUUID(), title })) };
+  const first = await (await f.call('/batches', body)).json();
+  assert.equal(first.state, 'partial'); assert.equal(first.entries[0].state, 'complete'); assert.equal(calls, 2);
+  assert.equal((await (await f.call('/batches', body)).json()).state, 'partial'); assert.equal(calls, 2);
+  failSecond = false;
+  const second = await (await f.call('/batches', { ...body, retry: true })).json();
+  assert.equal(second.state, 'complete'); assert.equal(calls, 3); assert.equal(rows.length, 2);
+  assert.equal((await (await f.call('/batches/' + body.requestId, undefined, { 'x-user': 'other' })).json()).state, 'unknown');
+  assert.equal((await f.call('/batches', { ...body, entries: [{ ...body.entries[0], quantity: 99 }] })).status, 409);
+});
+
+test('all new mutations require write permission and index-only saves remain uncertain', async t => {
+  const f = await httpFixture(t, 'normal', { saveConfirmed: () => false });
+  for (const [route, method] of [['/locations', 'POST'], ['/locations/id', 'PATCH'], ['/wishlist', 'POST'], ['/wishlist/id', 'DELETE'], ['/batches', 'POST'], ['/items/id/holdings/holding/move', 'POST']]) {
+    assert.equal((await f.call(route, {}, { 'x-role': 'viewer' }, method)).status, 403);
+    assert.equal((await f.call(route, {}, { 'x-feature': 'off' }, method)).status, 402);
+  }
+  const body = { title: 'Card', requestId: crypto.randomUUID() };
+  assert.equal((await (await f.call('/items', body)).json()).state, 'uncertain');
+  assert.equal((await (await f.call('/items', body)).json()).state, 'uncertain'); assert.equal(f.submissions(), 1);
+});
+
+
+function canonicalContext(root) {
+  const context = { fs, path, Buffer, console, encodeURIComponent, tcgCanonicalRoot: path.join(root, 'tcg'),
+    tcgOrganizations: createTcgOrganizations(root),
+    readJsonFile: (file, fallback) => { try { return JSON.parse(fs.readFileSync(file)); } catch { return fallback; } },
+    readTcgLocations: () => [],
+  };
+  for (const name of ['slugifyTcgPathPart', 'getTcgCanonicalPaths', 'makeCanonicalTcgMetadata', 'getTcgHoldingPaths', 'summarizeTcgPrintings', 'readCanonicalTcgRecords', 'persistTcgCanonicalRecord']) context[name] = actual(name, context);
+  return context;
+}
+test('actual canonical writer and cold reader retain multiple holdings in one set folder, edits, photos and removed groups', t => {
+  const root = temporary(t), context = canonicalContext(root);
+  const capture = { id: 'front', dataUrl: 'data:image/jpeg;base64,' + Buffer.from('generated-photo-fixture').toString('base64') };
+  const record = { id: 'card', title: 'Ash Blossom', notes: 'Saved bio', metadata: { custom: 'keep' }, mobileRequestId: 'owner:queue', tcg: { game: 'yugioh', providerCardId: '1234', cardName: 'Ash Blossom', printings: [
+    { id: 'one', setCode: 'RA01-EN001', rarity: 'Rare', condition: 'Near Mint', quantity: 2, locationId: 'loose', priceAvailable: false, captures: [capture] },
+    { id: 'two', setCode: 'RA01-EN001', rarity: 'Secret Rare', condition: 'Good', quantity: 4, locationId: 'loose', marketValue: 7, priceAvailable: true, captures: [] },
+  ] } };
+  context.persistTcgCanonicalRecord(record);
+  let reopened = context.readCanonicalTcgRecords()[0];
+  assert.equal(reopened.tcg.printings.length, 2); assert.equal(reopened.tcg.quantity, 6);
+  assert.equal(reopened.metadata.custom, 'keep'); assert.equal(reopened.tcg.printings[1].captures.length, 0);
+  assert.equal(reopened.tcg.printings[0].captures[0].dataUrl, undefined);
+  const photo = reopened.tcg.printings[0].captures[0];
+  assert.equal(fs.readFileSync(path.join(reopened.tcg.printings[0]._canonicalDirectory, photo.relativePath), 'utf8'), 'generated-photo-fixture');
+  assert.equal(context.tcgOrganizations.confirmed(reopened, 'owner:queue'), true);
+  const edited = { ...reopened, title: 'Edited name', notes: 'Edited notes', tcg: { ...reopened.tcg, cardName: 'Edited name', printings: [{ ...reopened.tcg.printings[0], setCode: 'NEW-EN001', quantity: 3 }] } };
+  context.persistTcgCanonicalRecord(edited);
+  reopened = canonicalContext(root).readCanonicalTcgRecords()[0];
+  assert.equal(reopened.title, 'Edited name'); assert.equal(reopened.notes, 'Edited notes');
+  assert.equal(reopened.tcg.printings.length, 1); assert.equal(reopened.tcg.quantity, 3); assert.equal(reopened.tcg.printings[0].setCode, 'NEW-EN001');
+  assert.equal(fs.existsSync(path.join(root, 'tcg', 'yugioh', 'edited-name', 'new-en001')), false);
+  context.persistTcgCanonicalRecord({ ...reopened, tcg: { ...reopened.tcg, printings: [] } });
+  assert.equal(canonicalContext(root).readCanonicalTcgRecords().length, 0);
+});
+
+test('move requests never replay a successful partial move after a lost response', async t => {
+  const root = temporary(t); let moved = 0;
+  const f = await httpFixture(t, 'normal', { locations: () => [{ id: 'box', kind: 'box', name: 'Commons' }],
+    move: (record, holding, quantity, destination, identity) => { moved++; record.mobileRequestIds = [identity]; return record; },
+    requests: createInventoryRequests(root),
+  });
+  f.rows.push({ id: 'card', tcg: { printings: [{ id: 'holding', quantity: 3 }] } });
+  const body = { requestId: crypto.randomUUID(), quantity: 1, locationId: 'box' };
+  assert.equal((await (await f.call('/items/card/holdings/holding/move', body)).json()).state, 'complete');
+  assert.equal((await (await f.call('/items/card/holdings/holding/move', body)).json()).state, 'complete');
+  assert.equal(moved, 1);
+  assert.equal((await f.call('/items/card/holdings/holding/move', { ...body, quantity: 2 })).status, 409);
+});
+
+
+test('reindex normalization retains holding identities, canonical paths, photos and manual pricing history', () => {
+  const make = actual('makeTcgPrinting', { makeIntakeId: () => 'unexpected-new-id', readTcgBinders: () => [], normalizeYugiohSetCode: value => value });
+  const holding = plain(make({ id: 'original', setCode: 'SET-EN001', quantity: 2, locationId: 'box', _canonicalDirectory: '/safe/card/set', captures: [{ url: 'photo' }], priceSourceType: 'manual-override', manualPriceOverride: 7, priceHistory: [{ at: 'yesterday' }], marketValue: 7 }));
+  assert.equal(holding.id, 'original'); assert.equal(holding._canonicalDirectory, '/safe/card/set');
+  assert.equal(holding.captures[0].url, 'photo'); assert.equal(holding.manualPriceOverride, 7); assert.equal(holding.priceHistory.length, 1);
+});
+
+test('Music/YouTube manual groups retain their library, kind and exact ordered references across save', () => {
+  const context = { sanitizeCustomCollectionId: id => id };
+  context.normalizeCustomCollectionItem = actual('normalizeCustomCollectionItem', {});
+  const normalize = actual('normalizeCustomCollectionPayload', context);
+  const saved = plain(normalize({ id: 'playlist', name: 'Drive', library: 'music', libraryTab: 'playlists', items: [
+    { library: 'music', sourceId: '/media/music/b.mp3', order: 2 }, { library: 'music', sourceId: '/media/music/a.mp3', order: 1 },
+  ] }));
+  assert.equal(saved.library, 'music'); assert.equal(saved.libraryTab, 'playlists');
+  assert.deepEqual(saved.items.map(row => row.sourceId), ['/media/music/a.mp3', '/media/music/b.mp3']);
+  assert(saved.items.every(row => row.library === 'music'));
+  const renamed = plain(normalize({ name: 'Renamed' }, saved));
+  assert.equal(renamed.library, 'music'); assert.equal(renamed.items.length, 2);
+});
+
+
+test('rejected concurrent batch requests cannot release another active batch lock', async t => {
+  const f = await httpFixture(t), body = { requestId: crypto.randomUUID(), entries: [{ id: crypto.randomUUID(), title: 'Card' }] };
+  const first = f.call('/batches', body);
+  await new Promise(resolve => setTimeout(resolve, 3));
+  const repeated = await Promise.all([f.call('/batches', { ...body, retry: true }), f.call('/batches', { ...body, retry: true })]);
+  assert(repeated.every(response => [200, 409].includes(response.status)));
+  await first;
+  assert.equal(f.submissions(), 1); assert.equal(f.rows.length, 1);
+});
+
+test('canonical recovery identities cannot be discarded by a stale fast index', () => {
+  const read = actual('readIntakeLibraryRecords', {
+    readIntakeCollection: () => [{ id: 'card', category: 'trading-cards', tcg: {}, mobileRequestIds: ['old'] }], intakeLibraryRecordsPath: () => '',
+    readCanonicalTcgRecords: () => [{ id: 'card', tcg: {}, mobileRequestIds: ['new'], captures: [{ url: 'saved.jpg' }] }],
+  });
+  const row = plain(read('inventory'))[0];
+  assert.deepEqual(row.mobileRequestIds, ['old', 'new']); assert.equal(row.captures[0].url, 'saved.jpg');
+});
+
+test('share repair rewrites an existing queue record without invoking intake or adding copies', async t => {
+  let confirmed = false, repairs = 0;
+  const f = await httpFixture(t, 'normal', { saveConfirmed: () => confirmed, repair: record => { repairs++; confirmed = true; return record; } });
+  const body = { requestId: crypto.randomUUID(), entries: [{ id: crypto.randomUUID(), title: 'Card' }] };
+  assert.equal((await (await f.call('/batches', body)).json()).entries[0].state, 'uncertain');
+  assert.equal((await f.call('/batches/' + body.requestId + '/repair', { confirmed: true }, { 'x-role': 'viewer' })).status, 403);
+  const repaired = await (await f.call('/batches/' + body.requestId + '/repair', { confirmed: true })).json();
+  assert.equal(repaired.state, 'complete'); assert.equal(repairs, 1); assert.equal(f.submissions(), 1); assert.equal(f.rows.length, 1);
 });
