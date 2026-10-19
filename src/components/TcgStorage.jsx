@@ -37,7 +37,7 @@ export function TcgHoldingMoves({ record, onUpdated }) {
 }
 function TcgMoveRow({ record, holding, locations, onUpdated }) {
   const [quantity, setQuantity] = useState(1), [destination, setDestination] = useState("loose"), [busy, setBusy] = useState(false), [error, setError] = useState("");
-  const [requestId] = useState(() => crypto.randomUUID());
+  const [requestId] = useState(createTcgMoveRequestId);
   async function move() {
     setBusy(true); setError("");
     try { const result = await tcgRequest(`/items/${encodeURIComponent(record.id)}/holdings/${encodeURIComponent(holding.id)}/move`, { quantity, locationId: destination, requestId }); if (result.state !== "complete") throw new Error("Move is still unconfirmed. Refresh this card before changing the move."); onUpdated(result.record); }
@@ -45,6 +45,15 @@ function TcgMoveRow({ record, holding, locations, onUpdated }) {
     finally { setBusy(false); }
   }
   return <div className="intake-form-grid"><strong>{holding.setCode} · {holding.rarity} · {holding.condition}</strong><label>Move quantity<input type="number" min="1" max={holding.quantity} value={quantity} onChange={event => setQuantity(Number(event.target.value))} /></label><label>Destination<select value={destination} onChange={event => setDestination(event.target.value)}><option value="loose">Loose Cards</option>{locations.filter(row => row.id !== "loose").map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label><button type="button" disabled={busy || quantity < 1 || quantity > holding.quantity || destination === (holding.locationId || holding.binderId || "loose")} onClick={move}>Move copies</button>{error && <p role="alert">{error}</p>}</div>;
+}
+function createTcgMoveRequestId() {
+  // randomUUID needs HTTPS; getRandomValues also works on ordinary HTTP LANs.
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 export function TcgLocationsPanel({ kind, records, onSelect, onChanged }) {
   const [locations, setLocations] = useState([]), [canEdit, setCanEdit] = useState(false), [error, setError] = useState("");
