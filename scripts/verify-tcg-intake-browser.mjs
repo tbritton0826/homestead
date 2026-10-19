@@ -15,7 +15,8 @@ const labelStart = source.indexOf('function tcgEstimateLabel(');
 const priceLabel = source.slice(labelStart, source.indexOf('\n}', labelStart) + 2);
 const quote = { cardId: '95515789', cardName: 'Blazing Cartesia, the Virtuous', setCode: 'MP23-EN162', rarity: 'Prismatic Secret Rare',
   marketValue: 0, priceAvailable: false, priceSourceType: 'unavailable', priceSource: 'Printing price unavailable' };
-const requests = [], saved = new Map();
+const requests = [], saved = new Map(), moveRequests = [];
+let failMove = true;
 let failNext = false;
 const server = await createServer({ root, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, plugins: [{
   name: 'isolated-intake-fixture',
@@ -25,14 +26,17 @@ const server = await createServer({ root, configFile: false, logLevel: 'error', 
     const jsx = `import React, {useState,useEffect,useMemo,useRef,useCallback} from 'react';
       import {createRoot} from 'react-dom/client'; import {createPortal} from 'react-dom';
       import {prepareTcgPhotos} from '/src/utils/tcg-photos.js';
-      import {TcgLocationFields} from '/src/components/TcgStorage.jsx';
+      import {TcgLocationFields,TcgHoldingMoves} from '/src/components/TcgStorage.jsx';
       import {TcgPriceCheck} from '/src/components/TcgPricing.jsx';
       const FeatureReloadButton=()=>null; const loadBarcodeReader=()=>Promise.reject(Error('Not used in fixture'));
       ${modal}\n${priceLabel}
       // Simulate a normal HTTP LAN browser even though localhost is trusted.
       Object.defineProperty(window.crypto, 'randomUUID', {value:undefined, configurable:true});
       window.fixtureErrors=[]; window.addEventListener('error', e=>window.fixtureErrors.push(e.message));
-      createRoot(document.getElementById('root')).render(<UniversalIntakeModal onClose={()=>{}} />);`;
+      const root=createRoot(document.getElementById('root'));
+      function DetailFixture(){const [record,setRecord]=useState({id:'fixture-card',updatedAt:'initial',tcg:{quantity:2,printings:[{id:'fixture-print',setCode:'TEST-EN001',rarity:'Rare',condition:'Near Mint',quantity:2,locationId:'loose'}]}});return <aside className="inventory-v1-detail"><h2>Fixture card detail</h2><TcgHoldingMoves record={record} onUpdated={setRecord}/></aside>}
+      window.openCardFixture=()=>root.render(<DetailFixture/>);
+      root.render(<UniversalIntakeModal onClose={()=>{}} />);`;
     return (await transformWithOxc(jsx, 'intake-fixture.jsx', { jsx: { runtime: 'automatic' } })).code;
   },
   configureServer(vite) {
@@ -50,7 +54,12 @@ const server = await createServer({ root, configFile: false, logLevel: 'error', 
         saved.set(body.requestId, body.entries[0]);
         return res.end(JSON.stringify({ ok: true, state: 'complete' }));
       }
-      if (req.url === '/api/inventory/native') return res.end(JSON.stringify({ locations: [{ id: 'loose', kind: 'loose', name: 'Loose Cards' }] }));
+      if (req.url.endsWith('/holdings/fixture-print/move')) {
+        let raw=''; for await(const chunk of req) raw+=chunk; const body=JSON.parse(raw); moveRequests.push(body);
+        if(failMove){failMove=false;res.statusCode=503;return res.end(JSON.stringify({ok:false,message:'Fixture move interrupted'}));}
+        return res.end(JSON.stringify({ok:true,state:'complete',record:{id:'fixture-card',updatedAt:'moved',tcg:{quantity:2,printings:[{id:'fixture-print',quantity:2,locationId:'binder'}]}}}));
+      }
+      if (req.url === '/api/inventory/native') return res.end(JSON.stringify({ ok:true,canEdit:true,locations: [{ id: 'loose', kind: 'loose', name: 'Loose Cards' },{id:'binder',kind:'binder',name:'Fixture binder'}] }));
       res.end(JSON.stringify({ ok: true, decks: [], binders: [], session: { id: 'fixture-session' } }));
     });
   },
@@ -131,8 +140,19 @@ try {
   await click('Add to Queue'); await click('Review 1 queued'); await click('Save queued printings'); await heading('Intake saved');
   assert.equal(saved.size, 2); assert.equal(requests[2].entries[0].tcg.marketValue, 8.75);
   assert.equal(requests[2].entries[0].tcg.purchasePrice, 1.25); assert.equal(requests[2].entries[0].tcg.manualPriceOverride, 8.75);
+  await evaluate('window.openCardFixture()');
+  await until(()=>evaluate(`document.body.textContent.includes('Move copies') || window.fixtureErrors.length`),'card detail on HTTP LAN');
+  assert.deepEqual(await evaluate('window.fixtureErrors'), [],'opening card details must not crash without crypto.randomUUID');
+  assert.equal(moveRequests.length,0,'opening details must not move cards');
+  await evaluate(`(()=>{const el=document.querySelector('.inventory-v1-detail select');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(el,'binder');el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await click('Move copies');
+  await until(()=>evaluate(`document.body.textContent.includes('Fixture move interrupted')`),'recoverable move failure');
+  await click('Move copies');
+  await until(()=>evaluate(`document.body.textContent.includes('Fixture binder: 2')`),'confirmed move');
+  assert.equal(moveRequests.length,2);assert.equal(moveRequests[0].requestId,moveRequests[1].requestId);
+  assert.match(moveRequests[0].requestId,/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i);
   assert.deepEqual(await evaluate('window.fixtureErrors'), []);
-  console.log('PASS: actual React intake in Edge: HTTP UUID fallback, manual price/quantity/cost, scan-next failure/retry, single-mode review/back/edit/save. Fixture APIs only; no production data.');
+  console.log('PASS: actual React intake in Edge: HTTP UUID fallback, manual price/quantity/cost, scan-next failure/retry, single-mode review/back/edit/save; card detail HTTP opening and interrupted move retry. Fixture APIs only; no production data.');
   await command('Browser.close').catch(() => {});
 } finally {
   socket?.close();
