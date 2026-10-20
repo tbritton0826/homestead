@@ -1,6 +1,7 @@
 import { handlePosterFallback } from "../utils/image-fallback.js";
 import { useEffect, useMemo, useState } from "react";
 import { photoUrl } from "./PhotoLibraryPicker.jsx";
+import { MediaFolderTabs, useMediaFolders } from "./MediaFolderTabs.jsx";
 
 export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", appearance = {}, albumId = "", onAlbumChange, openImageViewer, setNavBackAction }) {
   const [visible, setVisible] = useState(120);
@@ -8,6 +9,7 @@ export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", a
   const albums = useMemo(() => Object.values(mediaIndex?.libraries?.[libraryKey] || {}).sort((a, b) => String(a.name || a.title).localeCompare(String(b.name || b.title))), [mediaIndex, libraryKey]);
   const album = albums.find((item) => String(item.id) === albumId);
   const photos = useMemo(() => (album?.files || []).filter((file) => file.type === "image"), [album]);
+  const folders = useMediaFolders(photos, album?.path || album?.sourcePath || "");
   useEffect(() => { setVisible(120); }, [albumId]);
   useEffect(() => {
     setNavBackAction?.(album ? () => () => onAlbumChange?.("") : null);
@@ -34,11 +36,12 @@ export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", a
       })}
       {!albums.length && <p>No photo albums found. Add a folder mapping for this library and scan it.</p>}
     </div> : <>
-      <div className="photos-detail-grid">{photos.slice(0, visible).map((photo, index) => <button className="photos-detail-photo" key={`${photo.path || photo.sourcePath}-${index}`} onClick={() => openImageViewer ? openImageViewer(photos, index) : setFallbackPhoto(photo)}>
+      <MediaFolderTabs folders={folders} />
+      <div className="photos-detail-grid">{folders.files.slice(0, visible).map((photo, index) => <button className="photos-detail-photo" key={`${photo.path || photo.sourcePath}-${index}`} onClick={() => openImageViewer ? openImageViewer(folders.files, index) : setFallbackPhoto(photo)}>
         <img src={photoUrl(photo)} alt={photo.name || "Photo"} loading="lazy" decoding="async" onError={handlePosterFallback} /><span>{photo.name}</span>
       </button>)}</div>
-      {!photos.length && <p>This album has no photos yet.</p>}
-      {photos.length > visible && <button className="secondary-button" onClick={() => setVisible(visible + 120)}>Show More Photos ({photos.length - visible} remaining)</button>}
+      {!folders.files.length && <p>No photos in this folder.</p>}
+      {folders.files.length > visible && <button className="secondary-button" onClick={() => setVisible(visible + 120)}>Show More Photos ({folders.files.length - visible} remaining)</button>}
     </>}
     {fallbackPhoto && <div className="image-viewer-overlay" onClick={() => setFallbackPhoto(null)}><button onClick={() => setFallbackPhoto(null)}>Close</button><img src={photoUrl(fallbackPhoto)} alt={fallbackPhoto.name} /></div>}
   </div>;

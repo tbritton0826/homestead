@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
+import useDialogFocus from '../hooks/useDialogFocus.js';
 const endpoint = '/api/inventory/native/pricing';
 async function request(route = '', body) {
   const response = await fetch(endpoint + route, { cache: 'no-store', ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
@@ -8,19 +10,35 @@ async function request(route = '', body) {
 }
 export function TcgPricingSettings() {
   const [settings, setSettings] = useState(null), [key, setKey] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
+  const [open, setOpen] = useState(false), [enabled, setEnabled] = useState(false);
+  function close() { if (!busy) { setOpen(false); setKey(''); setMessage(''); } }
+  useDialogFocus({ selector: '.tcg-pricing-dialog', open, onClose: close, canClose: !busy });
   useEffect(() => { let active = true; request().then(result => { if (active) setSettings(result); }).catch(() => {}); return () => { active = false; }; }, []);
   async function save(clearKey = false) {
     setBusy(true); setMessage('');
-    try { const result = await request('', { enabled: settings.enabled, ...(key ? { apiKey: key } : {}), clearKey }); setSettings(current => ({ ...current, ...result })); setKey(''); setMessage('Pricing settings saved.'); }
+    try { const result = await request('', { enabled, ...(key ? { apiKey: key } : {}), clearKey }); setSettings(current => ({ ...current, ...result })); setKey(''); setMessage('Pricing settings saved.'); }
     catch (error) { setMessage(error.message); } finally { setBusy(false); }
   }
   async function test() { setBusy(true); try { const result = await request('/test', {}); setMessage(result.message); } catch (error) { setMessage(error.message); } finally { setBusy(false); } }
   if (!settings?.canEdit) return null;
-  return <section className="tcg-pricing-settings"><h4>TCG Price Lookup</h4><p>Optional TCGplayer pricing by printing and condition. Your key stays on this server. Provider quotas apply; manual estimates are preserved.</p>
-    <label><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => setSettings({ ...settings, enabled: event.target.checked })} /> Enable pricing</label>
-    <label>API key {settings.configured ? '(saved — leave blank to keep)' : ''}<input type="password" autoComplete="new-password" value={key} onChange={event => setKey(event.target.value)} /></label>
-    <div><button type="button" disabled={busy} onClick={() => save()}>Save pricing settings</button><button type="button" disabled={busy || !settings.configured} onClick={test}>Test saved connection</button><button type="button" disabled={busy || !settings.configured} onClick={() => save(true)}>Remove saved key</button></div>
-    {message && <p role="status">{message}</p>}<a href="https://tcgpricelookup.com/docs" target="_blank" rel="noreferrer">Provider setup and plans</a></section>;
+  return <>
+    <button className={`settings-toggle-card ${settings.enabled && settings.configured ? 'active' : ''}`} type="button" onClick={() => { setEnabled(settings.enabled === true); setOpen(true); }}>
+      <strong>{settings.enabled && settings.configured ? '✓' : '○'} TCG Price Lookup</strong>
+      <p>{settings.configured ? settings.enabled ? 'Pricing enabled. Connection settings.' : 'Key saved. Pricing disabled.' : 'Optional card pricing. Configure API key.'}</p>
+    </button>
+    {open && createPortal(<div className="settings-modal-overlay tcg-pricing-overlay">
+      <section className="settings-modal-card tcg-pricing-dialog" role="dialog" aria-modal="true" aria-labelledby="tcg-pricing-title" aria-busy={busy} tabIndex={-1}>
+        <header className="settings-modal-header"><h2 id="tcg-pricing-title">TCG Price Lookup</h2><button type="button" className="secondary-button" disabled={busy} onClick={close} aria-label="Close pricing settings">✕</button></header>
+        <div className="settings-modal-body tcg-pricing-settings"><p>Optional TCGplayer pricing by printing and condition. Your key stays on this server. Provider quotas apply; manual estimates are preserved.</p>
+          <label><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} /> Enable pricing</label>
+          <label>API key {settings.configured ? '(saved — leave blank to keep)' : ''}<input type="password" autoComplete="new-password" disabled={busy} value={key} onChange={event => setKey(event.target.value)} /></label>
+          <div className="tcg-pricing-actions"><button type="button" className="primary-button" disabled={busy} onClick={() => save()}>Save pricing settings</button><button type="button" className="secondary-button" disabled={busy || !settings.configured} onClick={test}>Test saved connection</button><button type="button" className="secondary-button" disabled={busy || !settings.configured} onClick={() => save(true)}>Remove saved key</button></div>
+          {message && <p role="status">{message}</p>}<a href="https://tcgpricelookup.com/docs" target="_blank" rel="noreferrer">Provider setup and plans</a>
+          <button type="button" className="secondary-button" disabled={busy} onClick={close}>Close / Cancel</button>
+        </div>
+      </section>
+    </div>, document.body)}
+  </>;
 }
 export function TcgPriceCheck({ draft, setDraft }) {
   const [message, setMessage] = useState('');
