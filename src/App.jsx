@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { prepareTcgPhotos } from "./utils/tcg-photos.js";
 import { TcgPricingSettings, TcgPriceCheck } from "./components/TcgPricing.jsx";
+import { MediaFolderTabs, useMediaFolders } from "./components/MediaFolderTabs.jsx";
 import { TcgLocationFields, TcgLocationsPanel, TcgHoldingMoves, TcgWishlistPanel } from "./components/TcgStorage.jsx";
 import { lazyFeature, FeatureReloadButton } from "./components/LazyFeature.jsx";
 import { createProfileStartupLoader, initialStartupProfileList, mergeStartupProfileList } from "./utils/profile-startup.js";
@@ -1828,7 +1829,8 @@ function ProfileMediaSection({
   className = "",
 }) {
   const safeFiles = Array.isArray(files) ? files : [];
-  const itemCount = safeFiles.length;
+  const folders = useMediaFolders(safeFiles, "", true);
+  const itemCount = folders.files.length;
 
   return (
     <section className={`profile-media-section ${className}`.trim()}>
@@ -1854,8 +1856,9 @@ function ProfileMediaSection({
         </div>
       </div>
 
+      <MediaFolderTabs folders={folders} />
       {itemCount ? (
-        <MediaGallery files={safeFiles} openImageViewer={openImageViewer} adultMediaActions={adultMediaActions} />
+        <MediaGallery files={folders.files} openImageViewer={openImageViewer} adultMediaActions={adultMediaActions} />
       ) : (
         <div className="profile-media-empty-state">
           <div className="profile-media-empty-icon">{emptyIcon}</div>
@@ -32514,9 +32517,9 @@ return (
 {settingsTab === "integrations" && integrationsAvailable && (
   <div className="panel">
     <h3>Integrations</h3>
-    <TcgPricingSettings />
 
     <div className="settings-toggle-grid">
+      <TcgPricingSettings />
       {settingsIntegrationIds.map((id) => {
         const enabled =
           integrations?.[id] === true ||

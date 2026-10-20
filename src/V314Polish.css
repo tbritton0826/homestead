@@ -11,6 +11,14 @@
 .tcg-pricing-settings label { display: block; margin-block: 12px; }
 .tcg-pricing-settings input[type=password] { display: block; width: min(100%, 480px); margin-top: 6px; }
 .tcg-pricing-settings button { min-height: 44px; margin: 4px 8px 4px 0; }
+.tcg-pricing-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; }
+.tcg-pricing-dialog .tcg-pricing-settings { border: 0; padding: 0; margin: 0; }
+.tcg-pricing-dialog input[type=password] { box-sizing: border-box; max-width: 100%; }
+.tcg-pricing-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.media-folder-tabs { display: flex; gap: 8px; overflow-x: auto; max-width: 100%; margin-block: 12px; padding-bottom: 6px; }
+.media-folder-tabs button { flex: 0 0 auto; white-space: nowrap; min-height: 44px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border-color, #465063); background: var(--panel-bg, #171c28); color: inherit; }
+.media-folder-tabs button.active { background: var(--accent-color, #405dff); color: white; }
+.media-folder-tabs button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 @media (max-width: 640px) {
   .dashboard-home .dashboard-grid { gap: 14px; }
   .dashboard-home .home-overview-row { gap: 12px; }
