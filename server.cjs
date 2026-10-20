@@ -6849,6 +6849,9 @@ function discoverProfilePoster(profileDir = "") {
 }
 
 function chooseProfilePoster(profileDir = "", ...values) {
+  const selected = require("./src/server/profile-import-artwork.cjs").selectedProfileArtwork(profileDir,
+    readJsonIfExists(path.join(profileDir, "metadata.json"), {}));
+  if (selected) return "/api/file?path=" + encodeURIComponent(selected.file) + "&v=" + encodeURIComponent(selected.revision);
   for (const value of values) {
     const resolved = resolveProfilePosterCandidate(profileDir, value);
     if (resolved) return resolved;
@@ -16918,7 +16921,7 @@ function appendAdultImportRecord(profileDir, record) {
     },
     updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(metadataPath, JSON.stringify(next, null, 2));
+  fs.writeFileSync(metadataPath, JSON.stringify(require("./src/server/profile-import-artwork.cjs").applyImportedArtwork(next, record), null, 2));
 }
 
 function getAdultImportMetadata(profileDir) {

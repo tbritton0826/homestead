@@ -782,7 +782,8 @@ const status = metadataFile.status || metadata.relationshipStatus || null;
     "clearlogo.webp",
   ];
 
-  const posterFile = posterCandidates.find((file) =>
+  const selectedPoster = require("../../src/server/profile-import-artwork.cjs").selectedProfileArtwork(entityDir, metadataFile);
+  const posterFile = selectedPoster?.relative || posterCandidates.find((file) =>
     exists(path.join(entityDir, file))
   );
 
@@ -884,7 +885,9 @@ const status = metadataFile.status || metadata.relationshipStatus || null;
     metadata,
 relationships,
 status,
-    poster: posterFile ? toPublicPath(path.join(entityDir, posterFile)) : null,
+    poster: selectedPoster
+      ? "/api/file?path=" + encodeURIComponent(selectedPoster.file) + "&v=" + encodeURIComponent(selectedPoster.revision)
+      : posterFile ? toPublicPath(path.join(entityDir, posterFile)) : null,
     banner: bannerFile ? toPublicPath(path.join(entityDir, bannerFile)) : null,
     trailer: trailerFile ? toPublicPath(path.join(entityDir, trailerFile)) : null,
     theme: themeFile ? toPublicPath(path.join(entityDir, themeFile)) : null,

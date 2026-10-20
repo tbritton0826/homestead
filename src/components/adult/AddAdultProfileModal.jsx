@@ -155,7 +155,8 @@ export default function AddAdultProfileModal({ open, defaultType = "", initialMe
   const [metadataStatus, setMetadataStatus] = useState("");
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  useDialogFocus({ selector: ".adult-profile-modal", open: open, onClose, canClose: !saving });
+  // Escape may close an image preview, but only explicit Close/Cancel exits the wizard.
+  useDialogFocus({ selector: ".adult-profile-modal", open: open, onClose: () => setPreviewMediaId(""), canClose: !saving });
   const [error, setError] = useState("");
   const initialCandidateFetchRef = useRef("");
 
@@ -640,7 +641,7 @@ export default function AddAdultProfileModal({ open, defaultType = "", initialMe
   }
 
   return (
-    <div className="adult-profile-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !saving && onClose?.()}>
+    <div className="adult-profile-modal-backdrop" role="presentation">
       <section className="adult-profile-modal adult-profile-media-create-modal" role="dialog" aria-modal="true" aria-label={`Add ${typeLabel}`}>
         <header className="adult-profile-modal-heading">
           <div>
@@ -648,7 +649,7 @@ export default function AddAdultProfileModal({ open, defaultType = "", initialMe
             <h2>{PROFILE_TYPES.find((item) => item.id === profileType)?.icon} Add {typeLabel}</h2>
             <span>{profileType === "personal" ? "Create a private profile manually, then import from this device or link its existing folder." : "Search every enabled person source, verify the result, add media, and create the profile in one guided flow."}</span>
           </div>
-          <button className="adult-profile-modal-close" type="button" disabled={saving} onClick={onClose}>×</button>
+          <button className="adult-profile-modal-close" type="button" disabled={saving} onClick={onClose} aria-label="Close profile wizard">×</button>
         </header>
 
         {!defaultType && (
