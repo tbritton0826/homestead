@@ -25805,11 +25805,10 @@ function getProfilePosterCandidates(profile = {}) {
   );
 
   const rawCandidates = [
-    ...(Array.isArray(profile.posterCandidates) ? profile.posterCandidates : []),
+    profile.poster,
     profile.profilePoster,
     profile.selectedPoster,
     profile.primaryPoster,
-    profile.poster,
     profile.posterUrl,
     profile.posterPath,
     metadata.profilePoster,
@@ -25847,6 +25846,7 @@ function getProfilePosterCandidates(profile = {}) {
     artwork.image,
     artwork.avatar,
     artwork.cover,
+    ...(Array.isArray(profile.posterCandidates) ? profile.posterCandidates : []),
     ...folderPosterCandidates,
     ...photos,
     ...images,
@@ -25935,9 +25935,7 @@ function getProfileInitials(person = {}) {
 }
 
 function AdultBirthdayPoster({ person, className = "" }) {
-  const candidates = Array.isArray(person?.posterCandidates) && person.posterCandidates.length
-    ? person.posterCandidates
-    : getProfilePosterCandidates(person);
+  const candidates = getProfilePosterCandidates(person);
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [failedAllCandidates, setFailedAllCandidates] = useState(false);
   const src = !failedAllCandidates ? candidates[candidateIndex] || "" : "";
