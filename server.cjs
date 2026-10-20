@@ -2617,8 +2617,9 @@ async function sendHeicPreview(res, filePath, options = {}) {
   }
 }
 
+const nativeImagePreview = require("./src/server/image-preview.cjs").createImagePreviewer(path.join(__dirname, "data", "native-image-previews"));
 app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
-  const filePath = String(req.query.path || "").trim();
+  const filePath = resolveHomesteadFilePath(String(req.query.path || "").trim());
 
   if (!filePath || !fs.existsSync(filePath)) {
     return res.status(404).send("File not found");
@@ -2626,6 +2627,14 @@ app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
 
   if (isHeicFilePath(filePath) && String(req.query.raw || "") !== "1") {
     return sendHeicPreview(res, filePath, req.query);
+  }
+
+  if (Number(req.query.width) > 0 && /\.(?:jpe?g|png|webp|gif|avif)$/i.test(filePath) && String(req.query.raw || "") !== "1") {
+    try {
+      const preview = await nativeImagePreview(filePath, req.query);
+      res.type("image/jpeg").setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+      return res.sendFile(preview);
+    } catch { return res.status(503).send("Image preview unavailable. Retry shortly."); }
   }
 
   const replaceableArtwork = /(?:^|[\\/])(?:poster|banner|headshot|breasts|pussy|ass)(?:-cutout)?\.(?:jpe?g|png|webp|gif|avif|heic|heif|mp4|m4v|mov|webm)$/i.test(filePath);
@@ -6327,6 +6336,11 @@ function listAdultLooseMediaFiles(folderPath, library) {
   walk(folderPath);
   return files.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
 }
+
+const nativePhotos = require("./src/server/photo-library.cjs");
+const nativePhotoService = nativePhotos.createPhotoLibrary({ config: readSetupConfig, changed: () => { try { runMediaScan("photos"); } catch (error) { console.warn("Photos scan could not be queued:", error.message); } } });
+nativePhotos.registerPhotoLibrary(app, { express, service: nativePhotoService, config: readSetupConfig,
+  access: req => homesteadAccess.accessContext(req), feature: homesteadAccess.requireFeature("photos") });
 
 app.get("/api/adult/media-folders", (req, res) => {
   try {

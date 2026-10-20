@@ -576,7 +576,7 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
       next();
     },
     filterMediaIndex(req, index = {}) {
-      const configuredIndex = { ...index, libraries: { ...(index.libraries || {}) } };
+      const configuredIndex = require("./photo-library.cjs").separatePhotoLibraries({ ...index, libraries: { ...(index.libraries || {}) } }, readSetupConfig() || {});
       const subscriptionLibraryAliases = {
         photos: ["photos"],
         family: ["family"],

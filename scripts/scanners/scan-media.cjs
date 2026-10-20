@@ -182,7 +182,7 @@ const libraryPathAliases = {
   personal: ["personal", "personalProfiles"],
   performers: ["performers", "pornStars"],
   celebrities: ["celebrities"],
-  adultPhotos: ["adultPhotos", "adult-photos", "photos"],
+  adultPhotos: ["adultPhotos", "adult-photos"],
   adultVideos: ["adultVideos", "adult-videos", "videos"],
 };
 
