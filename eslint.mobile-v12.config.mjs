@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import globals from 'globals';
 export default [
+  { files: ["src/server/photo-library.cjs", "src/server/image-preview.cjs", "scripts/test-v315.cjs"], languageOptions: { sourceType: "commonjs", globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['src/server/tcg-price-lookup.cjs', 'scripts/test-v314.cjs'], languageOptions: { sourceType: 'commonjs', globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['scripts/verify-book-reader-browser.mjs'], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ['scripts/verify-tcg-intake-browser.mjs'], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
