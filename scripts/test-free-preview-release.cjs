@@ -54,8 +54,8 @@ assert(fs.existsSync(path.join(root, "install", "windows", "Install-Homestead.ps
 assert(fs.existsSync(path.join(root, "install", "windows", "Start-Homestead.ps1")));
 assert(fs.existsSync(path.join(root, "install", "windows", "Stop-Homestead.ps1")));
 assert(fs.existsSync(path.join(root, "scripts", "release", "build-free-preview.ps1")));
-assert.match(releaseBuilder, /AppLaunched=cmd\.exe \/d \/c Install-Homestead\.cmd/);
-assert.doesNotMatch(releaseBuilder, /AppLaunched=.*Install Homestead\.cmd/);
+assert.match(releaseBuilder, /setup\.iss/);
+assert.match(read("install", "windows", "setup.iss"), /PrivilegesRequired=lowest/);
 assert.match(releaseBuilder, /homestead-windows-runtime\.zip/);
 assert.match(releaseBuilder, /ffmpeg-static\\ffmpeg\.exe/);
 assert.match(releaseBuilder, /ffprobe-static\\bin\\win32\\x64\\ffprobe\.exe/);

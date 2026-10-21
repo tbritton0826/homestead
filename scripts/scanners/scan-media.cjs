@@ -3,7 +3,7 @@ const path = require("path");
 const sharp = require("sharp");
 
 const projectRoot = path.join(__dirname, "..", "..");
-const dataRoot = path.join(projectRoot, "data");
+const dataRoot = path.resolve(process.env.HOMESTEAD_DATA_DIR || path.join(projectRoot, "data"));
 const setupConfigPath = path.join(dataRoot, "setup-config.json");
 const mediaIndexPath = path.join(dataRoot, "media-index.json");
 const youtubeIndexPath = path.join(dataRoot, "youtube-index.json");

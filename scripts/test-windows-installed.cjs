@@ -1,0 +1,25 @@
+const fs = require('node:fs'); const path = require('node:path'); const cp = require('node:child_process'); const assert = require('node:assert/strict');
+const root = path.resolve(process.argv[2]);
+assert(root.toLowerCase().startsWith(path.resolve(__dirname,'../work').toLowerCase()+path.sep), 'Use an isolated installation under this repository’s work folder.'); const runtime = JSON.parse(fs.readFileSync(path.join(root,'runtime.json'),'utf8').replace(/^\uFEFF/,''));
+const app = path.join(root,runtime.relativePath); const origin='http://127.0.0.1:'+runtime.port;
+(async()=>{
+ const p=await fetch(origin+'/api/platform').then(r=>r.json()); assert.equal(p.platform.edition,'free'); assert.equal(p.platform.installationId,runtime.instance);
+ assert.equal((await fetch(origin)).status,200);
+ const response=await fetch(origin+(p.platform.authEnabled?'/api/auth/login':'/api/accounts/complete-owner-setup'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'windows-test-owner',password:'isolated-preview-test-only',displayName:'Windows Test Owner'})}); assert.equal(response.status,200,await response.clone().text());
+ const cookie=response.headers.get('set-cookie').split(';')[0]; const headers={'Content-Type':'application/json',cookie};
+ const movies=path.join(root,'media','movies'); const movieDir=path.join(movies,'Windows Preview Test (2026)');fs.mkdirSync(movieDir,{recursive:true});
+ const file=path.join(movieDir,'Windows Preview Test (2026).mp4');
+ cp.execFileSync(path.join(app,'runtime-tools/ffmpeg.exe'),['-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=blue:s=320x180:d=2','-c:v','libx264','-pix_fmt','yuv420p','-y',file],{windowsHide:true,timeout:20000});
+ const config=await fetch(origin+'/api/setup-config',{headers}).then(r=>r.json());config.completed=true;config.enabledLibraries={movies:true};config.configuredEnabledLibraries={movies:true};config.folderMappings={movies:[movies]};
+ const saved=await fetch(origin+'/api/setup-config',{method:'POST',headers,body:JSON.stringify(config)});assert.equal(saved.status,200,await saved.clone().text());
+ const env={...process.env,NODE_ENV:'production',HOMESTEAD_DATA_DIR:path.join(root,'data'),MEDIA_ROOT:path.join(root,'media'),PATH:path.join(app,'runtime-tools')+';'+app+';'+process.env.SystemRoot+'\\System32'};
+ cp.execFileSync(path.join(app,'node.exe'),[path.join(app,'scripts/scanners/scan-media.cjs'),'--library','movies'],{cwd:app,env,windowsHide:true,timeout:60000});
+ const indexPath=path.join(root,'data','media-index.json');assert(fs.existsSync(indexPath));assert(!fs.existsSync(path.join(app,'data','media-index.json')));
+ const index=await fetch(origin+'/data/media-index.json',{headers}).then(r=>r.json());assert(JSON.stringify(index).includes('Windows Preview Test'));
+ const fileUrl=origin+'/api/file?path='+encodeURIComponent(file);const media=await fetch(fileUrl,{headers:{cookie,Range:'bytes=0-31'}});assert.equal(media.status,206,await media.clone().text());assert.equal((await media.arrayBuffer()).byteLength,32);await fetch(origin+'/api/subscription/playback',{method:'POST',headers,body:JSON.stringify({active:false})});
+ const probe=await fetch(origin+'/api/media/probe?path='+encodeURIComponent(file),{headers}).then(r=>r.json());assert.equal(probe.ok,true,JSON.stringify(probe));
+ assert.equal((await fetch(origin+'/api/livetv/channels',{headers})).status,402);
+ fs.writeFileSync(path.join(root,'data','update-preservation.txt'),'KEEP-DATA-EXACTLY');fs.writeFileSync(path.join(root,'media','update-preservation.txt'),'KEEP-MEDIA-EXACTLY');
+ fs.writeFileSync(path.join(root,'..','smoke-evidence.json'),JSON.stringify({edition:p.platform.edition,installationId:runtime.instance,originalRuntime:runtime.relativePath,owner:'windows-test-owner',file,indexPath,checks:['frontend','owner setup','bundled ffmpeg','bundled ffprobe','scanner external data','index API','media range playback','paid feature lock']},null,2));
+ console.log('Windows installed runtime smoke checks passed: Free startup, owner setup, bundled media tools, scan, playback range, and paid-feature lock.');
+})().catch(e=>{console.error(e);process.exitCode=1});

@@ -1,6 +1,7 @@
+param([string]$InstallRoot = $PSScriptRoot)
 $ErrorActionPreference = "Stop"
-$installRoot = Join-Path $env:LOCALAPPDATA "Homestead Free"
-$expectedRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Homestead Free"))
+$installRoot = [IO.Path]::GetFullPath($InstallRoot)
+$expectedRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 
 if ([IO.Path]::GetFullPath($installRoot) -ne $expectedRoot) {
   throw "Refusing to uninstall an unexpected folder."
@@ -16,7 +17,7 @@ if (Test-Path -LiteralPath $desktopShortcut) { Remove-Item -LiteralPath $desktop
 $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HomesteadFree"
 if (Test-Path -LiteralPath $uninstallKey) { Remove-Item -LiteralPath $uninstallKey -Recurse -Force }
 
-Get-ChildItem -LiteralPath $installRoot -Force | Where-Object { $_.Name -notin @("data", "media") } | ForEach-Object {
+Get-ChildItem -LiteralPath $installRoot -Force | Where-Object { $_.Name -notin @("data", "media", "logs") } | ForEach-Object {
   Remove-Item -LiteralPath $_.FullName -Recurse -Force
 }
 

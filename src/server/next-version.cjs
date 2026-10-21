@@ -263,6 +263,7 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
     res.json({ ok: true, platform: {
       version: "0.6.8.64",
       edition: subscription.tier,
+      installationId: String(process.env.HOMESTEAD_INSTALLATION_ID || ""),
       planLabel: subscription.name,
       publicOrigin: configuredOrigin,
       publicHostnameConfigured: Boolean(configuredOrigin),

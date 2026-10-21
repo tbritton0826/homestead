@@ -4,7 +4,7 @@ import path from "path";
 const PROJECT_ROOT = process.cwd();
 const MEDIA_ROOT = process.env.MEDIA_ROOT || "/media";
 const YOUTUBE_CREATORS_ROOT = path.join(MEDIA_ROOT, "youtube", "creators");
-const DATA_ROOT = path.join(PROJECT_ROOT, "data");
+const DATA_ROOT = path.resolve(process.env.HOMESTEAD_DATA_DIR || path.join(PROJECT_ROOT, "data"));
 const OUTPUT_FILE = path.join(DATA_ROOT, "youtube-index.json");
 
 const VIDEO_EXTS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"];

@@ -76,7 +76,7 @@ const ADULT_PERSON_FULL_FETCH_TIMEOUT_MS = Math.min(
   60000,
   Math.max(5000, normalizeTimeoutMs(process.env.HOMESTEAD_ADULT_FULL_FETCH_TIMEOUT_MS, 20000)),
 );
-const dataDir = path.join(__dirname, "data");
+const dataDir = path.resolve(process.env.HOMESTEAD_DATA_DIR || path.join(__dirname, "data"));
 const stationRegistryPath = path.join(dataDir, "stations.json");
 const activityJobsPath = path.join(dataDir, "activity-jobs.json");
 const activityJobStore = createActivityJobStore({ filePath: activityJobsPath });
@@ -2625,7 +2625,7 @@ async function sendHeicPreview(res, filePath, options = {}) {
   }
 }
 
-const nativeImagePreview = require("./src/server/image-preview.cjs").createImagePreviewer(path.join(__dirname, "data", "native-image-previews"));
+const nativeImagePreview = require("./src/server/image-preview.cjs").createImagePreviewer(path.join(dataDir, "native-image-previews"));
 app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
   const filePath = resolveHomesteadFilePath(String(req.query.path || "").trim());
 
@@ -7167,11 +7167,7 @@ registerBookLocalFiles(app, {
 });
 
 function buildLiveMediaIndex() {
-  const indexPath = path.join(
-    __dirname,
-    "data",
-    "media-index.json"
-  );
+  const indexPath = path.join(dataDir, "media-index.json");
   const index = readJsonFile(indexPath, {});
   const libraries = {
     ...(index.libraries || {}),

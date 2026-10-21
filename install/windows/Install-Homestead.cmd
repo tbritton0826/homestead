@@ -3,7 +3,7 @@ setlocal
 title Homestead Free Installer
 echo Starting Homestead Free setup...
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Homestead.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Homestead.ps1" %*
 set "install_result=%errorlevel%"
 if not "%install_result%"=="0" (
   echo.
