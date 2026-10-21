@@ -1005,6 +1005,18 @@ const libraryDirs = overrideFolder
 
   const entities = {};
 
+  if (libraryId === "pets") {
+    // Use the live catalog for rebuilds too; shared folders never become profiles.
+    const { createPetProfiles } = require("../../src/server/pet-profiles.cjs");
+    for (const pet of createPetProfiles({ roots: () => libraryDirs }).list()) {
+      entities[pet.id] = { ...pet, library: "pets", folderName: pet.id, path: toPublicPath(pet.sourcePath),
+        poster: pet.poster ? toPublicPath(pet.poster) : undefined, banner: pet.banner ? toPublicPath(pet.banner) : undefined,
+        files: pet.files.map(file => ({ ...file, sourcePath: file.sourcePath || file.path, path: toPublicPath(file.path) })),
+        itemCount: pet.files.length, counts: { images: pet.files.filter(file => file.type === "image").length, total: pet.files.length } };
+    }
+    return entities;
+  }
+
   for (const libraryDir of libraryDirs) {
     console.log("SCANNING", libraryId, "->", libraryDir);
 
@@ -1517,6 +1529,7 @@ async function scanSelectedLibraries() {
 }
 
 module.exports = {
+  scanLibrary,
   extractLibraryIdentityYear,
   stripLibraryIdentityYear,
   normalizeLibraryItemKey,

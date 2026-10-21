@@ -23,7 +23,7 @@ const { normalizeTimeoutMs, runWithTimeout } = require("./src/server/async-timeo
 const { createProfileFolderService, registerProfileFolderRoutes, canEditProfileFolder } = require("./src/server/profile-media-folders.cjs");
 const { registerBookLocalFiles } = require("./src/server/book-local-files.cjs");
 const { registerNativeInventory, createInventoryRequests, inventoryPatch } = require("./src/server/native-inventory.cjs");
-const { createPetProfiles, registerPetProfiles } = require("./src/server/pet-profiles.cjs");
+const { createAsyncPetProfiles, registerPetProfiles } = require("./src/server/pet-profiles.cjs");
 const { createComfyBridge, registerComfyBridge } = require("./src/server/comfy-bridge.cjs");
 const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
 const { parseTesseractTsv, tsvToReadableText, parsePersonalScheduleText, parsePositionedSchedule, applyCellTextRecovery, hoursBetween: recognizedScheduleHoursBetween } = require("./src/server/schedule-recognition.cjs");
@@ -244,18 +244,26 @@ const homesteadAccess = registerNextVersionRoutes({
 // Product entitlements are enforced at the API boundary. Hiding navigation is
 // useful UX, but it is never the security boundary for a paid feature.
 let petScanTimer;
+function schedulePetPhotoScan(delay = 2000) {
+  clearTimeout(petScanTimer);
+  petScanTimer = setTimeout(() => {
+    // One index writer handles both libraries. A busy scanner must not discard
+    // the reconciliation requested after an original moves between libraries.
+    runScannerCommands([{ script: "scan-media.cjs", args: ["--libraries", "pets,photos"] }], error => {
+      if (error?.code === "SCAN_ALREADY_RUNNING") schedulePetPhotoScan(Math.min(delay * 2, 60000));
+      else if (error) console.warn("[pets] Scan could not complete; saved originals are retained. Rescan Pets and Photos.");
+    });
+  }, delay);
+  petScanTimer.unref();
+}
 registerPetProfiles(app, {
   express, access: homesteadAccess, config: readSetupConfig,
-  service: createPetProfiles({ roots: () => {
+  service: createAsyncPetProfiles({ photoRoots: () => require("./src/server/photo-library.cjs").photoRoots(readSetupConfig()), roots: () => {
     const config = readSetupConfig();
     const mapped = normalizeFolderList(config.folderMappings?.pets);
     return mapped.length ? mapped : [path.join(process.env.MEDIA_ROOT || config.mediaRoot || "/media", "pets")];
   } }),
-  changed: () => {
-    clearTimeout(petScanTimer);
-    petScanTimer = setTimeout(() => { Promise.resolve(runMediaScan("pets")).catch(() => console.warn("[pets] Library scan could not complete; pet data remains saved.")); }, 2000);
-    petScanTimer.unref();
-  },
+  changed: () => schedulePetPhotoScan(),
 });
 registerComfyBridge(app, {
   access: homesteadAccess,

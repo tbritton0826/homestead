@@ -1,10 +1,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { createPetPhotoGroups, groupContainer } = require('./pet-photo-groups.cjs');
 const { relativeParts } = require('./profile-media-folders.cjs');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const kinds = { photos: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif'], videos: ['mp4', 'mov', 'm4v', 'webm', 'mkv'], documents: ['pdf', 'txt', 'md', 'doc', 'docx', 'rtf'], poster: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'], banner: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'] };
-function createPetProfiles({ roots }) {
+function createPetProfiles({ roots, photoRoots }) {
   function directory(root, relative = '', create = false) {
     let current = fs.realpathSync(root);
     for (const part of relativeParts(relative)) {
@@ -15,8 +16,9 @@ function createPetProfiles({ roots }) {
     }
     return current;
   }
-  const availableRoots = () => roots().filter(root => { try { return fs.statSync(root).isDirectory(); } catch { return false; } });
+  const availableRoots = () => roots().filter(root => { try { return fs.lstatSync(root).isDirectory(); } catch { return false; } });
   function resolve(id) {
+    if (groupContainer(id)) throw fail('Shared photo folders are not pet profiles.', 404);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,119}$/.test(id) || id.includes('..')) throw fail('Invalid pet identity.');
     const found = availableRoots().filter(root => fs.existsSync(path.join(root, id)));
     if (found.length !== 1) throw fail('Pet folder is missing or ambiguous.', 404);
@@ -45,12 +47,29 @@ function createPetProfiles({ roots }) {
       }
     }
     visit(folder);
-    return { id, name: info.name || id, sourcePath: folder, folderPath: folder, metadata: info, poster: info.poster, banner: info.banner, files };
+    const artwork = role => {
+      const selected = require('./profile-import-artwork.cjs').selectedProfileArtwork(folder, stored, role);
+      const saved = typeof info[role] === 'string' ? info[role] : info[role]?.path;
+      const names = role === 'poster' ? ['poster', 'folder', 'cover'] : ['banner', 'backdrop', 'fanart'];
+      const candidates = [selected?.file, saved, ...names.flatMap(name => ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].map(ext => `${name}.${ext}`))].filter(Boolean);
+      for (const candidate of candidates) {
+        const file = path.isAbsolute(candidate) ? candidate : path.join(folder, candidate);
+        try {
+          const real = fs.realpathSync(file);
+          if (real.startsWith(folder + path.sep) && fs.lstatSync(file).isFile()) return file;
+        } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error; }
+      }
+      return undefined;
+    };
+    return { id, name: info.name || id, sourcePath: folder, folderPath: folder, metadata: info,
+      relationships: stored.relationships || {}, status: stored.status || info.relationshipStatus || null,
+      poster: artwork('poster'), banner: artwork('banner'), files: files.filter(file => !/^(poster|banner|cover|folder|backdrop|fanart)\./i.test(file.name)) };
+
   }
   function list() {
     const ids = new Set();
     for (const root of availableRoots()) for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (entry.isDirectory() && !entry.name.startsWith('.')) ids.add(entry.name);
+      if (entry.isDirectory() && !entry.name.startsWith('.') && !groupContainer(entry.name)) ids.add(entry.name);
     }
     return [...ids].sort().map(id => record(id));
   }
@@ -108,7 +127,16 @@ function createPetProfiles({ roots }) {
     if (['poster', 'banner'].includes(kind)) { const info = metadata(profile); info[kind] = destination; info.metadata = { ...info.metadata, [kind]: destination }; writeMetadata(profile, info); }
     return { ok: true, requestId: input.requestId, folder, path: destination };
   }
-  return { list, record, create, folders, upload };
+  const shared = createPetPhotoGroups({ roots, profiles: list, photoRoots });
+  return { list: () => shared.link(list()), record: id => shared.link([record(id)])[0], create, folders,
+    ...shared, upload: (id, input, bytes) => {
+      if (!input.petIds) return upload(id, input, bytes);
+      if (input.kind !== 'photos') throw fail('Multiple pets can be assigned to photos only.');
+      let ids; try { ids = typeof input.petIds === 'string' ? JSON.parse(input.petIds) : input.petIds; } catch { throw fail('Invalid photo membership.'); }
+      if (!Array.isArray(ids) || !ids.includes(id)) throw fail('Include the selected pet in this photo.');
+      return shared.upload({ ...input, petIds: ids }, bytes);
+    } };
+
 }
 function registerPetProfiles(app, { express, service, access, config, changed = () => {} }) {
   const gate = (write = false) => (req, res, next) => {
@@ -117,13 +145,40 @@ function registerPetProfiles(app, { express, service, access, config, changed = 
     if (write && !['owner', 'admin'].includes(user?.role)) return res.status(403).json({ ok: false, message: 'This pet library is read-only.' });
     next();
   };
-  const wrap = fn => (req, res) => { try { res.set('Cache-Control', 'no-store'); res.json(fn(req)); } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'Pet operation failed.' }); } };
+  const wrap = fn => async (req, res) => { try { res.set('Cache-Control', 'no-store'); res.json(await fn(req)); } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'Pet operation failed.' }); } };
   const session = access.requireSession, feature = access.requireFeature('pets');
-  app.get('/api/pets', session, feature, gate(), wrap(req => ({ ok: true, canEdit: ['owner', 'admin'].includes(access.accessContext(req).user?.role), records: service.list() })));
-  app.post('/api/pets', session, feature, gate(true), wrap(req => { const record = service.create(req.body || {}); changed(); return { ok: true, record }; }));
-  app.get('/api/pets/:id', session, feature, gate(), wrap(req => ({ ok: true, record: service.record(req.params.id) })));
+  app.get('/api/pets', session, feature, gate(), wrap(async req => ({ ok: true, canEdit: ['owner', 'admin'].includes(access.accessContext(req).user?.role), records: await service.list() })));
+  app.post('/api/pets', session, feature, gate(true), wrap(async req => { const record = await service.create(req.body || {}); changed(); return { ok: true, record }; }));
+  const photosAllowed = req => access.canAccessLibrary(req, 'photos');
+  app.get('/api/pets/photo-groups', session, feature, gate(), wrap(async () => ({ ok: true, groups: await service.groups() })));
+  app.put('/api/pets/photo-groups/:groupId', session, feature, gate(true), wrap(async req => { const result = await service.setMembers(req.params.groupId, req.body?.petIds || []); changed(); return result; }));
+  app.get('/api/pets/photo-sources', session, feature, gate(true), wrap(async req => ({ ok: true, files: await service.catalog(photosAllowed(req)) })));
+  app.post('/api/pets/photo-moves', session, feature, gate(true), wrap(req => service.plan(req.body || {}, photosAllowed(req))));
+  app.post('/api/pets/photo-moves/:moveId/apply', session, feature, gate(true), wrap(async req => { const result = await service.apply(req.params.moveId, photosAllowed(req)); changed(); return result; }));
+  app.get('/api/pets/:id', session, feature, gate(), wrap(async req => ({ ok: true, record: await service.record(req.params.id) })));
   app.get('/api/pets/:id/folders', session, feature, gate(true), wrap(req => service.folders(req.params.id, req.query.kind, req.query.parent)));
   app.post('/api/pets/:id/folders', session, feature, gate(true), wrap(req => service.folders(req.params.id, req.body.kind, req.body.parent, req.body.name)));
-  app.post('/api/pets/:id/media', session, feature, gate(true), express.raw({ type: 'application/octet-stream', limit: '64mb' }), wrap(req => { const receipt = service.upload(req.params.id, req.query, req.body); changed(); return receipt; }));
+  app.post('/api/pets/:id/media', session, feature, gate(true), express.raw({ type: 'application/octet-stream', limit: '64mb' }), wrap(async req => { const receipt = await service.upload(req.params.id, req.query, req.body); changed(); return receipt; }));
 }
-module.exports = { createPetProfiles, registerPetProfiles };
+// Disk scans and content verification must not block the server's connection
+// probe or playback requests. Serialize file jobs; reject a saturated queue.
+function createAsyncPetProfiles(options) {
+  const { Worker } = require('node:worker_threads');
+  let pending = Promise.resolve(), count = 0;
+  function invoke(method, args) {
+    if (count >= 12) return Promise.reject(fail('Pet photos are busy. Retry after the current operation finishes.', 503));
+    count++;
+    const run = () => new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, 'pet-profile-worker.cjs'), {
+        workerData: { roots: options.roots(), photoRoots: options.photoRoots?.() || [], method, args }
+      });
+      worker.once('message', result => { if (result.error) reject(fail(result.error.message, result.error.status)); else resolve(result.value); });
+      worker.once('error', () => reject(fail('Pet operation was interrupted. Retry the same operation identity.', 503)));
+      worker.once('exit', code => { if (code !== 0) reject(fail('Pet operation was interrupted. Retry the same operation identity.', 503)); });
+    });
+    const result = pending.then(run); pending = result.catch(() => {});
+    return result.finally(() => { count--; });
+  }
+  return Object.fromEntries(['list', 'record', 'create', 'folders', 'upload', 'groups', 'setMembers', 'catalog', 'plan', 'apply'].map(method => [method, (...args) => invoke(method, args)]));
+}
+module.exports = { createPetProfiles, createAsyncPetProfiles, registerPetProfiles };
