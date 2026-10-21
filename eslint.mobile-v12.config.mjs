@@ -1,6 +1,9 @@
 import js from '@eslint/js';
 import globals from 'globals';
 export default [
+  { files: ["src/server/pet-photo-groups.cjs", "src/server/pet-profile-worker.cjs", "scripts/test-v318.cjs"], languageOptions: { sourceType: "commonjs", globals: globals.node }, rules: js.configs.recommended.rules },
+  { files: ["scripts/verify-v318-browser.mjs"], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
+  { files: ["src/utils/client-request-id.js"], languageOptions: { globals: globals.browser }, rules: js.configs.recommended.rules },
   { files: ["scripts/test-v317.cjs"], languageOptions: { sourceType: "commonjs", globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ["src/utils/media-folder-tabs.js", "scripts/verify-v317-browser.mjs"], languageOptions: { globals: globals.node }, rules: js.configs.recommended.rules },
   { files: ["src/server/profile-import-artwork.cjs", "scripts/test-profile-wizard-artwork.cjs"], languageOptions: { sourceType: "commonjs", globals: globals.node }, rules: js.configs.recommended.rules },

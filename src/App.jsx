@@ -1,3 +1,4 @@
+import PetPhotoOrganizer from "./components/PetPhotoOrganizer.jsx";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { prepareTcgPhotos } from "./utils/tcg-photos.js";
@@ -25080,7 +25081,22 @@ function PetsPage({ mediaIndex, openImageViewer, setActiveLibrary, setupConfig }
   const [selectedPet, setSelectedPet] = useState(null);
   const [tab, setTab] = useState("overview");
 
-const scannedPets = mediaIndex?.libraries?.pets || {};
+const [livePets, setLivePets] = useState(null);
+const [organizing, setOrganizing] = useState(false);
+async function refreshPetPhotos() {
+  const response = await fetch("/api/pets"), data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.message || "Pets could not refresh.");
+  setLivePets(data);
+}
+useEffect(() => { let active = true; fetch("/api/pets").then(async response => {
+  const data = await response.json(); if (response.ok && data.ok && active) setLivePets(data);
+}).catch(() => {}); return () => { active = false; }; }, []);
+const scannedPets = livePets ? Object.fromEntries(livePets.records.map(pet => [pet.id, { ...pet,
+  poster: pet.poster ? `/api/file?path=${encodeURIComponent(pet.poster)}` : undefined,
+  banner: pet.banner ? `/api/file?path=${encodeURIComponent(pet.banner)}` : undefined,
+  metadata: { ...pet.metadata, poster: pet.poster ? `/api/file?path=${encodeURIComponent(pet.poster)}` : undefined, banner: pet.banner ? `/api/file?path=${encodeURIComponent(pet.banner)}` : undefined },
+  files: pet.files.map(file => ({ ...file, sourcePath: file.sourcePath || file.path, path: `/api/file?path=${encodeURIComponent(file.path)}` }))
+}])) : mediaIndex?.libraries?.pets || {};
 
 const [playingVideo, setPlayingVideo] = useState(null);
 
@@ -25103,18 +25119,22 @@ const pets = Object.values(scannedPets).map((petFolder) => {
   };
 });
 
-  if (selectedPet) {
+  const currentPet = pets.find(pet => pet.id === selectedPet?.id) || selectedPet;
+  const organizer = organizing && <PetPhotoOrganizer initialPetId={selectedPet?.id} onClose={() => setOrganizing(false)} onChanged={refreshPetPhotos} />;
+  if (currentPet) {
     return (
       <div className="family-page">
         <FamilySectionTabs activeLibrary="pets" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
+        {organizer}
+        {livePets?.canEdit && <button className="secondary-button" type="button" onClick={() => setOrganizing(true)}>Organize pet photos</button>}
         <section className="family-hero">
-          <img src={selectedPet.banner} alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
+          <img src={currentPet.banner} alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
           <div className="family-hero-content">
             <button className="secondary-button" onClick={() => setSelectedPet(null)}>
               ← Back to Pets
             </button>
-            <h1>{selectedPet.name}</h1>
-            <p>{selectedPet.breed} • {selectedPet.species}</p>
+            <h1>{currentPet.name}</h1>
+            <p>{currentPet.breed} • {currentPet.species}</p>
           </div>
         </section>
 
@@ -25132,12 +25152,12 @@ const pets = Object.values(scannedPets).map((petFolder) => {
           <div className="panel">
             <h3>Pet Overview</h3>
             <div className="metadata-grid">
-              <div><strong>Name</strong><p>{selectedPet.name}</p></div>
-              <div><strong>Species</strong><p>{selectedPet.species}</p></div>
-              <div><strong>Breed</strong><p>{selectedPet.breed}</p></div>
-              <div><strong>Sex</strong><p>{selectedPet.sex}</p></div>
-              <div><strong>Age</strong><p>{selectedPet.age}</p></div>
-              <div><strong>Weight</strong><p>{formatHomesteadWeight(selectedPet.weight)}</p></div>
+              <div><strong>Name</strong><p>{currentPet.name}</p></div>
+              <div><strong>Species</strong><p>{currentPet.species}</p></div>
+              <div><strong>Breed</strong><p>{currentPet.breed}</p></div>
+              <div><strong>Sex</strong><p>{currentPet.sex}</p></div>
+              <div><strong>Age</strong><p>{currentPet.age}</p></div>
+              <div><strong>Weight</strong><p>{formatHomesteadWeight(currentPet.weight)}</p></div>
             </div>
           </div>
         )}
@@ -25145,8 +25165,8 @@ const pets = Object.values(scannedPets).map((petFolder) => {
         {tab === "meals" && (
           <div className="panel">
             <h3>Meals</h3>
-            <p><strong>Breakfast:</strong> {selectedPet.meals.breakfast}</p>
-            <p><strong>Dinner:</strong> {selectedPet.meals.dinner}</p>
+            <p><strong>Breakfast:</strong> {currentPet.meals.breakfast}</p>
+            <p><strong>Dinner:</strong> {currentPet.meals.dinner}</p>
           </div>
         )}
 
@@ -25159,14 +25179,14 @@ const pets = Object.values(scannedPets).map((petFolder) => {
 
         {tab === "photos" && (
   <MediaGallery
-    files={(selectedPet.files || []).filter((file) => file.type === "image")}
+    files={(currentPet.files || []).filter((file) => file.type === "image")}
     openImageViewer={openImageViewer}
   />
 )}
 
 {tab === "videos" && (
   <div className="media-gallery">
-    {(selectedPet.files || [])
+    {(currentPet.files || [])
       .filter(
         (file) =>
           file.type === "video" ||
@@ -25235,6 +25255,8 @@ const pets = Object.values(scannedPets).map((petFolder) => {
   return (
     <div className="family-page">
       <FamilySectionTabs activeLibrary="pets" setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
+        {organizer}
+        {livePets?.canEdit && <button className="secondary-button" type="button" onClick={() => setOrganizing(true)}>Organize pet photos</button>}
 
       <section className="family-hero">
         <img src="/media/pets/banner.jpg" alt="" onError={(event) => { event.currentTarget.style.visibility = "hidden"; }} />
@@ -27285,6 +27307,16 @@ async function moveToProfile(item, targetLibrary) {
 }
 
 
+  useEffect(() => {
+    const handle = event => {
+      if (event.detail?.library === activeTab && event.detail?.action === "add-album-media" && selectedAlbum) {
+        setNewFolderName(selectedAlbum.title || selectedAlbum.name || ""); setShowAddMedia(true);
+      }
+    };
+    window.addEventListener("homestead-page-action", handle);
+    return () => window.removeEventListener("homestead-page-action", handle);
+  }, [activeTab, selectedAlbum]);
+
   const addMediaModal = showAddMedia ? (
         <div className="adult-loose-media-modal" role="dialog" aria-modal="true" aria-label={`Add adult ${itemLabel}s`}>
           <button className="adult-loose-media-backdrop" type="button" aria-label="Close" onClick={() => !addingMedia && setShowAddMedia(false)} />
@@ -27345,13 +27377,12 @@ async function moveToProfile(item, targetLibrary) {
   if (!isVideo) return <div className="generic-page adult-photos-library">
     <AdultSectionTabs activeLibrary={activeTab} setActiveLibrary={setActiveLibrary} setupConfig={setupConfig} />
     {selectedAlbum && <div className="adult-photo-album-actions">
-      <button className="secondary-button" type="button" onClick={() => { setNewFolderName(selectedAlbum.title || selectedAlbum.name || ""); setShowAddMedia(true); }}>＋ Add Media</button>
       <div className="adult-album-move-menu-wrap">
         <button className="secondary-button" type="button" aria-expanded={moveMenuOpen} onClick={() => setMoveMenuOpen((open) => !open)}>Move To ▾</button>
         {moveMenuOpen && <div className="adult-album-move-menu">{["personal", "performers", "celebrities"].map((target) => <button key={target} type="button" onClick={() => { setMoveMenuOpen(false); moveToProfile(selectedAlbum, target); }}>{target === "personal" ? "Personal" : target === "performers" ? "Performer" : "Celebrity"}</button>)}</div>}
       </div>
     </div>}
-    <PhotosPage mediaIndex={{ libraries: { adultPhotos: Object.fromEntries(albums.map((album) => [album.id, album])) } }} libraryKey="adultPhotos" appearance={appearance} albumId={albumId} onAlbumChange={onAlbumChange} openImageViewer={openImageViewer} />
+    <PhotosPage externalNavigation externalCount mediaIndex={{ libraries: { adultPhotos: Object.fromEntries(albums.map((album) => [album.id, album])) } }} libraryKey="adultPhotos" appearance={appearance} albumId={albumId} onAlbumChange={onAlbumChange} openImageViewer={openImageViewer} />
     {addMediaModal}
   </div>;
 
@@ -49405,7 +49436,9 @@ const floatingActions = {
         type="button"
         aria-label="Add to Homestead"
         onClick={() => {
-          setShowAddModal(true);
+          if (suppressGlobalImport && ["adultPhotos", "adultVideos"].includes(activeLibrary)) {
+            window.dispatchEvent(new CustomEvent("homestead-page-action", { detail: { library: activeLibrary, action: "add-album-media" } }));
+          } else setShowAddModal(true);
         }}
       >
         <span aria-hidden="true">＋</span><strong>Add</strong>
@@ -49666,7 +49699,7 @@ const floatingActions = {
     ) : activeLibrary === "youtube" ? (
       <YouTubePage setHideSidebar={setHideSidebar} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} mediaIndex={mediaIndex} watchlist={watchlist} setWatchlist={setWatchlist} onOpenYouTubeAppearance={() => { setMediaAppearanceInitialTab("library"); setMediaAppearanceOpen(true); }}/>
 	) : activeLibrary === "photos" ? (
-	  <PhotosPage mediaIndex={mediaIndex} setNavBackAction={setNavBackAction} openImageViewer={openImageViewer} appearance={effectiveMediaAppearance} albumId={photoAppearanceAlbumId} onAlbumChange={setPhotoAlbumId} />
+	  <PhotosPage mediaIndex={mediaIndex} setNavBackAction={setNavBackAction} setContextHeaderStats={setContextHeaderStats} externalCount openImageViewer={openImageViewer} appearance={effectiveMediaAppearance} albumId={photoAppearanceAlbumId} onAlbumChange={setPhotoAlbumId} />
 	) : activeLibrary === "music" ? (
 	  <MusicPage mediaIndex={mediaIndex} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setHideLibraryHeader={setHideLibraryHeader} setHideSidebar={setHideSidebar} selectedArtist={selectedArtist} setSelectedArtist={setSelectedArtist} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} setGlobalAudioTrack={setGlobalAudioTrack} metadataMatchesVersion={metadataMatchesVersion}/>
 	) : activeLibrary === "books" ? (

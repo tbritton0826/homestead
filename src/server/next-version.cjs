@@ -289,6 +289,15 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
     return res.json({ ok: true, active: true });
   });
 
+  // Small authenticated probe, isolated from account/subscription presentation.
+  // Re-read the saved session on each check so revocation is never cached.
+  app.get("/api/auth/connection", (req, res) => {
+    const state = ensureAccounts();
+    const user = currentUser(req);
+    res.setHeader("Cache-Control", "private, no-store");
+    if (state.authEnabled && !user) return res.status(401).json({ ok: false, message: "Sign in to Homestead." });
+    res.json({ ok: true, authEnabled: state.authEnabled, user: user ? { id: user.id } : null });
+  });
   app.get("/api/auth/session", (req, res) => {
     const state = ensureAccounts();
     const cookies = parseCookies(req);

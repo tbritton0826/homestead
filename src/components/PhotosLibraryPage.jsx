@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { photoUrl } from "./PhotoLibraryPicker.jsx";
 import { MediaFolderTabs, useMediaFolders } from "./MediaFolderTabs.jsx";
 
-export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", appearance = {}, albumId = "", onAlbumChange, openImageViewer, setNavBackAction }) {
+export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", appearance = {}, albumId = "", onAlbumChange, openImageViewer, setNavBackAction, externalNavigation = false, externalCount = false, setContextHeaderStats }) {
   const [visible, setVisible] = useState(120);
   const [fallbackPhoto, setFallbackPhoto] = useState(null);
   const albums = useMemo(() => Object.values(mediaIndex?.libraries?.[libraryKey] || {}).sort((a, b) => String(a.name || a.title).localeCompare(String(b.name || b.title))), [mediaIndex, libraryKey]);
@@ -15,14 +15,18 @@ export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", a
     setNavBackAction?.(album ? () => () => onAlbumChange?.("") : null);
     return () => setNavBackAction?.(null);
   }, [albumId, setNavBackAction, onAlbumChange]);
+  useEffect(() => {
+    setContextHeaderStats?.(album ? [`${photos.length} photos`] : null);
+    return () => setContextHeaderStats?.(null);
+  }, [albumId, photos.length, setContextHeaderStats]);
   const covers = appearance.albumCovers || {};
   return <div className="photos-library-page photos-poster-library">
-    {(album || appearance.bannerImage) && <header className={`photos-library-hero ${appearance.bannerImage ? "has-banner" : ""}`}>
+    {(album || appearance.bannerImage) && <header className={`photos-library-hero ${album ? "photos-album-heading" : ""} ${appearance.bannerImage ? "has-banner" : ""}`}>
       {appearance.bannerImage && <img className="photos-library-banner" src={appearance.bannerImage} alt="" style={{ opacity: appearance.bannerOpacity ?? 0.7, objectPosition: appearance.bannerPosition || "center", objectFit: appearance.bannerFit || "cover" }} />}
       {album && <div className="photos-library-hero-content">
-        {album && <button className="secondary-button" type="button" onClick={() => onAlbumChange?.("")}>← Albums</button>}
+        {album && !externalNavigation && !setNavBackAction && <button className="secondary-button" type="button" onClick={() => onAlbumChange?.("")}>← Albums</button>}
         <h2>{album?.name || "Photo Albums"}</h2>
-        <p>{album ? `${photos.length} photos` : `${albums.length} albums`}</p>
+        {!externalCount && <span className="photo-count">{photos.length} photos</span>}
       </div>}
     </header>}
     {!album ? <div className="photos-poster-grid">
