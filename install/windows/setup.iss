@@ -19,6 +19,7 @@ OutputBaseFilename=@BASENAME@
 Compression=zip
 SolidCompression=no
 WizardStyle=modern
+SetupIconFile=@ENVELOPE@\homestead.ico
 SetupLogging=yes
 CloseApplications=no
 RestartApplications=no

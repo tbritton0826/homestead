@@ -84,6 +84,7 @@ try {
     }
     throw
   }
+  Copy-Item -LiteralPath (Join-Path $runtimeTarget 'public\homestead.ico') -Destination (Join-Path $installRoot 'homestead.ico') -Force
   if (-not $SkipShellIntegration) {
     $programsFolder = Join-Path ([Environment]::GetFolderPath('Programs')) 'Homestead Free'
     New-Item -ItemType Directory -Force -Path $programsFolder | Out-Null
@@ -93,6 +94,7 @@ try {
       $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
       $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $installRoot $Script) + '"'
       $shortcut.WorkingDirectory = $installRoot
+      $shortcut.IconLocation = (Join-Path $installRoot 'homestead.ico') + ",0"
       $shortcut.Save()
     }
     New-HomesteadShortcut (Join-Path $programsFolder 'Homestead Free.lnk') 'Start-Homestead.ps1'
@@ -101,7 +103,7 @@ try {
     New-HomesteadShortcut (Join-Path $programsFolder 'Uninstall Homestead Free.lnk') 'Uninstall-Homestead.ps1'
     $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HomesteadFree'
     New-Item -Path $uninstallKey -Force | Out-Null
-    foreach ($item in @{DisplayName='Homestead Free'; DisplayVersion=$release.releaseVersion; Publisher='Homestead'; InstallLocation=$installRoot; UninstallString=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'Uninstall-Homestead.ps1') + '"')}.GetEnumerator()) {
+    foreach ($item in @{DisplayName='Homestead Free'; DisplayVersion=$release.releaseVersion; Publisher='Homestead'; InstallLocation=$installRoot; DisplayIcon=(Join-Path $installRoot 'homestead.ico'); UninstallString=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'Uninstall-Homestead.ps1') + '"')}.GetEnumerator()) {
       Set-ItemProperty -Path $uninstallKey -Name $item.Key -Value $item.Value
     }
     Set-ItemProperty -Path $uninstallKey -Name NoModify -Value 1 -Type DWord

@@ -123,7 +123,7 @@ function getPlayableMediaUrl(item = {}, preview = {}) {
 }
 
 
-const DEFAULT_HOMESTEAD_APP_ICON = "/assets/images/homestead-icon.png";
+const DEFAULT_HOMESTEAD_APP_ICON = "/homestead-icon.png";
 
 function getHomesteadBrandingVersion(source = {}) {
   const branding = source?.branding || source || {};
@@ -16884,7 +16884,14 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
   );
 }
 
-function SetupWizard({ onComplete, subscription = null }) {
+function subscriptionIncludesLibrary(subscription, id) {
+  const key = String(id || "").toLowerCase();
+  if (["movies", "tvshows", "music", "books", "youtube"].includes(key)) return true;
+  return subscription?.libraryAccess?.[key] === true;
+}
+
+function SetupWizard({ onComplete, subscription = null, storage = null }) {
+  const [folderCheck, setFolderCheck] = useState({ busy: false, results: [] });
   const TOTAL_STEPS = 10;
   const integrationsAvailable = subscription?.features?.externalIntegrations === true;
   const [step, setStep] = useState(1);
@@ -16907,7 +16914,7 @@ function SetupWizard({ onComplete, subscription = null }) {
     10: "Ready",
   };
 
-  const defaultFolderPaths = {
+  const defaultFolderPaths = storage?.folderDefaults || {
     movies: "/media/movies",
     tvshows: "/media/tv",
     liveTV: "/media/livetv/recordings",
@@ -16927,8 +16934,8 @@ function SetupWizard({ onComplete, subscription = null }) {
     { id: "tvshows", icon: "📺", label: "TV Shows", description: "Shows, seasons, episodes, collections, watch orders, and playback.", stage: "Core" },
     { id: "music", icon: "🎵", label: "Music", description: "Artists, albums, songs, videos, playlists, and listening progress.", stage: "Core" },
     { id: "books", icon: "📚", label: "Books", description: "Books, authors, series, EPUB reading, and reading progress.", stage: "Core" },
-    { id: "photos", icon: "🖼️", label: "Photos", description: "Local photo browsing with Family and Cloud connections later.", stage: "Core" },
-    { id: "youtube", icon: "▶️", label: "YouTube", description: "Creators, series, seasons, archived videos, and TubeArchivist.", stage: "Optional" },
+    { id: "photos", icon: "🖼️", label: "Photos", description: "Photo albums and local photos in your Media library.", stage: "Core" },
+    { id: "youtube", icon: "▶️", label: "YouTube", description: "Creators, series, seasons, and locally archived videos.", stage: "Optional" },
     { id: "liveTV", icon: "📡", label: "Live TV", description: "IPTV, M3U/EPG guide data, channels, DVR, and recordings.", stage: "Optional" },
     { id: "family", icon: "👪", label: "Family", description: "Family Archive, profiles, tree, pets, reviewed schedule imports, calendar, and saved recipes.", stage: "Optional" },
     { id: "cloud", icon: "☁️", label: "Cloud", description: "Local and connected cloud files. Provider support remains optional.", stage: "Preview" },
@@ -17112,9 +17119,14 @@ function SetupWizard({ onComplete, subscription = null }) {
     scanOnFinish: true,
   });
 
-  const enabledLibraryEntries = Object.entries(setupConfig.enabledLibraries).filter(([, enabled]) => enabled);
+  useEffect(() => {
+    setSetupConfig((previous) => ({ ...previous, enabledLibraries: Object.fromEntries(Object.entries(previous.enabledLibraries).map(([id, enabled]) => [id, enabled && subscriptionIncludesLibrary(subscription, id)])) }));
+  }, [subscription]);
+
+  const enabledLibraryEntries = Object.entries(setupConfig.enabledLibraries).filter(([id, enabled]) => enabled && subscriptionIncludesLibrary(subscription, id));
 
   function invalidateFolderWork() {
+    setFolderCheck({ busy: false, results: [] });
     setFolderCreationState({ status: "idle", results: [], error: "" });
     setScanState({ status: "idle", results: [], skipped: [], error: "" });
   }
@@ -17146,6 +17158,7 @@ function SetupWizard({ onComplete, subscription = null }) {
   }
 
   function toggleLibrary(id) {
+    if (!subscriptionIncludesLibrary(subscription, id)) return;
     invalidateFolderWork();
     setSetupConfig((previous) => {
       const nextEnabled = !previous.enabledLibraries[id];
@@ -17487,12 +17500,32 @@ function SetupWizard({ onComplete, subscription = null }) {
     return "";
   }
 
+  async function checkFolders() {
+    if (folderCheck.busy) return false;
+    setFolderCheck({ busy: true, results: [] });
+    try {
+      const response = await fetch("/api/setup/check-folders", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabledLibraries: setupConfig.enabledLibraries, folderMappings: getResolvedFolderMappings() }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to check storage.");
+      setFolderCheck({ busy: false, results: data.results || [] });
+      return data.ok === true;
+    } catch (error) {
+      setFolderCheck({ busy: false, results: [{ status: "error", message: error.message }] });
+      return false;
+    }
+  }
+
   async function handleNext() {
     const validationError = validateCurrentStep();
     if (validationError) {
       alert(validationError);
       return;
     }
+
+    if (step === 5 && !await checkFolders()) return;
 
     if (step === 8) {
       if (folderCreationState.status === "running") return;
@@ -17514,6 +17547,7 @@ function SetupWizard({ onComplete, subscription = null }) {
   }
 
   function nextButtonLabel() {
+    if (step === 5 && folderCheck.busy) return "Checking Folders…";
     if (step === 8) {
       if (folderCreationState.status === "running") return "Creating Folders…";
       if (folderCreationState.status === "error") return "Retry Folder Creation";
@@ -17602,20 +17636,21 @@ function SetupWizard({ onComplete, subscription = null }) {
           <div className="panel setup-step-panel">
             <p className="setup-step-eyebrow">Libraries</p>
             <h3>Choose Your Libraries</h3>
-            <p>Only enabled libraries appear in navigation. Optional and preview libraries can be enabled later in Settings.</p>
+            <p>Only libraries included in your plan can be enabled. You can change available libraries later in Settings.</p>
             <div className="setup-library-grid setup-library-grid-final">
               {libraryCatalog.map((library) => {
-                const enabled = !!setupConfig.enabledLibraries[library.id];
+                const included = subscriptionIncludesLibrary(subscription, library.id);
+                const enabled = included && !!setupConfig.enabledLibraries[library.id];
                 return (
-                  <button key={library.id} type="button" className={`setup-library-card ${enabled ? "enabled" : ""}`} onClick={() => toggleLibrary(library.id)}>
+                  <button key={library.id} type="button" disabled={!included} className={`setup-library-card ${enabled ? "enabled" : ""}`} onClick={() => toggleLibrary(library.id)}>
                     <div className="setup-library-icon">{library.icon}</div>
                     <div className="setup-library-copy">
                       <div className="setup-library-title-row">
                         <h4>{library.label}</h4>
-                        <span className={`setup-stage-badge stage-${library.stage.toLowerCase()}`}>{library.stage}</span>
+                        <span className={`setup-stage-badge stage-${library.stage.toLowerCase()}`}>{included ? library.stage : "Paid plan"}</span>
                       </div>
                       <p>{library.description}</p>
-                      <strong className="setup-library-state">{enabled ? "✓ Enabled" : "○ Disabled"}</strong>
+                      <strong className="setup-library-state">{!included ? "🔒 Not included" : enabled ? "✓ Enabled" : "○ Disabled"}</strong>
                     </div>
                   </button>
                 );
@@ -17778,14 +17813,17 @@ function SetupWizard({ onComplete, subscription = null }) {
           <div className="panel setup-step-panel">
             <p className="setup-step-eyebrow">Folder Mapping</p>
             <h3>Map Local Storage</h3>
-            <p>Assign one or more paths to every enabled library. Existing folders are reused; missing folders are created in the next step.</p>
+            <p>Assign folders on the computer running Homestead. Existing folders are reused; missing local folders are created during setup.</p>
+            {storage?.platform === "win32" && <div className="setup-info-callout">Use a local folder, mapped drive, or actual network share such as <code>{"\\\\server\\share\\Movies"}</code>. Windows Network Shortcuts are not media folders. Open the share in File Explorer and sign in with the same Windows account before continuing.</div>}
             <div className="setup-form setup-folder-groups">
               {enabledLibraryEntries.map(([id]) => {
                 const paths = getFolderPathList(id);
                 return <div key={id} className="folder-mapping-group"><div className="setup-folder-heading"><strong>{libraryDisplayNames[id] || titleFromId(id)}</strong>{id === "liveTV" && <span>DVR recordings</span>}</div>{paths.map((pathValue, index) => <div className="folder-path-row" key={`${id}-${index}`}><input value={pathValue} onChange={(event) => { const nextPaths = [...paths]; nextPaths[index] = event.target.value; saveFolderPathList(id, nextPaths); }} />{paths.length > 1 && <button type="button" className="secondary-button" onClick={() => saveFolderPathList(id, paths.filter((_, pathIndex) => pathIndex !== index))}>Remove</button>}</div>)}<button type="button" className="secondary-button" onClick={() => saveFolderPathList(id, [...paths, ""])}>＋ Add Media Path</button></div>;
               })}
             </div>
-            <div className="setup-info-callout">Collections, watch orders, named watchlists, appearance overrides, and setup data are stored separately in Homestead’s persistent <strong>/app/data</strong> volume.</div>
+            <button type="button" className="secondary-button" disabled={folderCheck.busy} onClick={checkFolders}>{folderCheck.busy ? "Checking Folders…" : "Check Folder Access"}</button>
+            {folderCheck.results.map((result, index) => <div key={index} role={result.status === "error" ? "alert" : "status"} className={result.status === "error" ? "setup-error-callout" : "setup-info-callout"}><strong>{libraryDisplayNames[result.libraryId] || "Storage"}</strong>{result.path && <div>{result.path}</div>}{result.message}</div>)}
+            <div className="setup-info-callout">Collections, progress, and settings are stored separately in Homestead’s persistent data folder{storage?.dataDirectory ? <>: <strong>{storage.dataDirectory}</strong></> : "."}</div>
           </div>
         )}
 
@@ -30841,7 +30879,7 @@ function getLibraryFolders(id) {
     return [value];
   }
 
-  return [`/media/${id}`];
+  return [setupConfig?.storage?.folderDefaults?.[id] || `/media/${id}`];
 }
 
 function normalizeScanHistoryLibraryId(id) {
@@ -31329,6 +31367,7 @@ function updateIntegrationSetting(id, key, value) {
 }
 
 function toggleLibrarySetting(id) {
+  if (!subscriptionIncludesLibrary(setupConfig?.subscription, id)) return;
   const updatedConfig = {
     ...setupConfig,
     enabledLibraries: {
@@ -31433,7 +31472,8 @@ return (
         <button
           key={id}
           className="settings-library-card"
-	    onClick={() => setSelectedSettingsLibrary(id)}
+	    disabled={!subscriptionIncludesLibrary(setupConfig?.subscription, id)}
+          onClick={() => setSelectedSettingsLibrary(id)}
         >
           <div className="settings-library-icon">
             {id === "movies" && "🎬"}
@@ -31455,7 +31495,7 @@ return (
 </h4>
 
           <p>
-            {enabled
+            {!subscriptionIncludesLibrary(setupConfig?.subscription, id) ? "Not included in your plan" : enabled
               ? "Enabled"
               : "Disabled"}
           </p>
@@ -31494,6 +31534,7 @@ return (
 <button
   className="secondary-button"
   type="button"
+  disabled={!subscriptionIncludesLibrary(setupConfig?.subscription, selectedSettingsLibrary)}
   onClick={() => toggleLibrarySetting(selectedSettingsLibrary)}
 >
   {enabledLibraries[selectedSettingsLibrary]
@@ -48958,7 +48999,7 @@ if (setupConfigLoading) {
 }
 
 if (!setupConfig?.completed) {
-  return <SetupWizard onComplete={setSetupConfig} subscription={setupConfig?.subscription} />;
+  return <SetupWizard onComplete={setSetupConfig} subscription={setupConfig?.subscription} storage={setupConfig?.storage} />;
 }
 
 if (selectedAdvancedAdultSearch) {

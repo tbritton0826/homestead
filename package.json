@@ -47,7 +47,8 @@
     "test:profile-wizard-browser": "node scripts/verify-profile-wizard-browser.mjs",
     "test:v317": "node --test scripts/test-v317.cjs",
     "test:v317-browser": "node scripts/verify-v317-browser.mjs",
-    "test:v318": "node --test scripts/test-v318.cjs"
+    "test:v318": "node --test scripts/test-v318.cjs",
+    "test:windows-setup": "node scripts/test-setup-storage.cjs && node scripts/test-windows-setup-pass.cjs"
   },
   "dependencies": {
     "@fullcalendar/daygrid": "^6.1.20",

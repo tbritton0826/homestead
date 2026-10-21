@@ -1,6 +1,6 @@
 param(
   [string]$NodeVersion = '24.22.1',
-  [string]$Revision = 'windows.1',
+  [string]$Revision = 'windows.2',
   [switch]$SkipWebBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -80,6 +80,8 @@ Source/build provenance: https://github.com/eugeneware/ffmpeg-static and
 https://github.com/joshwnj/ffprobe-static . Upstream FFmpeg: https://ffmpeg.org/ .
 '@ | Set-Content -LiteralPath (Join-Path $licenses 'README.txt') -Encoding UTF8
   Add-Type -AssemblyName System.IO.Compression.FileSystem
+  Run-Checked 'node.exe' @((Join-Path $root 'scripts\release\write-windows-icon.cjs'), (Join-Path $app 'public\homestead-icon.png'), (Join-Path $app 'public\homestead.ico'))
+  Copy-Item -LiteralPath (Join-Path $app 'public\homestead.ico') -Destination (Join-Path $envelope 'homestead.ico')
   $runtimeZip = Join-Path $envelope 'homestead-windows-runtime.zip'
   [IO.Compression.ZipFile]::CreateFromDirectory($app, $runtimeZip, [IO.Compression.CompressionLevel]::Optimal, $false)
   (Get-FileHash -LiteralPath $runtimeZip -Algorithm SHA256).Hash | Set-Content -LiteralPath (Join-Path $envelope 'runtime.sha256.txt') -Encoding Ascii

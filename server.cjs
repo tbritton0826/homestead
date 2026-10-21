@@ -1,3 +1,4 @@
+const { setupStorageInfo, inspectSetupFolder } = require("./src/server/setup-storage.cjs");
 const { recipeEditable, recipeEditSupplement } = require("./src/server/recipe-edit.cjs");
 const { sendIndexJson } = require("./src/server/json-response.cjs");
 const { createArtworkRecovery } = require("./src/server/artwork-recovery.cjs");
@@ -751,6 +752,8 @@ function persistBrandingState(branding = getBrandingIconState()) {
 
 function getDefaultBrandIconPath() {
   const candidates = [
+    path.join(__dirname, "public", "homestead-icon.png"),
+    path.join(__dirname, "dist", "homestead-icon.png"),
     path.join(__dirname, "public", "assets", "images", "homestead-icon.png"),
     path.join(__dirname, "dist", "assets", "images", "homestead-icon.png"),
     path.join(__dirname, "src", "assets", "images", "homestead-icon.png"),
@@ -774,7 +777,7 @@ function sendHomesteadBrandIcon(req, res) {
     return;
   }
 
-  res.redirect(302, "/assets/images/homestead-icon.png");
+  res.redirect(302, "/homestead-icon.png");
 }
 
 function sendHomesteadManifest(req, res) {
@@ -7408,6 +7411,7 @@ function sanitizeSetupConfigForClient(config = {}) {
   safeConfig.configuredEnabledLibraries = configuredEnabledLibraries;
   safeConfig.enabledLibraries = enabledLibraries;
   safeConfig.subscription = subscription;
+  safeConfig.storage = setupStorageInfo({ mediaRoot: process.env.MEDIA_ROOT || "/media", dataDir });
   return safeConfig;
 }
 
@@ -7453,6 +7457,7 @@ function prepareSetupConfigForStorage(incomingConfig = {}) {
   delete storedConfig.adminAccount.password;
   delete storedConfig.configuredEnabledLibraries;
   delete storedConfig.subscription;
+  delete storedConfig.storage;
   delete storedConfig.adminAccount.confirmPassword;
   return storedConfig;
 }
@@ -7475,7 +7480,21 @@ function runScannerCommandsAsync(commands = []) {
   });
 }
 
-app.post("/api/setup/create-folders", (req, res) => {
+app.post("/api/setup/check-folders", homesteadAccess.requireAdmin, async (req, res) => {
+  const results = [];
+  for (const [libraryId, enabled] of Object.entries(req.body?.enabledLibraries || {})) {
+    if (!enabled || !subscriptionService.allowsLibrary(libraryId)) continue;
+    const folders = normalizeSetupFolderPaths(req.body?.folderMappings?.[libraryId]);
+    if (!folders.length) results.push({ libraryId, path: "", status: "error", message: "No folder path configured." });
+    for (const folder of folders) {
+      try { results.push({ libraryId, ...await inspectSetupFolder(folder) }); }
+      catch (error) { results.push({ libraryId, path: folder, status: "error", message: error.message }); }
+    }
+  }
+  res.json({ ok: results.every((result) => result.status !== "error"), results });
+});
+
+app.post("/api/setup/create-folders", homesteadAccess.requireAdmin, async (req, res) => {
   const enabledLibraries = req.body?.enabledLibraries || {};
   const adultSublibraries = req.body?.adultSublibraries || {};
   const libraryPreferences = req.body?.libraryPreferences || {};
@@ -7484,7 +7503,7 @@ app.post("/api/setup/create-folders", (req, res) => {
   const errors = [];
 
   for (const [libraryId, enabled] of Object.entries(enabledLibraries)) {
-    if (!enabled) continue;
+    if (!enabled || !subscriptionService.allowsLibrary(libraryId)) continue;
     const folderPaths = normalizeSetupFolderPaths(folderMappings[libraryId]);
 
     if (!folderPaths.length) {
@@ -7496,17 +7515,7 @@ app.post("/api/setup/create-folders", (req, res) => {
 
     for (const folderPath of folderPaths) {
       try {
-        if (!path.isAbsolute(folderPath)) {
-          throw new Error("Folder paths must be absolute inside the Homestead container.");
-        }
-        const existed = fs.existsSync(folderPath);
-        fs.mkdirSync(folderPath, { recursive: true });
-        results.push({
-          libraryId,
-          label: libraryId,
-          path: folderPath,
-          status: existed ? "exists" : "created",
-        });
+        results.push({ libraryId, label: libraryId, ...await inspectSetupFolder(folderPath, { create: true }) });
       } catch (error) {
         const result = { libraryId, path: folderPath, status: "error", message: error.message };
         results.push(result);
@@ -7516,6 +7525,7 @@ app.post("/api/setup/create-folders", (req, res) => {
   }
 
   if (
+    subscriptionService.allowsLibrary("adult") && subscriptionService.allowsLibrary("liveTV") &&
     enabledLibraries.adult &&
     enabledLibraries.liveTV &&
     adultSublibraries.adultTVChannels
@@ -7608,7 +7618,7 @@ app.post("/api/setup/initial-scan", homesteadAccess.requireAdmin, async (req, re
   };
 
   for (const [setupLibraryId, enabled] of Object.entries(enabledLibraries)) {
-    if (!enabled) continue;
+    if (!enabled || !subscriptionService.allowsLibrary(setupLibraryId)) continue;
     const scannerLibraryId = scanLibraryMap[setupLibraryId];
     if (!scannerLibraryId) {
       skipped.push({
@@ -7623,6 +7633,11 @@ app.post("/api/setup/initial-scan", homesteadAccess.requireAdmin, async (req, re
     const beforeCount = indexedCount(scannerLibraryId);
 
     try {
+      if (!folders.length) throw new Error("No folder path configured.");
+      for (const folder of folders) {
+        const checked = await inspectSetupFolder(folder);
+        if (checked.status === "missing") throw new Error(`Folder does not exist: ${folder}`);
+      }
       const commandResults = await runScannerCommandsAsync(commands);
       const afterCount = indexedCount(scannerLibraryId);
       results.push({

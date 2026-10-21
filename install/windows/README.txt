@@ -8,8 +8,15 @@ folder first and run Install-Homestead.cmd. Leave its progress window open.
 Setup installs the private application runtimes, creates Start menu/desktop
 shortcuts and opens Homestead in your browser at http://localhost:7312.
 Complete the local owner setup, choose media folders and scan your library.
+The Homestead icon is included by default; Choose Icon can replace the app icon.
+For network media, enter the actual UNC share (\\server\share\Movies) or mapped
+drive (M:\Movies), not a folder under Windows Network Shortcuts. Open the share
+in File Explorer with the Windows account running Homestead and sign in first.
+Setup checks folder access before continuing. Missing network shares are not
+created automatically; missing local folders can be created during setup.
 Free includes one owner, one stream and core local Movies, TV, Music, Books
-and archived YouTube. Paid features stay locked. No trial/license is needed.
+and Photos in Media. Archived YouTube and Adult are optional. Family, Live TV,
+Cloud, Inventory, AI and connected services stay locked. No trial/license is needed.
 
 Settings, media, and logs remain in %LOCALAPPDATA%\Homestead Free.
 Updates switch application versions without replacing data or media. Previous
