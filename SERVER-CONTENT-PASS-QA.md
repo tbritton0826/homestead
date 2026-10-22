@@ -22,6 +22,6 @@ This pass condenses the existing web interface before the final visual design pa
 
 ## Release scope
 
-Windows preview revision `0.6.8.64-windows.3` includes this pass and the earlier standalone Windows/Free setup fixes. Its installed-runtime smoke test also checks that custom collections and saved collection overrides are empty on a fresh installation. Existing installations retain their own saved data during updates.
+Windows preview revision `0.6.8.64-windows.4` includes this pass and the earlier standalone Windows/Free setup fixes. Its installed-runtime smoke test also checks that custom collections and saved collection overrides are empty on a fresh installation. Existing installations retain their own saved data during updates.
 
 The source change is stacked on the standalone Windows preview branch (PR #20); merge that parent before this pass. Publishing a Windows download does not update an existing Docker server automatically. The native mobile Family Home navigation cards remain a separate mobile change. The final visual polish and desktop application shell are subsequent work.

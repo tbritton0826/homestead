@@ -19,7 +19,7 @@ export function homeEpisodePill(item) {
 }
 const filePath = (item) => text(item.sourcePath || item.path || item.filePath || item.publicPath);
 const video = (file) => file.type === 'video' || /\.(?:mp4|mkv|m4v|avi|mov|webm|ts)$/i.test(filePath(file) || file.name);
-const annotate = (item, type, parent = item) => ({ ...item, type, targetId: parent.id || parent.name, entity: parent, libraryLabel: homeLibrary[type][1], episodePill: type === 'tv' ? homeEpisodePill(item) : '', feedKey: `${type}:${parent.id || parent.name}:${type === 'tv' ? filePath(item) || item.id || name(item) : ''}` });
+const annotate = (item, type, parent = item) => ({ ...item, type, targetId: parent.id || parent.name, entity: parent, libraryLabel: homeLibrary[type][1], episodePill: type === 'tv' ? homeEpisodePill(item) : '', feedKey: `${type}:${parent.id || parent.name}:${['tv', 'youtube'].includes(type) ? filePath(item) || item.id || name(item) : ''}` });
 
 export function homeCatalog(index = {}, youtubeCreators = [], enabled = {}) {
   const libraries = index.libraries || {};
@@ -66,7 +66,8 @@ export function homeProgress(catalog, progress = {}, watchOrders = [], knownColl
     // Resolve progress against the current authorized catalog. Orphaned browser
     // records must not reveal a removed/private title or navigate to another user’s item.
     const savedPath = filePath(saved);
-    let match = savedPath && candidates.find((entry) => [filePath(entry), ...rows(entry.entity?.files).map(filePath)].includes(savedPath));
+    let match = savedPath && candidates.find((entry) => filePath(entry) === savedPath);
+    if (!match && savedPath && type !== 'tv') match = candidates.find((entry) => rows(entry.entity?.files).some((file) => filePath(file) === savedPath));
     const id = text(saved.bookId || saved.showId || saved.seriesId || saved.parentShowId || saved.id);
     if (!match && id) match = candidates.find((entry) => text(entry.targetId) === id || text(entry.id) === id);
     if (!match) {

@@ -29,6 +29,8 @@ test('Recently Added sorts actual additions across libraries and annotates TV ep
   assert.equal(homeEpisodePill({ name: 'no episode data.mkv' }), '');
   assert.deepEqual(homeCatalog(index, creators, {}), []);
   assert(!homeCatalog(index, creators, { movies: true }).some((item) => item.type !== 'movie'));
+  const severalVideos = [{ ...creators[0], videos: [creators[0].videos.v, { id: 'v2', path: '/youtube/second.mp4', title: 'Second video', addedAt: '2026-10-22' }] }];
+  assert.equal(homeRecentlyAdded(homeCatalog(index, severalVideos, enabled)).filter((item) => item.type === 'youtube').length, 2);
 });
 
 test('One resume list excludes unopened, finished, unavailable, disabled and private media; newest duplicate wins', async () => {
@@ -56,6 +58,8 @@ test('One resume list excludes unopened, finished, unavailable, disabled and pri
   const orders = [{ type: 'watch-order', collectionId: 'saved', queueIndex: 1, episodeCount: 5 }];
   assert.equal(homeProgress([], {}, orders, []).length, 0);
   assert.equal(homeProgress(homeCatalog(index, creators, enabled), {}, orders, ['saved'])[0].progress, 20);
+  const episodes = homeCatalog({ libraries: { tv: { t: { id: 't', name: 'Series', files: [{ type: 'video', name: 'S01E01.mkv', path: '/tv/first.mkv' }, { type: 'video', name: 'S01E02.mkv', path: '/tv/second.mkv' }] } } } }, [], { tvshows: true });
+  assert.equal(homeProgress(episodes, { t: { type: 'tv', showId: 't', title: 'Series', path: '/tv/second.mkv', currentTime: 2, duration: 100 } })[0].episodePill, 'S01 E02');
 });
 
 test('Related titles use owned public metadata, including recently completed viewing, without network queries', async () => {
