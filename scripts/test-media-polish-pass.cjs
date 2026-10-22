@@ -101,7 +101,8 @@ async function run() {
   assert(app.includes('readAlongBook: { id: book.id')); assert(app.includes('queuedTrack.chapterTitle'));
   assert(app.includes('disabled={selectedDiscoveredArtist.localOnly}'));
   const home = source('function HomePage(', 'function cleanDashboardMediaTitle');
-  assert(home.indexOf('Your Recent Activity') > home.indexOf('Continue Watching</h3>')); assert(home.indexOf('Your Recent Activity') < home.indexOf('Continue Reading</h3>'));
+  assert(home.includes('<ServerHomeFeed')); assert(!home.includes('Recent imports coming soon'));
+  assert(!home.includes('<h3>Continue Reading</h3>')); assert(!home.includes('<h3>Recently Added Movies</h3>'));
   assert(!source('function DownloadsPage(', 'function RequestsPage(').includes('/api/setup-config'));
   console.log('Read Along, Home cache/layout, conservative music selection, disc folders, Fix Match/artwork identity and Downloads: PASSED');
 }

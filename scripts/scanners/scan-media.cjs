@@ -1437,8 +1437,15 @@ function preserveItemTimestamps(existingLibrary = {}, scannedLibrary = {}, now =
   for (const [id, item] of Object.entries(scannedLibrary || {})) {
     const existing = existingLibrary?.[id] || null;
 
+    const fileIdentity = (file) => String(file?.sourcePath || file?.path || file?.name || "").replaceAll("\\", "/");
+    const previousFiles = new Map(Object.values(existing?.files || {}).map((file) => [fileIdentity(file), file]));
+    const files = Array.isArray(item.files) ? item.files.map((file) => {
+      const previous = previousFiles.get(fileIdentity(file));
+      return { ...file, addedAt: previous?.addedAt || (previous ? existing?.addedAt || existing?.createdAt || previous.modifiedAt || now : now) };
+    }) : item.files;
     output[id] = {
       ...item,
+      ...(files ? { files } : {}),
       addedAt: existing?.addedAt || existing?.createdAt || now,
       createdAt: existing?.createdAt || existing?.addedAt || now,
       updatedAt: now,

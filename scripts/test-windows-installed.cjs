@@ -7,6 +7,10 @@ const app = path.join(root,runtime.relativePath); const origin='http://127.0.0.1
  assert.equal((await fetch(origin)).status,200);
  const response=await fetch(origin+(p.platform.authEnabled?'/api/auth/login':'/api/accounts/complete-owner-setup'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'windows-test-owner',password:'isolated-preview-test-only',displayName:'Windows Test Owner'})}); assert.equal(response.status,200,await response.clone().text());
  const cookie=response.headers.get('set-cookie').split(';')[0]; const headers={'Content-Type':'application/json',cookie};
+ for (const [route, key] of [['custom','collections'],['appearance-overrides','overrides'],['order-overrides','overrides']]) {
+  const initial=await fetch(origin+'/api/collections/'+route,{headers}).then(r=>r.json());
+  assert.deepEqual(initial[key],[], 'Fresh installation must not ship saved collections or overrides: '+route);
+ }
  const movies=path.join(root,'media','movies'); const movieDir=path.join(movies,'Windows Preview Test (2026)');fs.mkdirSync(movieDir,{recursive:true});
  const file=path.join(movieDir,'Windows Preview Test (2026).mp4');
  cp.execFileSync(path.join(app,'runtime-tools/ffmpeg.exe'),['-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=blue:s=320x180:d=2','-c:v','libx264','-pix_fmt','yuv420p','-y',file],{windowsHide:true,timeout:20000});
