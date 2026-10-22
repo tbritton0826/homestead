@@ -1,3 +1,5 @@
+import ServerHomeFeed from "./components/ServerHomeFeed.jsx";
+import { homeCatalog, homeRecentlyAdded, homeProgress, homeRelated } from "./utils/server-home.js";
 import PetPhotoOrganizer from "./components/PetPhotoOrganizer.jsx";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -28,7 +30,7 @@ import BookMetadataMatchModal from "./components/BookMetadataMatchModal.jsx";
 import BookSeriesAppearanceEditor from "./components/BookSeriesAppearanceEditor.jsx";
 import ArtworkPicker from "./components/ArtworkPicker.jsx";
 import TransferQueue from "./components/TransferQueue.jsx";
-import { createHomeMusicLookup, recentYouTubeEntries, createSharedIndexLoader } from "./utils/home-media.js";
+import { createHomeMusicLookup, createSharedIndexLoader } from "./utils/home-media.js";
 import useLibraryScrollReset from "./hooks/useLibraryScrollReset.js";
 import useDialogFocus from "./hooks/useDialogFocus.js";
 import "./PublicQa.css";
@@ -52,6 +54,7 @@ import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
 import "./mobile.css";
 import "./MobileV12.css";
 import "./V314Polish.css";
+import "./ServerContentPass.css";
 import { profileMetadataPills, recipeEditorDraft, recipeEditingAllowed } from "./utils/mobile-polish.js";
 
 
@@ -1857,7 +1860,7 @@ function ProfileMediaSection({
         </div>
       </div>
 
-      <MediaFolderTabs folders={folders} />
+      <MediaFolderTabs folders={folders} compact />
       {itemCount ? (
         <MediaGallery files={folders.files} openImageViewer={openImageViewer} adultMediaActions={adultMediaActions} />
       ) : (
@@ -9903,8 +9906,7 @@ function DetailMembershipPopover({
     const shows = Object.values(mediaIndex?.libraries?.tv || {});
     try {
       const generated = buildSharedMediaCollections(movies, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides);
-      const present = new Set(generated.map((entry) => entry.id));
-      return [...generated, ...SHARED_SMART_COLLECTION_SEEDS.filter((seed) => !present.has(seed.id)).map((seed) => ({ ...seed, source: "smart", items: [] }))];
+      return generated;
     } catch {
       return [];
     }
@@ -14331,6 +14333,7 @@ function buildSharedMediaCollections(movies = [], shows = [], customCollections 
   });
 
   return Array.from(groups.values())
+    .filter((group) => group.source === "custom" || group.hasManualOrder || group.hasAppearanceOverride)
     .map((group) => {
       const movieCount = group.items.filter((item) => item.library === "movies").length;
       const tvCount = group.items.filter((item) => item.library === "tv").length;
@@ -15937,7 +15940,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
   );
 }
 
-function MoviesPage({ mediaIndex, setActiveLibrary, query, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, movieLibraryAppearance, onOpenMovieAppearance }) {
+export function MoviesPage({ mediaIndex, setActiveLibrary, query, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, movieLibraryAppearance, onOpenMovieAppearance }) {
 const metadataMatchIndex = useMemo(
   () => loadHomesteadMetadataMatches(),
   [metadataMatchesVersion]
@@ -16086,7 +16089,6 @@ const selectedSharedCollection = useMemo(() => {
   if (!wantedId) return null;
   return sharedCollections.find((collection) => String(collection?.id || "") === wantedId) || null;
 }, [sharedCollections, selectedSharedCollectionId]);
-const movieCollectionsCount = shouldBuildSharedCollections ? sharedCollections.length : "View";
 
 const normalizeMovieText = (value = "") =>
   String(value || "")
@@ -16111,10 +16113,6 @@ const getMovieCollections = (movie) =>
     .map(normalizeMovieText)
     .filter(Boolean);
 
-const movieCollections = useMemo(() => Array.from(
-  new Set(movies.flatMap((movie) => getMovieCollections(movie)))
-).sort((a, b) => a.localeCompare(b)), [movies]);
-
 const movieGenres = useMemo(() => Array.from(
   new Set(movies.flatMap((movie) => getMovieGenres(movie)))
 ).sort((a, b) => a.localeCompare(b)), [movies]);
@@ -16122,11 +16120,6 @@ const movieGenres = useMemo(() => Array.from(
 const movieYears = useMemo(() => Array.from(
   new Set(movies.map((movie) => normalizeMovieText(movie.year)).filter(Boolean))
 ).sort((a, b) => Number(b) - Number(a)), [movies]);
-
-const movieLibraryTabs = [
-  { id: "all", label: "All Movies", count: movies.length },
-  { id: "collections", label: "Collections", count: movieCollectionsCount },
-];
 
 const tabFilteredMovies = useMemo(() => movies.filter((movie) => {
   if (movieView === "collections") return getMovieCollections(movie).length > 0;
@@ -16188,7 +16181,7 @@ useEffect(() => {
       { id: "collection-display", label: "Sort / Filter", icon: "⇅" },
       ...(selectedSharedCollection.knowledgeSources?.[0]?.url ? [{ id: "collection-knowledge", label: selectedSharedCollection.knowledgeSources[0].label || "Website", icon: "↗" }] : []),
       { id: "collection-manage", label: "Manage", icon: "⋯" },
-    ] : [],
+    ] : [{ id: isCollections ? "show-movies" : "show-collections", label: isCollections ? "Movies" : "Collections", icon: isCollections ? "🎬" : "▦" }],
     hero: selectedSharedCollection ? {
       type: "collection",
       render: false,
@@ -16205,6 +16198,8 @@ useEffect(() => {
 useEffect(() => {
   const handlePageAction = (event) => {
     if (event?.detail?.library !== "movies") return;
+    if (event.detail.action === "show-collections") { setMovieView("collections"); setSelectedSharedCollectionId(""); return; }
+    if (event.detail.action === "show-movies") { setMovieView("all"); setSelectedSharedCollectionId(""); return; }
     if (event.detail.action === "filter-sort") setMovieFilterOverlayOpen(true);
     if (event.detail.action === "create-collection") setCustomCollectionEditor({ source: "custom", items: [] });
     if (event.detail.action === "back-collections") setSelectedSharedCollectionId("");
@@ -16333,24 +16328,6 @@ useEffect(() => {
   setupConfig={setupConfig}
 />
       <div className="movie-library-browser">
-        <div className="movie-library-command-row">
-        <div className="movie-library-tabs" role="tablist" aria-label="Movie library views">
-          {movieLibraryTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={`movie-library-tab ${movieView === tab.id ? "active" : ""}`}
-              onClick={() => {
-                setMovieView(tab.id);
-              }}
-            >
-              <span>{tab.label}</span>
-              <small>{tab.count}</small>
-            </button>
-          ))}
-        </div>
-        </div>
-
         {movieView === "all" && (movieGenreFilters.length > 0 || movieYearFilters.length > 0) && <div className="movie-filter-strip movie-active-filter-strip" aria-label="Active movie filters">
           {movieGenreFilters.map((genre) => <button type="button" className="movie-filter-chip active" key={`genre-${genre}`} onClick={() => setMovieGenreFilters((current) => current.filter((item) => item !== genre))}>Genre: {genre} ×</button>)}
           {movieYearFilters.map((year) => <button type="button" className="movie-filter-chip active" key={`year-${year}`} onClick={() => setMovieYearFilters((current) => current.filter((item) => item !== year))}>Year: {year} ×</button>)}
@@ -16377,6 +16354,7 @@ useEffect(() => {
           {customCollectionEditor && <CustomCollectionEditor collection={customCollectionEditor.id ? customCollectionEditor : null} movies={movies} shows={showsForCollections} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
           {collectionOrderOverridesError && <p className="small-muted">{collectionOrderOverridesError}</p>}
           {collectionOrderEditor && <CollectionOrderEditor collection={collectionOrderEditor} onCancel={() => setCollectionOrderEditor(null)} onSave={async (draft) => { await saveCollectionOrderOverride(draft); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} onReset={async (collection) => { await deleteCollectionOrderOverride(collection.id); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} />}
+          {!customCollectionsLoading && !customCollectionsError && !sharedCollections.length && <div className="collections-empty-state panel"><h3>No collections yet.</h3><p>Click + to add custom collections.</p><button type="button" className="primary-button" onClick={() => setCustomCollectionEditor({ source: "custom", items: [] })}>＋ Create Collection</button></div>}
           <div className="shared-collection-grid">
             {sharedCollections.map((collection) => (
               <SharedCollectionCard key={collection.id} collection={collection} onClick={() => { setCollectionSort(collection.source === "custom" || collection.hasManualOrder ? "manual" : "release-asc"); setSelectedSharedCollectionId(String(collection.id)); }} />
@@ -18969,7 +18947,7 @@ async function fetchSeerrRequests() {
   return response.json();
 }
 
-function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, requests, setDashboardOpen, setupConfig, setSearchOpen, }) {
+export function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, requests, setDashboardOpen, setupConfig, setSearchOpen, }) {
   const [watchProgress, setWatchProgress] = useState(() => getWatchProgress());
   const [watchOrderProgress, setWatchOrderProgress] = useState(() => getWatchOrderProgress());
   const [activeWatchOrderProgress, setActiveWatchOrderProgress] = useState(() => getActiveWatchOrderProgress());
@@ -19013,14 +18991,16 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
 
     async function refreshHomeCollectionAppearance() {
       try {
-        const [appearanceResponse, customResponse] = await Promise.all([
+        const [appearanceResponse, customResponse, orderResponse] = await Promise.all([
           fetch("/api/collections/appearance-overrides", { cache: "no-store" }),
           fetch("/api/collections/custom", { cache: "no-store" }),
+          fetch("/api/collections/order-overrides", { cache: "no-store" }),
         ]);
 
-        const [appearanceData, customData] = await Promise.all([
+        const [appearanceData, customData, orderData] = await Promise.all([
           appearanceResponse.json().catch(() => ({})),
           customResponse.json().catch(() => ({})),
+          orderResponse.json().catch(() => ({})),
         ]);
 
         const next = {};
@@ -19065,6 +19045,12 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
           });
         }
 
+        if (orderResponse.ok && orderData?.ok !== false) {
+          (Array.isArray(orderData?.overrides) ? orderData.overrides : []).forEach((override) => {
+            const id = String(override?.collectionId || "").trim();
+            if (id && !next[id]) next[id] = {};
+          });
+        }
         if (!cancelled) setHomeCollectionAppearance(next);
       } catch (error) {
         console.warn("Unable to refresh collection artwork for Home", error);
@@ -19242,9 +19228,6 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
   const movieRequestCount = requests?.movies?.length || 0;
   const tvRequestCount = requests?.tv?.length || 0;
 
-  const recentMovies = movies.slice(-6).reverse();
-  const recentTV = tv.slice(-6).reverse();
-  const recentBooks = books.slice(-6).reverse();
   const recentMusic = music.slice(-6).reverse();
 
   const findDashboardMusicTrack = useMemo(() => createHomeMusicLookup(music, normalizeLocalMusicSong), [music]);
@@ -19318,15 +19301,11 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
   const [showWidgetCustomizer, setShowWidgetCustomizer] = useState(false);
   useDialogFocus({ selector: ".home-appearance-overlay", open: showWidgetCustomizer, onClose: () => setShowWidgetCustomizer(false) });
   const dashboardWidgetOptions = [
-    { id: "libraryStats", label: "Library Stats", description: "Show quick counts for Movies, TV, Books, and Music." },
-    { id: "continueWatching", label: "Continue Watching", description: "Resume movies and TV from the home dashboard." },
-    { id: "continueReading", label: "Continue Reading", description: "Show in-progress books." },
-    { id: "continueListening", label: "Continue Listening", description: "Show in-progress music playback." },
-    { id: "continueYouTube", label: "Continue YouTube", description: "Show in-progress YouTube videos." },
-    { id: "recentActivity", label: "Recent Activity", description: "Show requests, watchlist, scanner, and Seerr summary rows." },
-    { id: "family", label: "Family", description: "Show the Family dashboard shortcut." },
-    { id: "inventory", label: "Inventory", description: "Show the Inventory dashboard shortcut." },
-    { id: "adult", label: "Adult", description: "Show the Adult library dashboard shortcut when enabled." },
+    { id: "libraryStats", label: "Library counts", description: "Show library counts in the header." },
+    { id: "recentActivity", label: "Activity ribbon", description: "Watchlist, requests, and the latest library scan." },
+    { id: "continueWatching", label: "Continue Watching", description: "One resume row for video, books, and audio." },
+    { id: "recentlyAdded", label: "Recently Added", description: "One row across your enabled media libraries." },
+    { id: "relatedItems", label: "Related titles", description: "Owned titles related to your recent viewing." },
   ];
   const [dashboardWidgetPrefs, setDashboardWidgetPrefs] = useState(() => {
     try {
@@ -19422,39 +19401,6 @@ const continueWatching = (() => {
     .slice(0, 6);
 })();
 
-const continueReading = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "book")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const continueListening = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "music" || item.type === "audiobook")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const continueYouTube = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "youtube")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const recentYouTube = recentYouTubeEntries(youtubeCreators).map((video) => ({
-  ...video,
-  poster: getDashboardYouTubePoster(video),
-  name: video.title || video.name || video.filename || video.creatorName,
-}));
-
 const showMovies = !!enabledLibraries.movies;
 const showTV = !!enabledLibraries.tvshows;
 const showBooks = !!enabledLibraries.books;
@@ -19484,6 +19430,33 @@ const homeStatItems = [
   showCloud ? { id: "cloud", label: "Cloud", value: "Ready", target: "cloud" } : null,
   showAI ? { id: "ai", label: "AI", value: "Tools", target: "ai" } : null,
 ].filter(Boolean);
+
+  const homeItems = useMemo(() => homeCatalog(mediaIndex, youtubeCreators, enabledLibraries), [mediaIndex, youtubeCreators, enabledLibraries]);
+  const recentItems = useMemo(() => homeRecentlyAdded(homeItems), [homeItems]);
+  const resumeItems = homeProgress(homeItems, watchProgress, continueWatching.filter((item) => item.type === "watch-order").map(getHomeCollectionDisplay), Object.keys(homeCollectionAppearance)).filter((item) => item.type === "book" ? widgetEnabled("continueReading") : ["music", "audiobook"].includes(item.type) ? widgetEnabled("continueListening") : item.type === "youtube" ? widgetEnabled("continueYouTube") : true);
+  const relatedItems = useMemo(() => homeRelated(homeItems, watchProgress), [homeItems, watchProgress]);
+  const lastScan = Object.entries(mediaIndex?.scanHistory || {}).filter(([key]) => enabledLibraries[{ tv: "tvshows" }[key] || key] === true && ["movies", "tv", "books", "music", "youtube", "photos"].includes(key)).map(([, scan]) => scan.completedAt).filter(Boolean).sort((a, b) => Date.parse(b) - Date.parse(a))[0] || mediaIndex?.updatedAt || mediaIndex?.generatedAt || mediaIndex?.scannedAt;
+  const homeActivity = [
+    (showMovies || showTV) && { label: "Watchlist", value: `${(showMovies ? movieWatchCount : 0) + (showTV ? tvWatchCount : 0)} saved`, onClick: () => setActiveLibrary("watchlist") },
+    (showMovies || showTV) && { label: "Requests", value: `${(showMovies ? movieRequestCount : 0) + (showTV ? tvRequestCount : 0)} tracked`, onClick: () => setActiveLibrary("requests") },
+    { label: "Library scan", value: lastScan && Number.isFinite(Date.parse(lastScan)) ? formatHomesteadDateTime(lastScan) : "No scans yet", onClick: () => setActiveLibrary("dashboard") },
+  ].filter(Boolean);
+  function openHomeItem(item) {
+    if (item.type === "watch-order") {
+      localStorage.setItem("homesteadPendingWatchOrderResume", JSON.stringify({ collectionId: item.collectionId, queueIndex: item.queueIndex || 0 }));
+      setDashboardOpen({ type: "watch-order", id: item.collectionId }); setActiveLibrary("movies"); return;
+    }
+    const type = item.type === "audiobook" ? "book" : item.type;
+    const library = { movie: "movies", tv: "tv", book: "books", music: "music", youtube: "youtube", photo: "photos" }[type];
+    setDashboardOpen({ type, id: type === "music" ? item.entity?.name || item.targetId : item.targetId, ...(type === "youtube" ? { videoPath: item.path || item.sourcePath || item.publicPath || item.file || item.id } : {}) });
+    setActiveLibrary(library);
+  }
+  function renderHomeCard(item, onClick) {
+    const type = item.type === "audiobook" ? "book" : item.type;
+    const entity = item.entity || item;
+    const poster = type === "book" ? getDashboardBookPoster({ ...entity, ...item }) : type === "music" ? getDashboardMusicPoster(item) || entity.poster || entity.cover : type === "youtube" ? getDashboardYouTubePoster(item) : ["movie", "tv"].includes(type) ? getMatchedPosterOrLocalPoster(type === "movie" ? "movies" : "tv", entity, item.poster || "") : item.poster;
+    return <HomeDashboardMiniPosterCard item={item} title={item.type === "tv" ? item.showTitle || entity.name || entity.title : item.title || item.name} subtitle={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : item.artist || item.creatorName} poster={poster} libraryType={type === "watch-order" ? "movie" : type} progress={item.progress ?? null} pills={[item.libraryLabel, item.episodePill].filter(Boolean)} onClick={onClick} />;
+  }
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("homestead-page-context", {
@@ -19533,367 +19506,7 @@ const homeStatItems = [
         </div>, document.body
       )}
 
-<div className="dashboard-grid">
-<div className="home-overview-row">
-
-  {widgetEnabled("continueWatching") && showMedia && continueWatching.length > 0 && (
-  <div className="panel dashboard-panel dashboard-continue-watching-panel">
-    <div className="panel-header">
-      <h3>Continue Watching</h3>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueWatching.map((rawItem) => {
-        const item = getHomeCollectionDisplay(rawItem);
-        return (
-        <HomeDashboardMiniPosterCard
-          key={`continue-watch-${item.id}`}
-          item={item}
-          title={item.name || item.title}
-          subtitle={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : item.showTitle}
-          poster={item.poster}
-          libraryType={item.type === "tv" ? "tv" : "movie"}
-          progress={item.type === "watch-order"
-            ? (item.episodeCount ? ((item.episodeNumber || 1) / item.episodeCount) * 100 : 0)
-            : item.duration ? (item.currentTime / item.duration) * 100 : 0}
-          progressLabel={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : ""}
-          onClick={() => {
-            if (item.type === "watch-order") {
-              localStorage.setItem("homesteadPendingWatchOrderResume", JSON.stringify({
-                collectionId: item.collectionId,
-                queueIndex: item.queueIndex || 0,
-              }));
-              const targetCollectionId = String(item.collectionId || "").trim();
-              if (!targetCollectionId) {
-                console.warn("Watch-order progress is missing a collectionId", item);
-                setActiveLibrary("movies");
-                return;
-              }
-              setDashboardOpen({ type: "watch-order", id: targetCollectionId });
-              setActiveLibrary("movies");
-              return;
-            }
-            const dashboardTargetId = item.type === "tv"
-              ? (
-                  item.showId ||
-                  item.seriesId ||
-                  item.parentShowId ||
-                  tv.find((show) => {
-                    const savedTitle = String(item.showTitle || item.seriesTitle || "").trim().toLowerCase();
-                    const showTitle = String(show.title || show.name || "").trim().toLowerCase();
-                    return savedTitle && showTitle === savedTitle;
-                  })?.id ||
-                  item.id
-                )
-              : item.id;
-
-            setDashboardOpen({
-              type: item.type || "movie",
-              id: dashboardTargetId,
-            });
-            setActiveLibrary(item.type === "tv" ? "tv" : "movies");
-          }}
-        />
-        );
-      })}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("recentActivity") && showMedia && (
-  <div className="panel dashboard-panel dashboard-recent-activity-panel">
-    <div className="panel-header">
-      <h3>Your Recent Activity</h3>
-
-      <button
-        className="secondary-button"
-        onClick={() => setActiveLibrary("dashboard")}
-      >
-        View Dashboard
-      </button>
-    </div>
-
-    <div className="dashboard-stat-list">
-      <button
-        className="dashboard-stat-row"
-        type="button"
-        onClick={() => setActiveLibrary("watchlist")}
-      >
-        <strong>Watchlist</strong>
-        <p>{movieWatchCount + tvWatchCount} saved items</p>
-        <span>
-          {movieWatchCount} movies • {tvWatchCount} TV shows
-        </span>
-      </button>
-
-      <button
-  className="dashboard-stat-row"
-  type="button"
-  onClick={() => setActiveLibrary("requests")}
->
-  <strong>Requests</strong>
-  <p>{movieRequestCount + tvRequestCount} pending requests</p>
-  <span>
-    {movieRequestCount} movie requests • {tvRequestCount} TV requests
-  </span>
-</button>
-
-<div className="dashboard-stat-row">
-  <strong>Your request services</strong>
-  <p>{movieRequestCount + tvRequestCount} tracked items</p>
-  <span>Only requests created by this Homestead account are shown.</span>
-</div>
-
-<div className="dashboard-stat-row">
-  <strong>Scanner</strong>
-        <p>Recent imports coming soon</p>
-        <span>Movies, TV, books, music, and YouTube scan activity.</span>
-      </div>
-    </div>
-  </div>
-)}
-</div>
-
-{widgetEnabled("continueReading") && showBooks && continueReading.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Reading</h3>
-      <button className="secondary-button" onClick={() => setActiveLibrary("books")}>
-        View Books
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueReading.map((book) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-read-${book.id}`}
-          item={book}
-          title={book.title || book.name}
-          poster={getDashboardBookPoster(book)}
-          libraryType="book"
-          progress={book.percentage != null ? Math.round(book.percentage * 100) : null}
-          progressLabel={book.percentage != null ? `${Math.round(book.percentage * 100)}% complete` : ""}
-          onClick={() => {
-            setDashboardOpen({ type: "book", id: book.id });
-            setActiveLibrary("books");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("continueListening") && (showMusic || showBooks) && continueListening.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Listening</h3>
-
-      <button
-        className="secondary-button"
-        type="button"
-        onClick={() => setActiveLibrary("music")}
-      >
-        View Music
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueListening.filter((song) => song.type === 'audiobook' ? showBooks : showMusic).map((song) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-music-${song.id}`}
-          item={song}
-          title={song.title || song.name}
-          subtitle={song.artist}
-          poster={getDashboardMusicPoster(song)}
-          libraryType="music"
-          progress={song.duration ? (song.currentTime / song.duration) * 100 : 0}
-          onClick={() => {
-            setDashboardOpen({
-              type: song.type === 'audiobook' ? 'book' : 'music',
-              id: song.type === 'audiobook' ? song.bookId : song.artist,
-            });
-            setActiveLibrary(song.type === 'audiobook' ? 'books' : 'music');
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("continueYouTube") && showYouTube && continueYouTube.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Watching YouTube</h3>
-
-      <button
-        className="secondary-button"
-        onClick={() => setActiveLibrary("youtube")}
-      >
-        View YouTube
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueYouTube.map((video) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-youtube-${video.id}`}
-          item={video}
-          title={video.title || video.name}
-          poster={getDashboardYouTubePoster(video)}
-          libraryType="youtube"
-          progress={video.duration ? (video.currentTime / video.duration) * 100 : 0}
-          onClick={() => {
-            setDashboardOpen({
-              type: "youtube",
-              id: video.creatorId || video.creatorName || video.channelId || video.id,
-              videoPath: video.path || video.sourcePath || video.publicPath || video.file || video.id,
-            });
-            setActiveLibrary("youtube");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-  {showMovies && (
-    <div className="panel dashboard-panel">
-      <div className="panel-header">
-        <h3>Recently Added Movies</h3>
-      </div>
-
-      <div className="mini-poster-row">
-        {recentMovies.map((movie) => (
-          <HomeDashboardMiniPosterCard
-            key={movie.id}
-            item={movie}
-            title={movie.name || movie.title}
-            poster={getMatchedPosterOrLocalPoster("movies", movie, "")}
-            libraryType="movie"
-            onClick={() => {
-              setDashboardOpen({ type: "movie", id: movie.id });
-              setActiveLibrary("movies");
-            }}
-          />
-        ))}
-      </div>
-    </div>
-  )}
-
-
-{showTV && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Recently Added TV</h3>
-    </div>
-
-    <div className="mini-poster-row">
-      {recentTV.map((show) => (
-        <HomeDashboardMiniPosterCard
-          key={show.id}
-          item={show}
-          title={show.name || show.title}
-          poster={getMatchedPosterOrLocalPoster("tv", show, "")}
-          libraryType="tv"
-          onClick={() => {
-            setDashboardOpen({ type: "tv", id: show.id });
-            setActiveLibrary("tv");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{showBooks && (       
- <div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added Books</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("books")}>
-      View Books
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-    {recentBooks.map((book) => (
-      <HomeDashboardMiniPosterCard
-        key={book.id}
-        item={book}
-        title={book.name || book.title}
-        poster={getDashboardBookPoster(book)}
-        libraryType="book"
-        onClick={() => {
-          setDashboardOpen({ type: "book", id: book.id });
-          setActiveLibrary("books");
-        }}
-      />
-    ))}
-  </div>
-</div>
-)}
-
-{showMusic && (
-<div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added Music</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("music")}>
-      View Music
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-    {recentMusic.map((artist) => (
-      <HomeDashboardMiniPosterCard
-        key={artist.id || artist.name}
-        item={artist}
-        title={artist.name || artist.title}
-        poster={artist.poster || artist.cover || homeMusicArtwork.artists?.[artist.name || artist.title || artist.id]?.artwork?.poster || homeMusicArtwork.artists?.[artist.name || artist.title || artist.id]?.artwork?.cover}
-        libraryType="music"
-        onClick={() => {
-          setDashboardOpen({ type: "music", id: artist.name });
-          setActiveLibrary("music");
-        }}
-      />
-    ))}
-  </div>
-</div>
-)}
-
-{showYouTube && (
-<div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added YouTube</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("youtube")}>
-      View YouTube
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-{recentYouTube.map((creator, index) => (
-  <HomeDashboardMiniPosterCard
-    key={`${creator.id || creator.creatorId || creator.name}-${index}`}
-    item={creator}
-    title={creator.name || creator.title}
-    poster={getDashboardYouTubePoster(creator)}
-    libraryType="youtube"
-    onClick={() => {
-      setDashboardOpen({
-        type: "youtube",
-        id:
-          creator.id ||
-          creator.creatorId ||
-          creator.name ||
-          creator.title,
-      });
-      setActiveLibrary("youtube");
-    }}
-  />
-    ))}
-  </div>
-</div>
-)}
-
-      </div>
+<ServerHomeFeed recent={recentItems} resume={resumeItems} related={relatedItems} activity={homeActivity} onOpen={openHomeItem} renderCard={renderHomeCard} showRecent={widgetEnabled("recentlyAdded")} showResume={widgetEnabled("continueWatching")} showRelated={widgetEnabled("relatedItems")} showActivity={widgetEnabled("recentActivity")} />
     </div>
   );
 }
@@ -19978,12 +19591,14 @@ function HomeDashboardMiniPosterCard({
   libraryType = "media",
   progress = null,
   progressLabel = "",
+  pills = [],
   onClick,
 }) {
   const [imageCandidateIndex, setImageCandidateIndex] = useState(0);
   const rawTitle = title || item.title || item.name || item.filename || "Untitled";
   const displayTitle = cleanDashboardMediaTitle(rawTitle, libraryType);
-  const displaySubtitle = getDashboardMediaSubtitle(item, libraryType, subtitle);
+  const rawSubtitle = getDashboardMediaSubtitle(item, libraryType, subtitle);
+  const displaySubtitle = String(rawSubtitle).trim() === displayTitle.trim() ? "" : rawSubtitle;
   const posterCandidates = Array.from(new Set([
     poster,
     ...(Array.isArray(item.posterCandidates) ? item.posterCandidates : []),
@@ -20046,6 +19661,7 @@ function HomeDashboardMiniPosterCard({
         {progressLabel && <small>{progressLabel}</small>}
         <span>{displayTitle}</span>
         {displaySubtitle && <small>{displaySubtitle}</small>}
+        {pills.length > 0 && <span className="home-media-pills">{pills.map((pill) => <small key={pill}>{pill}</small>)}</span>}
       </div>
     </button>
   );
@@ -47167,6 +46783,7 @@ function HomesteadApp({ sessionUser, onLogout }) {
   const appearanceSaveQueue = useRef(null);
   if (!appearanceSaveQueue.current) appearanceSaveQueue.current = createAppearanceSaveQueue();
   const [photoAlbumId, setPhotoAlbumId] = useState("");
+
   const [adultPhotoAlbums, setAdultPhotoAlbums] = useState([]);
   const isPhotoLibrary = activeLibrary === "photos" || activeLibrary === "adultPhotos";
   const activePhotoAlbum = isPhotoLibrary ? (activeLibrary === "adultPhotos" ? adultPhotoAlbums : Object.values(mediaIndex?.libraries?.photos || {})).find((album) => String(album.id) === photoAlbumId) : null;
@@ -47411,6 +47028,13 @@ function HomesteadApp({ sessionUser, onLogout }) {
     setPageContext({ library: activeLibrary, title: "", appearanceScope: "", addActions: [], filterSort: false, filterSortActive: false, filterSortCount: 0, backAction: "", backLabel: "", appearanceAction: "", stats: [], headerActions: [], hero: null });
     setMediaAppearanceScope("library"); setLibraryActionsOpen(false); setMediaAppearanceOpen(false); setMediaAppearanceInitialTab("library");
   }, [activeLibrary]);
+
+  useEffect(() => {
+    if (activeLibrary !== "photos" || dashboardOpen?.type !== "photo") return;
+    const album = Object.values(mediaIndex?.libraries?.photos || {}).find((item) => String(item.id) === String(dashboardOpen.id));
+    setPhotoAlbumId(album ? String(album.id) : "");
+    setDashboardOpen(null);
+  }, [activeLibrary, dashboardOpen?.type, dashboardOpen?.id, mediaIndex]);
 
   function openAdultProfileModal(defaultType = "") {
     setShowAddModal(false);

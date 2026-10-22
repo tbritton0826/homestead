@@ -44,7 +44,8 @@ collectionNames.push('stripSharedTitleYearSuffix', 'getSharedCollectionDateSortV
 const collectionContext = { SHARED_SMART_COLLECTION_SEEDS: presets };
 const build = vm.runInNewContext(`${collectionNames.map((name) => source(name)).join('\n')}; buildSharedMediaCollections`, collectionContext);
 const movies = [{ id: 'iron-man', title: 'Iron Man', year: '2008' }, { id: 'furious-7', title: 'Furious 7' }];
-const generated = build(movies, [], [], [], []).find((row) => row.id === 'mcu');
+assert.equal(build(movies, [], [], [], []).length, 0, 'fresh installs do not auto-create presets');
+const generated = build(movies, [], [], [{ collectionId: 'mcu', items: [] }], []).find((row) => row.id === 'mcu');
 assert.equal(generated.items.length, 1);
 const edited = { ...generated, generatedCollectionId: 'mcu', source: 'custom', items: [...generated.items, { library: 'movies', sourceId: 'furious-7', title: 'Furious 7' }], poster: 'saved-art.jpg', banner: 'saved-banner.jpg' };
 const after = build(movies, [], [edited], [], []);
