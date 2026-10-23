@@ -54,9 +54,9 @@ export default function ProgressiveLibraryGrid({ items, renderItem, className, l
     return () => observer.disconnect();
   }, [items, sourceKey, limit, more]);
   // Reuse unchanged card elements while expanding the window; a metadata or parent change invalidates them.
-  const renderedItems = useMemo(() => items.map(renderItem), [items, renderItem]);
+  const renderedItems = useMemo(() => items.slice(0, limit).map(renderItem), [items, renderItem, limit]);
   return <>
-    <div ref={grid} className={className}>{renderedItems.slice(0, limit)}</div>
+    <div ref={grid} className={className}>{renderedItems}</div>
     {more && <div ref={sentinel} className="small-muted"><button type="button" className="secondary-button" onClick={loadMore}>Show more · {Math.min(limit, items.length)} of {items.length}</button></div>}
   </>;
 }

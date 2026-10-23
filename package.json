@@ -39,7 +39,7 @@
     "test:responsiveness": "node scripts/test-public-ui-responsiveness.cjs",
     "test:startup": "node scripts/test-public-startup-pass.cjs",
     "test:qa": "node scripts/test-public-qa.cjs",
-    "test": "npm run test:mobile-v12 && npm run test:artwork-recovery && npm run test:appearance && npm run test:responsiveness && npm run test:startup && node scripts/test-media-polish-pass.cjs && node scripts/test-full-public-pass.cjs && npm run test:qa && npm run test:ios-v36 && npm run test:ios-v37 && npm run test:book-formats && npm run test:inventory-native && npm run test:v314 && npm run test:v315 && npm run test:profile-wizard && npm run test:v317 && npm run test:v318 && npm run test:server-content",
+    "test": "npm run test:mobile-v12 && npm run test:artwork-recovery && npm run test:appearance && npm run test:responsiveness && npm run test:startup && node scripts/test-media-polish-pass.cjs && node scripts/test-full-public-pass.cjs && npm run test:qa && npm run test:ios-v36 && npm run test:ios-v37 && npm run test:book-formats && npm run test:inventory-native && npm run test:v314 && npm run test:v315 && npm run test:profile-wizard && npm run test:v317 && npm run test:v318 && npm run test:server-content && npm run test:final-ui-polish",
     "test:v314": "node --test scripts/test-v314.cjs",
     "test:book-browser": "node scripts/verify-book-reader-browser.mjs",
     "test:v315": "node --test scripts/test-v315.cjs",
@@ -49,7 +49,8 @@
     "test:v317-browser": "node scripts/verify-v317-browser.mjs",
     "test:v318": "node --test scripts/test-v318.cjs",
     "test:windows-setup": "node scripts/test-setup-storage.cjs && node scripts/test-windows-setup-pass.cjs",
-    "test:server-content": "node --test scripts/test-server-content-pass.cjs && node scripts/test-request-collections-pass.cjs"
+    "test:server-content": "node --test scripts/test-server-content-pass.cjs && node scripts/test-request-collections-pass.cjs",
+    "test:final-ui-polish": "node --test scripts/test-final-ui-polish.cjs"
   },
   "dependencies": {
     "@fullcalendar/daygrid": "^6.1.20",

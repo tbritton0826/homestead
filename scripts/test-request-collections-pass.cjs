@@ -53,13 +53,13 @@ assert.equal(after.filter((row) => row.id === 'mcu').length, 1, 'no duplicate or
 assert.equal(after.find((row) => row.id === 'mcu').items.length, 2);
 assert.equal(after.find((row) => row.id === 'mcu').poster, 'saved-art.jpg');
 assert.equal(build(movies, [], [{ ...edited, items: [] }], [], []).find((row) => row.id === 'mcu').items.length, 0, 'removed members do not reappear through smart matching');
-const normalize = vm.runInNewContext(['sanitizeCustomCollectionId', 'normalizeCustomCollectionItem', 'normalizeCustomCollectionPayload'].map((name) => source(name, server)).join('\n') + '; normalizeCustomCollectionPayload');
+const normalize = vm.runInNewContext(['sanitizeCustomCollectionId', 'normalizeCustomCollectionItem', 'normalizeCustomCollectionPayload', 'reconcileCollectionOrderMembership'].map((name) => source(name, server)).join('\n') + '; normalizeCustomCollectionPayload');
 assert.equal(normalize(edited).generatedCollectionId, 'mcu');
 assert.equal(normalize(edited).items[1].sourceId, 'furious-7');
 assert.equal(normalize({ name: 'Renamed' }, normalize(edited)).generatedCollectionId, 'mcu');
 assert(!app.includes('const SHARED_SMART_COLLECTION_SEEDS = ['));
 assert(app.includes('Add / Remove Movies, TV & Books'));
-assert(app.includes('setCustomCollectionEditor(collection); setSelectedSharedCollectionId("");'));
+assert(app.includes('onEditCollection={(collection) => setCustomCollectionEditor(collection)}'), "editing keeps the current collection open beneath the modal");
 
 const preview = vm.runInNewContext(`${source('getSeerrPreviewStatus')}; getSeerrPreviewStatus`);
 assert.equal(preview({ id: 399566, mediaInfo: { status: 3 } }, { movies: [{ tmdbId: 399566, status: 'available', checkedAt: 'now' }] }), 'available');
