@@ -32,3 +32,9 @@ In the local Vite browser fixture, the first grid frame measured 140.0ms on a fi
 Production index/artwork transport, sustained connection recovery, and physical-device visual checks remain follow-up validation. Existing detail-return scroll/window behavior is unchanged. The wider settings roadmap remains deferred.
 
 Run `node scripts/serve-ui-polish-fixture.mjs` for isolated UI reproduction and `npm run test:final-ui-polish` for the new regressions. Native users should run `bash scripts/validate-ios.sh` on the Mac before installing.
+
+## Additional release verification (October 23)
+
+The generated MCU Timeline List retained all eight sections at full content height (327–1,633px in the tested desktop view). The 675px right pane contained approximately 5,994px of timeline content; wheel scrolling reached the last Connected Multiverse Branches section without moving the left overview pane. The current public Windows installer is documented in [release verification](WINDOWS-UI-POLISH-RELEASE.md).
+
+A separate existing limitation surfaced in this legacy built-in timeline view: its fuzzy title fallback can classify a missing numbered sequel as an earlier owned title in a sparse catalog. This pass does not change that matcher. New wizard orders use exact saved library/source IDs and leave ambiguous imported titles unmatched; the legacy matcher needs a separate correction before final v1.
