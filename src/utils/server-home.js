@@ -22,7 +22,7 @@ const video = (file) => file.type === 'video' || /\.(?:mp4|mkv|m4v|avi|mov|webm|
 const annotate = (item, type, parent = item) => ({ ...item, type, targetId: parent.id || parent.name, entity: parent, libraryLabel: homeLibrary[type][1], episodePill: type === 'tv' ? homeEpisodePill(item) : '', feedKey: `${type}:${parent.id || parent.name}:${['tv', 'youtube'].includes(type) ? filePath(item) || item.id || name(item) : ''}` });
 
 export function homeCatalog(index = {}, youtubeCreators = [], enabled = {}) {
-  const libraries = index.libraries || {};
+  const libraries = index?.libraries || {};
   const catalog = [];
   for (const [key, type] of [['movies', 'movie'], ['books', 'book'], ['music', 'music'], ['photos', 'photo']]) {
     if (enabled[homeLibrary[type][0]] !== true) continue;

@@ -18,6 +18,17 @@ const index = { libraries: {
 const enabled = { movies: true, tvshows: true, books: true, music: true, photos: true, youtube: true, adult: true };
 const creators = [{ id: 'c', name: 'Creator', videos: { v: { id: 'v', title: 'Video', path: '/youtube/video.mp4', addedAt: '2026-10-18' } } }];
 
+test('Home tolerates the null library index during startup and populates after it loads', async () => {
+  const { homeCatalog, homeRecentlyAdded } = await home;
+  assert.deepEqual(homeCatalog(null, [], enabled), []);
+  assert.deepEqual(homeCatalog(undefined, [], enabled), []);
+  assert.deepEqual(homeCatalog({ libraries: null }, [], enabled), []);
+  const youtubeOnly = homeCatalog(null, creators, enabled);
+  assert.equal(youtubeOnly.length, 1);
+  assert.equal(youtubeOnly[0].type, 'youtube');
+  assert(homeRecentlyAdded(homeCatalog(index, creators, enabled)).some(item => item.type === 'tv'));
+});
+
 test('Recently Added sorts actual additions across libraries and annotates TV episodes without artwork files', async () => {
   const { homeCatalog, homeRecentlyAdded, homeEpisodePill } = await home;
   const recent = homeRecentlyAdded(homeCatalog(index, creators, enabled));
