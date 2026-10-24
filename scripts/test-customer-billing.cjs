@@ -396,7 +396,7 @@ test('commercial customer foundation and billing lifecycle',async t=> {
     await t.test('free plan is configurable and grants only its published features',async()=> {
       await publishPlan(pool,{id:'free-none-v1',tier:'free',version:1,name:'Free fixture',amount:0,currency:'usd',interval:'none'},null);
       await request('/session',null,b);await request('/login',{email:'b@example.test',password:'new-fixture-password'},b);
-      assert.equal((await request('/select-free',{planId:'free-none-v1'},b)).status,200);assert.deepEqual((await request('/entitlements',null,b)).data.features,['coreMedia']);
+      assert.equal((await request('/select-free',{planId:'free-none-v1'},b)).status,200);assert.deepEqual((await request('/entitlements',null,b)).data.features,['coreMedia','photos','adult']);
     });
     await t.test('rate limiting is persistent across requests',async()=> {
       const jar=await anonymous();let status;for(let index=0;index<31;index++)status=(await request('/register',{email:'invalid'},jar,{headers:{'X-Forwarded-For':'203.0.113.254'}})).status;

@@ -52,10 +52,11 @@ async function run() {
     useRef:()=>refs[refIndex++],useEffect:fn=>effects.push(fn),useLayoutEffect:fn=>layouts.push(fn)};
   const Grid=vm.runInNewContext(gridCode.code+'; ProgressiveLibraryGrid',context);
   const items=Array.from({length:400},(_,i)=>({id:String(i),title:i<300?'A':'Z'}));
-  const props={items,className:'grid',libraryId:'movies',getLetter:item=>item.title,renderItem:item=>React.createElement('button',{key:item.id},item.id)};
+  let cardCalls = 0;
+  const props={items,className:'grid',libraryId:'movies',getLetter:item=>item.title,renderItem:item=>{ cardCalls++; return React.createElement('button',{key:item.id},item.id); }};
   let cleanups=[];
   const render=(updates={})=>{cleanups.forEach(fn=>fn?.());cleanups=[];effects=[];layouts=[];refIndex=0;const result=Grid({...props,...updates});layouts.forEach(fn=>fn());cleanups=effects.map(fn=>fn());return result;};
-  let tree=render();assert.equal(tree.props.children[0].props.children.length,120);
+  let tree=render();assert.equal(tree.props.children[0].props.children.length,120); assert.equal(cardCalls,120, "offscreen card construction must be bounded as well as DOM mounting");
   scroller.scrollHeight=600;tree=render();assert.equal(observedRoot,null,'mobile uses the viewport rather than its content-sized main');scroller.scrollHeight=2000;
   intersection([{isIntersecting:true}]);tree=render();assert.equal(tree.props.children[0].props.children.length,240,'scroll loads one batch');
   tree=render({items:items.map(item=>({...item,title:item.title+' updated'}))});assert.equal(tree.props.children[0].props.children.length,240,'equivalent new objects keep expanded cards while showing updated metadata');

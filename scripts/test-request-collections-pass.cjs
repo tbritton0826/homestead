@@ -44,7 +44,8 @@ collectionNames.push('stripSharedTitleYearSuffix', 'getSharedCollectionDateSortV
 const collectionContext = { SHARED_SMART_COLLECTION_SEEDS: presets };
 const build = vm.runInNewContext(`${collectionNames.map((name) => source(name)).join('\n')}; buildSharedMediaCollections`, collectionContext);
 const movies = [{ id: 'iron-man', title: 'Iron Man', year: '2008' }, { id: 'furious-7', title: 'Furious 7' }];
-const generated = build(movies, [], [], [], []).find((row) => row.id === 'mcu');
+assert.equal(build(movies, [], [], [], []).length, 0, 'fresh installs do not auto-create presets');
+const generated = build(movies, [], [], [{ collectionId: 'mcu', items: [] }], []).find((row) => row.id === 'mcu');
 assert.equal(generated.items.length, 1);
 const edited = { ...generated, generatedCollectionId: 'mcu', source: 'custom', items: [...generated.items, { library: 'movies', sourceId: 'furious-7', title: 'Furious 7' }], poster: 'saved-art.jpg', banner: 'saved-banner.jpg' };
 const after = build(movies, [], [edited], [], []);
@@ -52,13 +53,13 @@ assert.equal(after.filter((row) => row.id === 'mcu').length, 1, 'no duplicate or
 assert.equal(after.find((row) => row.id === 'mcu').items.length, 2);
 assert.equal(after.find((row) => row.id === 'mcu').poster, 'saved-art.jpg');
 assert.equal(build(movies, [], [{ ...edited, items: [] }], [], []).find((row) => row.id === 'mcu').items.length, 0, 'removed members do not reappear through smart matching');
-const normalize = vm.runInNewContext(['sanitizeCustomCollectionId', 'normalizeCustomCollectionItem', 'normalizeCustomCollectionPayload'].map((name) => source(name, server)).join('\n') + '; normalizeCustomCollectionPayload');
+const normalize = vm.runInNewContext(['sanitizeCustomCollectionId', 'normalizeCustomCollectionItem', 'normalizeCustomCollectionPayload', 'reconcileCollectionOrderMembership'].map((name) => source(name, server)).join('\n') + '; normalizeCustomCollectionPayload');
 assert.equal(normalize(edited).generatedCollectionId, 'mcu');
 assert.equal(normalize(edited).items[1].sourceId, 'furious-7');
 assert.equal(normalize({ name: 'Renamed' }, normalize(edited)).generatedCollectionId, 'mcu');
 assert(!app.includes('const SHARED_SMART_COLLECTION_SEEDS = ['));
 assert(app.includes('Add / Remove Movies, TV & Books'));
-assert(app.includes('setCustomCollectionEditor(collection); setSelectedSharedCollectionId("");'));
+assert(app.includes('onEditCollection={(collection) => setCustomCollectionEditor(collection)}'), "editing keeps the current collection open beneath the modal");
 
 const preview = vm.runInNewContext(`${source('getSeerrPreviewStatus')}; getSeerrPreviewStatus`);
 assert.equal(preview({ id: 399566, mediaInfo: { status: 3 } }, { movies: [{ tmdbId: 399566, status: 'available', checkedAt: 'now' }] }), 'available');

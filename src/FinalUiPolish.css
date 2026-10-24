@@ -1,0 +1,49 @@
+/* Shared collection and library finishing layer; retain existing account themes. */
+.collection-wizard-overlay, .polish-modal-overlay { position: fixed; inset: 0; z-index: 1600; display: grid; place-items: center; padding: 24px; isolation: isolate; }
+.collection-wizard-backdrop, .polish-modal-backdrop { position: absolute; inset: 0; z-index: -1; background: #030914b8; backdrop-filter: blur(9px); }
+.collection-wizard-card, .polish-modal-card { display: flex; flex-direction: column; width: min(100%, 1000px); max-height: calc(100dvh - 48px); overflow: hidden; background: var(--panel-bg, #101725); color: var(--text-primary, #edf1f9); border: 1px solid #ffffff25; border-radius: 24px; box-shadow: 0 28px 90px #0008; }
+.collection-wizard-card > header, .polish-modal-card > header { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: center; gap: 16px; padding: 22px 24px; border-bottom: 1px solid #ffffff12; }
+.collection-wizard-card h2, .polish-modal-card h2 { margin: 0; font-size: 1.5rem; text-wrap: balance; }
+.collection-wizard-card .eyebrow { margin: 0 0 7px; }
+.collection-wizard-body, .polish-modal-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 24px; scrollbar-gutter: stable; }
+.collection-wizard-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.collection-wizard-card label, .polish-modal-card label { display: grid; gap: 8px; font-weight: 600; min-width: 0; }
+.collection-wizard-card :is(input:not([type=file]), textarea), .polish-modal-card :is(input:not([type=checkbox]), select) { width: 100%; min-width: 0; padding: 11px 12px; color: inherit; background: #0003; border: 1px solid #ffffff28; border-radius: 11px; font: inherit; box-sizing: border-box; }
+.collection-wizard-card textarea { resize: vertical; }
+.collection-wizard-art { display: flex; align-items: center; gap: 16px; }
+.collection-wizard-art img { width: 68px; height: 94px; object-fit: cover; border-radius: 9px; outline: 1px solid #ffffff20; outline-offset: -1px; }
+.collection-wizard-card .media-native-file-button input[type=file] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.collection-wizard-search { margin-top: 24px; }
+.collection-wizard-results { display: grid; gap: 6px; max-height: 280px; overflow: auto; margin-top: 10px; }
+.collection-wizard-results > button { display: flex; align-items: center; justify-content: space-between; text-align: left; padding: 12px; border: 1px solid #ffffff16; border-radius: 12px; color: inherit; background: #ffffff07; }
+.collection-wizard-results small, .collection-wizard-order small { display: block; color: #a8b5cb; margin-top: 4px; font-weight: 400; }
+.collection-wizard-selected { display: flex; flex-wrap: wrap; gap: 8px; }
+.collection-wizard-order { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.collection-wizard-order > li { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid #ffffff18; border-radius: 14px; padding: 12px; background: #ffffff04; }
+.collection-wizard-number { color: #9faee4; font-variant-numeric: tabular-nums; }
+.collection-wizard-row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.collection-wizard-card > footer, .polish-modal-card > footer { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 24px; border-top: 1px solid #ffffff15; background: #0002; }
+.collection-wizard-card footer p { flex: 1; margin: 0; font-size: .85rem; color: #b3c2db; }
+.collection-wizard-card footer > div { display: flex; gap: 8px; flex-wrap: wrap; }
+:is(.collection-wizard-card, .polish-modal-card) button { min-height: 42px; cursor: pointer; transition: background-color 150ms, border-color 150ms, box-shadow 150ms; }
+:is(.collection-wizard-card, .polish-modal-card) :is(button, input, textarea, select):focus-visible { outline: 2px solid #8dafff; outline-offset: 3px; }
+.shared-collection-detail .collection-order-column { overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.shared-collection-detail .collection-order-column > :is(.shared-timeline-view, .shared-collection-item-grid, .shared-episode-date-list-view, .shared-imported-watch-order-view) { flex: 0 0 auto; height: auto; min-height: 0; overflow: visible !important; contain: none; }
+.collection-order-column :is(.shared-timeline-section, .shared-episode-date-section, .shared-imported-section) { flex-shrink: 0; height: auto; min-height: min-content; }
+.collection-order-column :is(.shared-timeline-view, .shared-episode-date-list-view, .shared-imported-watch-order-view) { align-content: start; grid-auto-rows: max-content; }
+.smart-collection-suggestions { margin: 24px 0; padding: 20px; border: 1px dashed #8398cf55; border-radius: 20px; background: #7e9be605; }
+.smart-collection-suggestions h3 { margin: 4px 0 10px; }
+.smart-collection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 12px; }
+.smart-collection-grid article { padding: 16px; border: 1px solid #ffffff18; border-radius: 14px; background: #ffffff04; }
+.smart-collection-grid h4 { margin: 0 0 8px; }.smart-collection-grid p { color: #a8b5cb; line-height: 1.5; }.smart-collection-grid details { margin: 12px 0; }.smart-collection-grid summary { cursor: pointer; }.smart-collection-grid ul { max-height: 200px; overflow: auto; padding-left: 20px; }.smart-collection-grid article > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.library-filter-dialog { width: min(100%, 760px); }.polish-filter-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }.polish-filter-choices label { display: flex; align-items: center; padding: 10px; background: #ffffff05; border-radius: 10px; }.polish-modal-card fieldset { border: 1px solid #ffffff18; border-radius: 14px; padding: 16px; margin-top: 18px; }
+.library-diagnostics-trigger { display: flex; justify-content: flex-end; margin: 12px 0; }.library-diagnostics-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 10px; }.library-diagnostics-counts div { padding: 14px; border: 1px solid #ffffff18; border-radius: 14px; }.library-diagnostics-counts strong { display: block; font-size: 1.5rem; font-variant-numeric: tabular-nums; }.library-diagnostics-list { display: grid; gap: 10px; padding: 0; list-style: none; }.library-diagnostics-list li { padding: 14px; border: 1px solid #ffffff18; border-radius: 12px; overflow-wrap: anywhere; }.library-diagnostics-list small { display: block; color: #a8b5cb; margin-top: 5px; }
+.media-availability-label { display: inline-block; margin-top: 6px; padding: 4px 8px; border-radius: 999px; background: #ffffff0d; color: #aebed3; font-size: .75rem; line-height: 1.3; }
+@media (max-width: 1100px) { .collection-wizard-order > li { grid-template-columns: 28px minmax(0,1fr); }.collection-wizard-row-actions { grid-column: 2; justify-content: flex-start; } }
+@media (max-width: 760px) { .collection-wizard-overlay, .polish-modal-overlay { padding: 8px; }.collection-wizard-card, .polish-modal-card { max-height: calc(100dvh - 16px); border-radius: 18px; }.collection-wizard-fields { grid-template-columns: 1fr; }.collection-wizard-body, .polish-modal-body { padding: 16px; }.collection-wizard-card > header, .polish-modal-card > header { padding: 16px; }.collection-wizard-card > footer { flex-direction: column; align-items: stretch; padding: 12px 16px; }.collection-wizard-card > footer > div { justify-content: flex-end; }.shared-collection-detail .collection-order-column { max-height: 72dvh; } }
+@media (prefers-reduced-motion: reduce) { :is(.collection-wizard-card, .polish-modal-card) button { transition: none; } }
+
+/* The virtual order owns one bounded scrollbar and fills the available pane. */
+.shared-collection-detail .collection-order-column:has(> .contained-watch-order) { overflow: hidden; }
+.shared-collection-detail .collection-order-column > .contained-watch-order { flex: 1 1 auto; height: 100%; overflow: hidden !important; }
+.shared-collection-detail .contained-watch-order-viewport { min-height: 0; max-height: none; }

@@ -11,8 +11,10 @@ assert.equal(productionFree.status().limits.concurrentStreams, 1);
 assert.equal(productionFree.has("coreMedia"), true);
 assert.equal(productionFree.has("multiUser"), false);
 assert.equal(productionFree.allowsLibrary("movies"), true);
-assert.equal(productionFree.allowsLibrary("photos"), false);
-assert.equal(productionFree.allowsLibrary("adult"), false);
+assert.equal(productionFree.allowsLibrary("photos"), true);
+assert.equal(productionFree.allowsLibrary("adult"), true);
+
+for (const id of ["liveTV", "family", "pets", "calendar", "recipes", "inventory", "cloud", "ai", "plugins"]) assert.equal(productionFree.allowsLibrary(id), false, id);
 
 const developmentPreview = createSubscriptionService({ env: { NODE_ENV: "development" } });
 assert.equal(developmentPreview.status().tier, "pro");

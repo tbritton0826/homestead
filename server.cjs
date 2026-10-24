@@ -1,3 +1,4 @@
+const { setupStorageInfo, inspectSetupFolder } = require("./src/server/setup-storage.cjs");
 const { recipeEditable, recipeEditSupplement } = require("./src/server/recipe-edit.cjs");
 const { sendIndexJson } = require("./src/server/json-response.cjs");
 const { createArtworkRecovery } = require("./src/server/artwork-recovery.cjs");
@@ -76,7 +77,7 @@ const ADULT_PERSON_FULL_FETCH_TIMEOUT_MS = Math.min(
   60000,
   Math.max(5000, normalizeTimeoutMs(process.env.HOMESTEAD_ADULT_FULL_FETCH_TIMEOUT_MS, 20000)),
 );
-const dataDir = path.join(__dirname, "data");
+const dataDir = path.resolve(process.env.HOMESTEAD_DATA_DIR || path.join(__dirname, "data"));
 const stationRegistryPath = path.join(dataDir, "stations.json");
 const activityJobsPath = path.join(dataDir, "activity-jobs.json");
 const activityJobStore = createActivityJobStore({ filePath: activityJobsPath });
@@ -751,6 +752,8 @@ function persistBrandingState(branding = getBrandingIconState()) {
 
 function getDefaultBrandIconPath() {
   const candidates = [
+    path.join(__dirname, "public", "homestead-icon.png"),
+    path.join(__dirname, "dist", "homestead-icon.png"),
     path.join(__dirname, "public", "assets", "images", "homestead-icon.png"),
     path.join(__dirname, "dist", "assets", "images", "homestead-icon.png"),
     path.join(__dirname, "src", "assets", "images", "homestead-icon.png"),
@@ -774,7 +777,7 @@ function sendHomesteadBrandIcon(req, res) {
     return;
   }
 
-  res.redirect(302, "/assets/images/homestead-icon.png");
+  res.redirect(302, "/homestead-icon.png");
 }
 
 function sendHomesteadManifest(req, res) {
@@ -2625,7 +2628,7 @@ async function sendHeicPreview(res, filePath, options = {}) {
   }
 }
 
-const nativeImagePreview = require("./src/server/image-preview.cjs").createImagePreviewer(path.join(__dirname, "data", "native-image-previews"));
+const nativeImagePreview = require("./src/server/image-preview.cjs").createImagePreviewer(path.join(dataDir, "native-image-previews"));
 app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
   const filePath = resolveHomesteadFilePath(String(req.query.path || "").trim());
 
@@ -2640,7 +2643,7 @@ app.get("/api/file", homesteadAccess.authorizeFile, async (req, res) => {
   if (Number(req.query.width) > 0 && /\.(?:jpe?g|png|webp|gif|avif)$/i.test(filePath) && String(req.query.raw || "") !== "1") {
     try {
       const preview = await nativeImagePreview(filePath, req.query);
-      res.type("image/jpeg").setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+      res.type("image/jpeg").setHeader("Cache-Control", req.query.v ? "private, max-age=31536000, immutable" : "private, max-age=0, must-revalidate");
       return res.sendFile(preview);
     } catch { return res.status(503).send("Image preview unavailable. Retry shortly."); }
   }
@@ -7167,11 +7170,7 @@ registerBookLocalFiles(app, {
 });
 
 function buildLiveMediaIndex() {
-  const indexPath = path.join(
-    __dirname,
-    "data",
-    "media-index.json"
-  );
+  const indexPath = path.join(dataDir, "media-index.json");
   const index = readJsonFile(indexPath, {});
   const libraries = {
     ...(index.libraries || {}),
@@ -7412,6 +7411,7 @@ function sanitizeSetupConfigForClient(config = {}) {
   safeConfig.configuredEnabledLibraries = configuredEnabledLibraries;
   safeConfig.enabledLibraries = enabledLibraries;
   safeConfig.subscription = subscription;
+  safeConfig.storage = setupStorageInfo({ mediaRoot: process.env.MEDIA_ROOT || "/media", dataDir });
   return safeConfig;
 }
 
@@ -7457,6 +7457,7 @@ function prepareSetupConfigForStorage(incomingConfig = {}) {
   delete storedConfig.adminAccount.password;
   delete storedConfig.configuredEnabledLibraries;
   delete storedConfig.subscription;
+  delete storedConfig.storage;
   delete storedConfig.adminAccount.confirmPassword;
   return storedConfig;
 }
@@ -7479,7 +7480,21 @@ function runScannerCommandsAsync(commands = []) {
   });
 }
 
-app.post("/api/setup/create-folders", (req, res) => {
+app.post("/api/setup/check-folders", homesteadAccess.requireAdmin, async (req, res) => {
+  const results = [];
+  for (const [libraryId, enabled] of Object.entries(req.body?.enabledLibraries || {})) {
+    if (!enabled || !subscriptionService.allowsLibrary(libraryId)) continue;
+    const folders = normalizeSetupFolderPaths(req.body?.folderMappings?.[libraryId]);
+    if (!folders.length) results.push({ libraryId, path: "", status: "error", message: "No folder path configured." });
+    for (const folder of folders) {
+      try { results.push({ libraryId, ...await inspectSetupFolder(folder) }); }
+      catch (error) { results.push({ libraryId, path: folder, status: "error", message: error.message }); }
+    }
+  }
+  res.json({ ok: results.every((result) => result.status !== "error"), results });
+});
+
+app.post("/api/setup/create-folders", homesteadAccess.requireAdmin, async (req, res) => {
   const enabledLibraries = req.body?.enabledLibraries || {};
   const adultSublibraries = req.body?.adultSublibraries || {};
   const libraryPreferences = req.body?.libraryPreferences || {};
@@ -7488,7 +7503,7 @@ app.post("/api/setup/create-folders", (req, res) => {
   const errors = [];
 
   for (const [libraryId, enabled] of Object.entries(enabledLibraries)) {
-    if (!enabled) continue;
+    if (!enabled || !subscriptionService.allowsLibrary(libraryId)) continue;
     const folderPaths = normalizeSetupFolderPaths(folderMappings[libraryId]);
 
     if (!folderPaths.length) {
@@ -7500,17 +7515,7 @@ app.post("/api/setup/create-folders", (req, res) => {
 
     for (const folderPath of folderPaths) {
       try {
-        if (!path.isAbsolute(folderPath)) {
-          throw new Error("Folder paths must be absolute inside the Homestead container.");
-        }
-        const existed = fs.existsSync(folderPath);
-        fs.mkdirSync(folderPath, { recursive: true });
-        results.push({
-          libraryId,
-          label: libraryId,
-          path: folderPath,
-          status: existed ? "exists" : "created",
-        });
+        results.push({ libraryId, label: libraryId, ...await inspectSetupFolder(folderPath, { create: true }) });
       } catch (error) {
         const result = { libraryId, path: folderPath, status: "error", message: error.message };
         results.push(result);
@@ -7520,6 +7525,7 @@ app.post("/api/setup/create-folders", (req, res) => {
   }
 
   if (
+    subscriptionService.allowsLibrary("adult") && subscriptionService.allowsLibrary("liveTV") &&
     enabledLibraries.adult &&
     enabledLibraries.liveTV &&
     adultSublibraries.adultTVChannels
@@ -7612,7 +7618,7 @@ app.post("/api/setup/initial-scan", homesteadAccess.requireAdmin, async (req, re
   };
 
   for (const [setupLibraryId, enabled] of Object.entries(enabledLibraries)) {
-    if (!enabled) continue;
+    if (!enabled || !subscriptionService.allowsLibrary(setupLibraryId)) continue;
     const scannerLibraryId = scanLibraryMap[setupLibraryId];
     if (!scannerLibraryId) {
       skipped.push({
@@ -7627,6 +7633,11 @@ app.post("/api/setup/initial-scan", homesteadAccess.requireAdmin, async (req, re
     const beforeCount = indexedCount(scannerLibraryId);
 
     try {
+      if (!folders.length) throw new Error("No folder path configured.");
+      for (const folder of folders) {
+        const checked = await inspectSetupFolder(folder);
+        if (checked.status === "missing") throw new Error(`Folder does not exist: ${folder}`);
+      }
       const commandResults = await runScannerCommandsAsync(commands);
       const afterCount = indexedCount(scannerLibraryId);
       results.push({
@@ -18538,6 +18549,26 @@ app.post("/api/media/set-asset", express.raw({ type: "multipart/form-data", limi
 
 
 // Shared mixed-media custom collections.
+const libraryDiagnosticJobs = new Map();
+app.get("/api/libraries/:libraryId/diagnostics", homesteadAccess.requireAdmin, async (req, res) => {
+  const libraryId = req.params.libraryId;
+  if (!["movies", "tv"].includes(libraryId)) return res.status(400).json({ ok: false, message: "Diagnostics are available for Movies and TV." });
+  if (!homesteadAccess.canAccessLibrary(req, libraryId)) return res.status(403).json({ ok: false, message: "Library access denied." });
+  try {
+    const index = homesteadAccess.filterMediaIndex(req, readJsonFile(path.join(dataDir, "media-index.json"), {}));
+    const mappings = readSetupConfig()?.folderMappings || {};
+    const configured = mappings[libraryId] || (libraryId === "tv" ? mappings.tvshows : null);
+    const roots = (Array.isArray(configured) ? configured : configured ? [configured] : [path.join(process.env.MEDIA_ROOT || "/media", libraryId)]).filter(value => typeof value === "string" && value.trim());
+    const key = JSON.stringify([libraryId, roots, index.generatedAt, Object.keys(index.libraries?.[libraryId] || {})]);
+    if (!libraryDiagnosticJobs.has(key)) {
+      const job = require("./src/server/library-diagnostics.cjs").libraryDiagnostics({ roots, library: index.libraries?.[libraryId] || {}, lastScan: index.scanHistory?.[libraryId] });
+      libraryDiagnosticJobs.set(key, job);
+      job.finally(() => libraryDiagnosticJobs.delete(key)).catch(() => {});
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ ok: true, ...await libraryDiagnosticJobs.get(key) });
+  } catch (error) { res.status(500).json({ ok: false, message: error.message || "Library inspection failed." }); }
+});
 const customCollectionsDir = path.join(dataDir, "collections", "custom");
 
 function sanitizeCustomCollectionId(value = "") {
@@ -18577,6 +18608,16 @@ function normalizeCustomCollectionItem(item = {}, index = 0) {
   };
 }
 
+function reconcileCollectionOrderMembership(order, previousItems, nextItems) {
+  if (!order) return null;
+  const key = item => `${item.library}:${item.sourceId}`;
+  const previous = new Set(previousItems.map(key)), next = new Set(nextItems.map(key));
+  const sections = (order.sections || []).map(section => ({ ...section, items: (section.items || []).filter(row => !row.sourceId || !previous.has(key(row)) || next.has(key(row))) }));
+  if (!sections.length) sections.push({ id: "manual", title: "Manual order", manualOrder: true, items: [] });
+  for (const item of nextItems) if (!previous.has(key(item))) sections.at(-1).items.push({ ...item, type: item.library === "tv" ? "tv" : item.library === "books" ? "book" : "movie", unit: item.library === "tv" ? "series" : "title" });
+  return { ...order, sections };
+}
+
 function normalizeCustomCollectionPayload(payload = {}, existing = null) {
   const name = String(payload.name || existing?.name || "Untitled Collection").trim() || "Untitled Collection";
   const id = sanitizeCustomCollectionId(payload.id || existing?.id || name);
@@ -18603,9 +18644,33 @@ function normalizeCustomCollectionPayload(payload = {}, existing = null) {
     source: "custom",
     sortMode: "manual",
     items,
+    watchOrder: (payload.watchOrder ?? existing?.watchOrder) ? normalizeCollectionDraftOrder(
+      existing?.watchOrder && (payload.watchOrder == null || JSON.stringify(payload.watchOrder) === JSON.stringify(existing.watchOrder))
+        ? reconcileCollectionOrderMembership(existing.watchOrder, existing.items || [], items)
+        : payload.watchOrder ?? existing.watchOrder, id) : null,
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+}
+
+function normalizeCollectionDraftOrder(order, collectionId) {
+  if (!order || !Array.isArray(order.sections)) throw new Error("Invalid collection playback order.");
+  let count = 0;
+  const sections = order.sections.slice(0, 100).map((section, sectionIndex) => ({
+    id: String(section.id || `section-${sectionIndex}`).slice(0, 160),
+    title: String(section.title || "Manual order").slice(0, 300),
+    manualOrder: section.manualOrder === true,
+    items: (Array.isArray(section.items) ? section.items : []).map((row, index) => {
+      if (++count > 20000) throw new Error("A collection order cannot exceed 20,000 rows.");
+      const library = ["movies", "tv", "books"].includes(row.library) ? row.library : row.type === "book" ? "books" : row.type === "movie" ? "movies" : "tv";
+      const season = row.season == null || row.season === "" ? null : Number(row.season);
+      if (season !== null && (!Number.isInteger(season) || season < 0 || season > 999)) throw new Error("Invalid TV season.");
+      const episodes = [...new Set((Array.isArray(row.episodes) ? row.episodes : []).map(Number))];
+      if (episodes.some(number => !Number.isInteger(number) || number < 0 || number > 9999)) throw new Error("Invalid TV episode.");
+      return { library, sourceId: String(row.sourceId || "").slice(0, 500), type: library === "books" ? "book" : library === "movies" ? "movie" : "tv", title: String(row.title || "").trim().slice(0, 1000), unit: ["title", "series", "season", "episode"].includes(row.unit) ? row.unit : "title", season, episodes, detail: String(row.detail || "").slice(0, 1000), date: String(row.date || "").slice(0, 100), order: index + 1, unmatched: row.unmatched === true };
+    }).filter(row => row.title),
+  }));
+  return { collectionId, id: collectionId, title: String(order.title || "Watch Order").slice(0, 500), sourceUrl: String(order.sourceUrl || "").slice(0, 4000), manualOrder: true, importedAt: new Date().toISOString(), sections, itemCount: sections.reduce((sum, section) => sum + section.items.length, 0) };
 }
 
 function readAllCustomCollections() {
@@ -18628,12 +18693,15 @@ app.get("/api/collections/custom", (req, res) => {
 
 app.post("/api/collections/custom", homesteadAccess.requireAdmin, (req, res) => {
   try {
+    if (homesteadAccess.accessContext(req).user?.readOnly) return res.status(403).json({ ok: false, message: "This account cannot edit collections." });
+    if ((req.body?.items || []).some(item => !homesteadAccess.canAccessLibrary(req, item.library || "movies"))) return res.status(403).json({ ok: false, message: "A selected library is unavailable to this account." });
     const requestedLibrary = req.body?.library;
     if (["music", "youtube"].includes(requestedLibrary) && (!homesteadAccess.canAccessLibrary(req, requestedLibrary) || homesteadAccess.accessContext(req).user?.readOnly)) return res.status(403).json({ ok: false, message: "This account cannot edit that library." });
     const incomingId = sanitizeCustomCollectionId(req.body?.id || req.body?.name || "collection");
     const { filePath } = getCustomCollectionPath(incomingId);
     const existing = fs.existsSync(filePath) ? readJsonFile(filePath, null) : null;
     const collection = normalizeCustomCollectionPayload(req.body || {}, existing);
+    if ((collection.watchOrder?.sections || []).some(section => section.items.some(row => !homesteadAccess.canAccessLibrary(req, row.library)))) return res.status(403).json({ ok: false, message: "An order library is unavailable to this account." });
     const resolved = getCustomCollectionPath(collection.id);
     writeJsonFile(resolved.filePath, collection);
     if (filePath !== resolved.filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -19121,6 +19189,7 @@ function parseCollectionWatchOrderText(text = "", options = {}) {
 async function fetchCollectionWatchOrderSourceText(sourceUrl = "") {
   const url = new URL(String(sourceUrl || ""));
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only http/https watch-order URLs are supported.");
+  if (url.username || url.password) throw new Error("Use a watch-order URL without embedded credentials.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
@@ -19130,7 +19199,14 @@ async function fetchCollectionWatchOrderSourceText(sourceUrl = "") {
     });
     if (!response.ok) throw new Error(`Source returned ${response.status}`);
     const contentType = response.headers.get("content-type") || "";
-    const raw = await response.text();
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of response.body || []) {
+      bytes += chunk.length;
+      if (bytes > 2 * 1024 * 1024) { controller.abort(); throw new Error("The watch-order page is too large. Use a smaller text or HTML page."); }
+      chunks.push(Buffer.from(chunk));
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
     return contentType.includes("html") || /<html|<body|<li|<p/i.test(raw) ? htmlToCollectionWatchOrderText(raw) : raw;
   } finally {
     clearTimeout(timeout);
@@ -19176,6 +19252,8 @@ app.post("/api/collections/watch-order/save", (req, res) => {
 
 app.get("/api/collections/watch-order/:collectionId", (req, res) => {
   try {
+    const custom = readJsonFile(getCustomCollectionPath(req.params.collectionId).filePath, null);
+    if (custom?.watchOrder) return res.json({ ok: true, order: custom.watchOrder });
     const { filePath } = getCollectionWatchOrderPath(req.params.collectionId);
     if (!fs.existsSync(filePath)) return res.json({ ok: true, order: null, storagePath: filePath });
     const order = readJsonFile(filePath, null);
@@ -19186,8 +19264,9 @@ app.get("/api/collections/watch-order/:collectionId", (req, res) => {
   }
 });
 
-app.post("/api/collections/watch-order/import", async (req, res) => {
+app.post("/api/collections/watch-order/import", homesteadAccess.requireAdmin, async (req, res) => {
   try {
+    if (homesteadAccess.accessContext(req).user?.readOnly) return res.status(403).json({ ok: false, message: "This account cannot import collection orders." });
     const collectionId = sanitizeCollectionWatchOrderId(req.body?.collectionId || "collection");
     const title = String(req.body?.title || "Imported Watch Order").trim() || "Imported Watch Order";
     const sourceUrl = String(req.body?.sourceUrl || "").trim();
@@ -19196,6 +19275,7 @@ app.post("/api/collections/watch-order/import", async (req, res) => {
 
     const sourceText = pastedText || await fetchCollectionWatchOrderSourceText(sourceUrl);
     const order = parseCollectionWatchOrderText(sourceText, { collectionId, title, sourceUrl });
+    if (req.body?.preview === true) return res.json({ ok: true, order });
     const { filePath } = getCollectionWatchOrderPath(collectionId);
     writeJsonFile(filePath, order);
     res.json({ ok: true, order, storagePath: filePath, message: `Imported ${order.itemCount} watch-order row${order.itemCount === 1 ? "" : "s"}.` });

@@ -6,22 +6,24 @@
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
-  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "display_override": [
+    "window-controls-overlay",
+    "standalone",
+    "minimal-ui"
+  ],
   "orientation": "any",
   "background_color": "#070a12",
   "theme_color": "#4361ff",
-  "categories": ["entertainment", "productivity", "utilities"],
+  "categories": [
+    "entertainment",
+    "productivity",
+    "utilities"
+  ],
   "icons": [
     {
-      "src": "/homestead-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/homestead-icon.png",
+      "sizes": "1280x1280",
+      "type": "image/png",
       "purpose": "any"
     }
   ],
@@ -31,14 +33,26 @@
       "short_name": "Dashboard",
       "description": "Open the Homestead dashboard.",
       "url": "/?view=dashboard",
-      "icons": [{ "src": "/homestead-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+      "icons": [
+        {
+          "src": "/homestead-icon.png",
+          "sizes": "1280x1280",
+          "type": "image/png"
+        }
+      ]
     },
     {
       "name": "Profiles",
       "short_name": "Profiles",
       "description": "Open profile libraries.",
       "url": "/?view=profiles",
-      "icons": [{ "src": "/homestead-icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+      "icons": [
+        {
+          "src": "/homestead-icon.png",
+          "sizes": "1280x1280",
+          "type": "image/png"
+        }
+      ]
     }
   ]
 }

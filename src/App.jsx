@@ -1,3 +1,12 @@
+import { collectionDraftId } from "./utils/collection-draft.js";
+import LibraryPoster from "./components/LibraryPoster.jsx";
+import CollectionWizard from "./components/CollectionWizard.jsx";
+import SmartCollectionSuggestions from "./components/SmartCollectionSuggestions.jsx";
+import LibraryDiagnostics from "./components/LibraryDiagnostics.jsx";
+import LibraryFilterOverlay from "./components/LibraryFilterOverlay.jsx";
+import { posterPreviewUrl } from "./utils/poster-preview.js";
+import ServerHomeFeed from "./components/ServerHomeFeed.jsx";
+import { homeCatalog, homeRecentlyAdded, homeProgress, homeRelated } from "./utils/server-home.js";
 import PetPhotoOrganizer from "./components/PetPhotoOrganizer.jsx";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -28,7 +37,7 @@ import BookMetadataMatchModal from "./components/BookMetadataMatchModal.jsx";
 import BookSeriesAppearanceEditor from "./components/BookSeriesAppearanceEditor.jsx";
 import ArtworkPicker from "./components/ArtworkPicker.jsx";
 import TransferQueue from "./components/TransferQueue.jsx";
-import { createHomeMusicLookup, recentYouTubeEntries, createSharedIndexLoader } from "./utils/home-media.js";
+import { createHomeMusicLookup, createSharedIndexLoader } from "./utils/home-media.js";
 import useLibraryScrollReset from "./hooks/useLibraryScrollReset.js";
 import useDialogFocus from "./hooks/useDialogFocus.js";
 import "./PublicQa.css";
@@ -52,6 +61,8 @@ import ImportAdultMediaModal from "./components/adult/ImportAdultMediaModal";
 import "./mobile.css";
 import "./MobileV12.css";
 import "./V314Polish.css";
+import "./ServerContentPass.css";
+import "./FinalUiPolish.css";
 import { profileMetadataPills, recipeEditorDraft, recipeEditingAllowed } from "./utils/mobile-polish.js";
 
 
@@ -123,7 +134,7 @@ function getPlayableMediaUrl(item = {}, preview = {}) {
 }
 
 
-const DEFAULT_HOMESTEAD_APP_ICON = "/assets/images/homestead-icon.png";
+const DEFAULT_HOMESTEAD_APP_ICON = "/homestead-icon.png";
 
 function getHomesteadBrandingVersion(source = {}) {
   const branding = source?.branding || source || {};
@@ -1578,17 +1589,20 @@ function PersonGridPoster({ person }) {
     return `${candidate}${candidate.includes("?") ? "&" : "?"}v=${encodeURIComponent(revision)}`;
   });
   const [candidateIndex, setCandidateIndex] = useState(0);
+  const [originalPreview, setOriginalPreview] = useState(false);
   const src = candidates[candidateIndex] || "/placeholder-poster.jpg";
 
-  useEffect(() => { setCandidateIndex(0); }, [person?.id, person?.updatedAt, candidates.join("|")]);
+  useEffect(() => { setCandidateIndex(0); setOriginalPreview(false); }, [person?.id, person?.updatedAt, candidates.join("|")]);
 
   return (
     <img
-      src={src}
+      src={originalPreview ? src : posterPreviewUrl(src)}
       alt=""
+      decoding="async"
       loading="lazy"
       onError={(event) => {
-        if (candidateIndex + 1 < candidates.length) setCandidateIndex((index) => index + 1);
+        if (!originalPreview && posterPreviewUrl(src) !== src) { setOriginalPreview(true); return; }
+        if (candidateIndex + 1 < candidates.length) { setCandidateIndex((index) => index + 1); setOriginalPreview(false); }
         else if (!String(event.currentTarget.src || "").endsWith("/placeholder-poster.jpg")) event.currentTarget.src = "/placeholder-poster.jpg";
       }}
     />
@@ -1621,8 +1635,7 @@ function findPluginProfileCard(cards, person) {
 function PersonGrid({ items, onSelect, openImageViewer, pluginCards = {}, onOpenPluginCard }) {
 
   return (
-    <div className="grid">
-      {items.map((person) => {
+    <ProgressiveLibraryGrid className="grid" libraryId="profile-grid" items={items} getLetter={person => getAlphabetBucket(person.name)} renderItem={(person) => {
         const panty = findPluginProfileCard(pluginCards.panty, person);
         const dominion = findPluginProfileCard(pluginCards.dominion, person);
         const age = calculateProfileAge(person);
@@ -1688,8 +1701,7 @@ function PersonGrid({ items, onSelect, openImageViewer, pluginCards = {}, onOpen
             </div>
           </div>
         </article>
-      );})}
-    </div>
+      );}} />
   );
 }
 
@@ -1857,7 +1869,7 @@ function ProfileMediaSection({
         </div>
       </div>
 
-      <MediaFolderTabs folders={folders} />
+      <MediaFolderTabs folders={folders} compact />
       {itemCount ? (
         <MediaGallery files={folders.files} openImageViewer={openImageViewer} adultMediaActions={adultMediaActions} />
       ) : (
@@ -9903,8 +9915,7 @@ function DetailMembershipPopover({
     const shows = Object.values(mediaIndex?.libraries?.tv || {});
     try {
       const generated = buildSharedMediaCollections(movies, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides);
-      const present = new Set(generated.map((entry) => entry.id));
-      return [...generated, ...SHARED_SMART_COLLECTION_SEEDS.filter((seed) => !present.has(seed.id)).map((seed) => ({ ...seed, source: "smart", items: [] }))];
+      return generated;
     } catch {
       return [];
     }
@@ -10000,6 +10011,7 @@ function DetailMembershipPopover({
     try {
       if (kind === "collection") {
         await saveCustomCollection({
+          id: collectionDraftId().replace(/^draft-/, "custom-"),
           name,
           description: "",
           poster: membershipItem.poster || "",
@@ -13095,7 +13107,7 @@ function getSharedTimelineEpisodeNumbers(episode = {}) {
     .replace(/\s+/g, " ")
     .trim();
   return {
-    season: match ? Number(match[1]) : Number(episode.season || episode.seasonNumber || episode.season_number) || null,
+    season: match ? Number(match[1]) : (episode.season ?? episode.seasonNumber ?? episode.season_number) == null ? null : Number(episode.season ?? episode.seasonNumber ?? episode.season_number),
     episode: match ? Number(match[2]) : Number(episode.episode || episode.episodeNumber || episode.episode_number) || null,
     code,
     title: String(explicitTitle || cleanedFileTitle || "Episode").trim(),
@@ -13186,7 +13198,8 @@ function collectSharedTvEpisodes(ownedItem = null) {
     entries.forEach(([key, season]) => {
       if (!season) return;
       const keyMatch = String(key).match(/(?:season\s*)?(\d{1,2})/i);
-      const seasonHint = Number(season.season ?? season.seasonNumber ?? season.season_number ?? keyMatch?.[1]) || null;
+      const rawSeason = season.season ?? season.seasonNumber ?? season.season_number ?? keyMatch?.[1];
+      const seasonHint = rawSeason == null ? null : Number(rawSeason);
       visitCollection(season.episodes || season.items || season.files || season.mediaFiles || season.videoFiles || [], seasonHint);
     });
   };
@@ -13216,7 +13229,7 @@ function collectSharedTvEpisodes(ownedItem = null) {
   const byCode = new Map();
   candidates.forEach((episode) => {
     const info = getSharedTimelineEpisodeNumbers(episode);
-    if (!info.season || !info.episode) return;
+    if (info.season == null || info.episode == null) return;
     const key = `${info.season}:${info.episode}`;
     if (!byCode.has(key)) byCode.set(key, []);
     byCode.get(key).push(episode);
@@ -13239,15 +13252,17 @@ function collectSharedTvEpisodes(ownedItem = null) {
 
 function getSharedTimelineEpisodes(entry = {}, ownedItem = null) {
   if (!ownedItem || ownedItem.library !== "tv") return [];
-  const selection = parseTimelineEpisodeSelection(entry.detail);
-  if (!selection.season || !selection.episodes.length) return [];
+  const selection = entry.season != null && entry.season !== "" && Array.isArray(entry.episodes) && entry.episodes.length
+    ? { season: Number(entry.season), episodes: entry.episodes.map(Number) }
+    : parseTimelineEpisodeSelection(entry.detail);
+  if (selection.season == null || !selection.episodes.length) return [];
   const episodeSet = new Set(selection.episodes);
   const episodes = collectSharedTvEpisodes(ownedItem);
 
   return episodes
     .map((episode) => ({ episode, info: getSharedTimelineEpisodeNumbers(episode) }))
     .filter(({ info }) => info.season === selection.season && episodeSet.has(info.episode))
-    .sort((a, b) => (a.info.episode || 0) - (b.info.episode || 0));
+    .sort((a, b) => selection.episodes.indexOf(a.info.episode) - selection.episodes.indexOf(b.info.episode));
 }
 
 function getSharedTimelineMediaUrl(value = "") {
@@ -13719,134 +13734,24 @@ function useCustomMediaCollections(active = true) {
   return { customCollections, customCollectionsLoading, customCollectionsError, refreshCustomCollections, saveCustomCollection, deleteCustomCollection };
 }
 
-function CustomCollectionEditor({ collection = null, movies = [], shows = [], books = [], onSave, onCancel, onDelete }) {
-  const allItems = useMemo(() => [
-    ...movies.map((item) => makeSharedCollectionItem(item, "movies")),
-    ...shows.map((item) => makeSharedCollectionItem(item, "tv")),
-    ...books.map((item) => makeSharedCollectionItem(item, "books")),
-  ], [movies, shows, books]);
-  const [name, setName] = useState(collection?.name || "");
-  const [description, setDescription] = useState(collection?.description || "");
-  const [poster, setPoster] = useState(collection?.poster || "");
-  const [query, setQuery] = useState("");
-  const [items, setItems] = useState(() => Array.isArray(collection?.items) ? collection.items.map((item, index) => ({ ...item, order: index + 1 })) : []);
-  const [status, setStatus] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [artworkUploading, setArtworkUploading] = useState(false);
-
-  const uploadPoster = async (file) => {
-    if (!file) return;
-    const identity = String(collection?.id || name || "").trim();
-    if (!identity) { setStatus("Enter the collection name before choosing a poster."); return; }
-    setArtworkUploading(true); setStatus("Uploading poster…");
-    try {
-      const response = await fetch(`/api/collections/${encodeURIComponent(identity)}/artwork/poster`, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream", "X-Homestead-Content-Type": file.type || "image/jpeg" },
-        body: await file.arrayBuffer(),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error(data.message || "Poster upload failed.");
-      setPoster(data.url || "");
-      setStatus("Poster uploaded. Save the collection to apply it.");
-    } catch (error) {
-      setStatus(error.message || "Poster upload failed.");
-    } finally { setArtworkUploading(false); }
-  };
-
-  const selectedKey = (item) => `${item.library}:${item.sourceId || item.title}`;
-  const selectedKeys = useMemo(() => new Set(items.map(selectedKey)), [items]);
-  const matches = useMemo(() => {
-    const term = query.trim().toLowerCase();
-    if (!term) return [];
-    return allItems.filter((item) => !selectedKeys.has(selectedKey(item)) && item.title.toLowerCase().includes(term)).slice(0, 40);
-  }, [allItems, query, selectedKeys]);
-
-  const addItem = (item) => setItems((current) => [...current, { library: item.library, sourceId: item.sourceId, title: item.title, order: current.length + 1 }]);
-  const moveItem = (index, direction) => setItems((current) => {
-    const next = [...current];
-    const target = index + direction;
-    if (target < 0 || target >= next.length) return current;
-    [next[index], next[target]] = [next[target], next[index]];
-    return next.map((item, order) => ({ ...item, order: order + 1 }));
-  });
-  const removeItem = (index) => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index).map((item, order) => ({ ...item, order: order + 1 })));
-
-  const save = async () => {
-    if (!name.trim()) { setStatus("Enter a collection name."); return; }
-    setSaving(true); setStatus("Saving…");
-    try {
-      await onSave?.({
-        id: collection?.id,
-        generatedCollectionId: collection?.generatedCollectionId || (collection && collection.source !== "custom" ? collection.id : ""),
-        name: name.trim(),
-        description: description.trim(),
-        poster: poster.trim(),
-        banner: collection?.banner || "",
-        background: collection?.background || "",
-        backgroundOpacity: collection?.backgroundOpacity,
-        backgroundBlur: collection?.backgroundBlur,
-        backgroundBrightness: collection?.backgroundBrightness,
-        backgroundPosition: collection?.backgroundPosition,
-        source: "custom",
-        sortMode: "manual",
-        items,
-      });
-      setStatus("Saved.");
-    } catch (error) {
-      setStatus(error.message || "Save failed.");
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="custom-collection-editor panel">
-      <div className="custom-collection-editor-header">
-        <div><p className="eyebrow">Custom Mixed Collection</p><h3>{collection ? `Edit ${collection.name}` : "Create Collection"}</h3><p>Add Movies, TV Shows, and Books, then arrange them in any order.</p></div>
-        <button type="button" className="secondary-button" onClick={onCancel}>Close</button>
-      </div>
-      <div className="custom-collection-fields">
-        <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="My DC Universe" /></label>
-        <label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="My preferred mixed movie and TV order." /></label>
-        <label>Poster URL or media path<input value={poster} onChange={(event) => setPoster(event.target.value)} placeholder="/media/collections/my-collection/poster.jpg" /></label>
-        <div className="collection-artwork-browse-row">
-          <label className="secondary-button media-native-file-button">{artworkUploading ? "Uploading…" : "Browse Image"}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={artworkUploading} onChange={(event) => { uploadPoster(event.target.files?.[0]); event.target.value = ""; }} /></label>
-          {poster && <button className="secondary-button" type="button" onClick={() => setPoster("")}>Remove poster</button>}
-          {poster && <img src={poster} alt="Selected collection poster" />}
-        </div>
-      </div>
-      <div className="custom-collection-picker">
-        <label>Find a Movie, TV Show, or Book<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your local libraries…" /></label>
-        {query.trim() && <div className="custom-collection-search-results">{matches.length ? matches.map((item) => (
-          <button key={selectedKey(item)} type="button" onClick={() => addItem(item)}><img src={item.poster || "/placeholder-poster.jpg"} alt="" /><span><strong>{item.title}</strong><small>{item.library === "movies" ? "Movie" : item.library === "books" ? "Book" : "TV Show"}</small></span><b>＋</b></button>
-        )) : <p className="small-muted">No unselected local titles match.</p>}</div>}
-      </div>
-      <div className="custom-collection-order-list">
-        <div className="custom-collection-order-heading"><strong>Manual Order</strong><span>{items.length} item{items.length === 1 ? "" : "s"}</span></div>
-        {items.length ? items.map((item, index) => {
-          const owned = allItems.find((candidate) => selectedKey(candidate) === selectedKey(item));
-          return <div className="custom-collection-order-row" key={`${selectedKey(item)}-${index}`}>
-            <span className="custom-collection-order-number">{index + 1}</span>
-            <img src={owned?.poster || "/placeholder-poster.jpg"} alt="" />
-            <span className="custom-collection-order-copy"><strong>{owned?.title || item.title}</strong><small>{item.library === "movies" ? "Movie" : item.library === "books" ? "Book" : "TV Show"}</small></span>
-            <span className="custom-collection-order-actions"><button type="button" disabled={index === 0} onClick={() => moveItem(index, -1)}>↑</button><button type="button" disabled={index === items.length - 1} onClick={() => moveItem(index, 1)}>↓</button><button type="button" onClick={() => removeItem(index)}>Remove</button></span>
-          </div>;
-        }) : <p className="small-muted">Search above and add titles to begin.</p>}
-      </div>
-      <div className="custom-collection-editor-actions">
-        {collection?.source === "custom" && <button type="button" className="danger-button" onClick={() => onDelete?.(collection)}>Delete Collection</button>}
-        <span>{status}</span><button type="button" className="primary-button" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Collection"}</button>
-      </div>
-    </div>
-  );
+function CustomCollectionEditor({ collection = null, movies = [], shows = [], books = [], enabledLibraries = {}, onSave, onCancel, onDelete }) {
+  const catalog = useMemo(() => [
+    ...(enabledLibraries.movies === false ? [] : movies).map(item => makeSharedCollectionItem(item, "movies")),
+    ...(enabledLibraries.tvshows === false ? [] : shows).map(item => makeSharedCollectionItem(item, "tv")),
+    ...(enabledLibraries.books === false ? [] : books).map(item => ({ ...makeSharedCollectionItem(item, "books"), author: item.author || "" })),
+  ], [movies, shows, books, enabledLibraries]);
+  return <CollectionWizard collection={collection} catalog={catalog} onSave={onSave} onCancel={onCancel} onDelete={onDelete} />;
 }
 
 
 function useCollectionOrderOverrides(active = true) {
   const [collectionOrderOverrides, setCollectionOrderOverrides] = useState([]);
   const [collectionOrderOverridesError, setCollectionOrderOverridesError] = useState("");
+  const [collectionOrderOverridesLoading, setCollectionOrderOverridesLoading] = useState(active);
 
   const refreshCollectionOrderOverrides = useCallback(async () => {
     if (!active) return [];
+    setCollectionOrderOverridesLoading(true);
     setCollectionOrderOverridesError("");
     try {
       const response = await fetch("/api/collections/order-overrides", { cache: "no-store" });
@@ -13858,7 +13763,7 @@ function useCollectionOrderOverrides(active = true) {
     } catch (error) {
       setCollectionOrderOverridesError(error.message || "Unable to load collection order overrides.");
       return [];
-    }
+    } finally { setCollectionOrderOverridesLoading(false); }
   }, [active]);
 
   useEffect(() => {
@@ -13898,6 +13803,7 @@ function useCollectionOrderOverrides(active = true) {
   return {
     collectionOrderOverrides,
     collectionOrderOverridesError,
+    collectionOrderOverridesLoading,
     refreshCollectionOrderOverrides,
     saveCollectionOrderOverride,
     deleteCollectionOrderOverride,
@@ -13974,9 +13880,11 @@ function CollectionOrderEditor({ collection, onSave, onCancel, onReset }) {
 function useCollectionAppearanceOverrides(active = true) {
   const [collectionAppearanceOverrides, setCollectionAppearanceOverrides] = useState([]);
   const [collectionAppearanceOverridesError, setCollectionAppearanceOverridesError] = useState("");
+  const [collectionAppearanceOverridesLoading, setCollectionAppearanceOverridesLoading] = useState(active);
 
   const refreshCollectionAppearanceOverrides = useCallback(async () => {
     if (!active) return [];
+    setCollectionAppearanceOverridesLoading(true);
     setCollectionAppearanceOverridesError("");
     try {
       const response = await fetch("/api/collections/appearance-overrides", { cache: "no-store" });
@@ -13988,7 +13896,7 @@ function useCollectionAppearanceOverrides(active = true) {
     } catch (error) {
       setCollectionAppearanceOverridesError(error.message || "Unable to load collection appearance overrides.");
       return [];
-    }
+    } finally { setCollectionAppearanceOverridesLoading(false); }
   }, [active]);
 
   useEffect(() => {
@@ -14023,6 +13931,7 @@ function useCollectionAppearanceOverrides(active = true) {
   return {
     collectionAppearanceOverrides,
     collectionAppearanceOverridesError,
+    collectionAppearanceOverridesLoading,
     refreshCollectionAppearanceOverrides,
     saveCollectionAppearanceOverride,
   };
@@ -14171,7 +14080,7 @@ function CollectionAppearanceEditor({ collection, onSave, onCancel }) {
   ) : null;
 }
 
-function buildSharedMediaCollections(movies = [], shows = [], customCollections = [], orderOverrides = [], appearanceOverrides = [], books = []) {
+function buildSharedMediaCollections(movies = [], shows = [], customCollections = [], orderOverrides = [], appearanceOverrides = [], books = [], options = {}) {
   const groups = new Map();
   const itemIdentity = (item = {}) => `${item.library || "media"}:${item.sourceId || item.id || normalizeSharedSmartMatchText(item.title)}`;
   const ensureGroup = (name, source = "metadata", description = "", requestedId = "") => {
@@ -14255,6 +14164,7 @@ function buildSharedMediaCollections(movies = [], shows = [], customCollections 
       backgroundPosition: saved?.backgroundPosition || "center",
       source: "custom",
       sortMode: "manual",
+      watchOrder: saved.watchOrder || null,
       savedItems: Array.isArray(saved?.items) ? saved.items : [],
       items: [],
     };
@@ -14331,6 +14241,7 @@ function buildSharedMediaCollections(movies = [], shows = [], customCollections 
   });
 
   return Array.from(groups.values())
+    .filter((group) => options.includeSuggestions || group.source === "custom" || group.hasManualOrder || group.hasAppearanceOverride)
     .map((group) => {
       const movieCount = group.items.filter((item) => item.library === "movies").length;
       const tvCount = group.items.filter((item) => item.library === "tv").length;
@@ -14343,6 +14254,7 @@ function buildSharedMediaCollections(movies = [], shows = [], customCollections 
           : sortSharedMediaItems(group.items, "release-asc");
       return {
         ...group,
+        isSuggestion: group.source !== "custom" && !group.hasManualOrder && !group.hasAppearanceOverride,
         itemKeys: undefined,
         items: sortedItems,
         movieCount,
@@ -14356,6 +14268,26 @@ function buildSharedMediaCollections(movies = [], shows = [], customCollections 
     })
     .filter((group) => group.count > 0 || group.source === "custom")
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Count saved groups without constructing artwork cards or episode timelines.
+function countSavedSharedCollections(movies = [], shows = [], customs = [], orders = [], appearances = [], books = []) {
+  const customIds = new Set(customs.map(item => String(item.id)));
+  const converted = new Set(customs.map(item => item.generatedCollectionId).filter(Boolean));
+  const wanted = new Set([...orders, ...appearances].map(item => item.collectionId).filter(id => id && !converted.has(id)));
+  const generated = new Set();
+  const groupId = name => normalizeSharedCollectionText(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || normalizeSharedCollectionText(name);
+  for (const item of [...movies, ...shows]) for (const name of getSharedItemCollections(item)) {
+    const id = groupId(name);
+    if (wanted.has(id)) generated.add(id);
+  }
+  const seeds = SHARED_SMART_COLLECTION_SEEDS.filter(seed => wanted.has(seed.id));
+  for (const [library, items] of [["movies", movies], ["tv", shows], ["books", books]]) for (const item of items) {
+    if (!seeds.length) break;
+    const reference = { ...item, library, title: normalizeSharedCollectionText(item.title || item.name || "Untitled") };
+    for (const seed of seeds) if (!generated.has(seed.id) && sharedSmartSeedMatchesItem(seed, reference)) generated.add(seed.id);
+  }
+  return customIds.size + generated.size;
 }
 
 function SharedCollectionCard({ collection, onClick }) {
@@ -14425,6 +14357,7 @@ function makeImportedWatchOrderTimelineEntry(item = {}) {
     : "";
   const detail = item.detail || [item.season ? `Season ${item.season}` : "", episodeLabel].filter(Boolean).join(" ");
   return {
+    ...item,
     title: item.title,
     detail,
     date: item.date,
@@ -14433,6 +14366,11 @@ function makeImportedWatchOrderTimelineEntry(item = {}) {
 }
 
 function findImportedWatchOrderOwnedItem(item = {}, collectionItems = []) {
+  if (item.sourceId) {
+    const exact = collectionItems.find(candidate => String(candidate.sourceId) === String(item.sourceId) && candidate.library === (item.library || (item.type === "book" ? "books" : item.type === "movie" ? "movies" : "tv")));
+    return exact || null;
+  }
+  if (item.unmatched) return null;
   const entry = makeImportedWatchOrderTimelineEntry(item);
   return findTimelineOwnedItem(entry, collectionItems);
 }
@@ -14453,7 +14391,12 @@ function getImportedWatchOrderExpandedRows(section = {}, items = []) {
   sourceItems.forEach((item, index) => {
     const entry = makeImportedWatchOrderTimelineEntry(item);
     const ownedItem = findImportedWatchOrderOwnedItem(item, items);
-    const timelineEpisodes = getSharedTimelineEpisodes(entry, ownedItem);
+    let timelineEpisodes = item.unit === "series" && ownedItem?.library === "tv"
+      ? collectSharedTvEpisodes(ownedItem).map(episode => ({ episode, info: getSharedTimelineEpisodeNumbers(episode) })).sort((a, b) => a.info.season - b.info.season || a.info.episode - b.info.episode)
+      : getSharedTimelineEpisodes(entry, ownedItem);
+    if (item.season != null && item.season !== "" && Array.isArray(item.episodes) && item.episodes.length && ownedItem?.library === "tv") {
+      timelineEpisodes = item.episodes.map(Number).map(number => timelineEpisodes.find(row => row.info.episode === number) || { episode: {}, info: { season: Number(item.season), episode: number, code: `S${String(item.season).padStart(2,"0")}E${String(number).padStart(2,"0")}`, title: "Missing episode" } });
+    }
 
     if (timelineEpisodes.length) {
       timelineEpisodes.forEach(({ episode, info }) => {
@@ -14681,6 +14624,7 @@ function getImportedWatchOrderPlayable(row = {}) {
   }
 
   if (row.ownedItem.library === "tv") {
+    if (row.item?.season != null || ["season", "episode"].includes(row.item?.unit)) return null;
     const firstEpisode = collectImportedWatchOrderLocalTvFiles(row.ownedItem)
       .map((episode) => ({ episode, info: getImportedWatchOrderEpisodeCode(episode) }))
       .filter(({ info }) => info)
@@ -14907,7 +14851,7 @@ function SharedImportedWatchOrderView({ order = null, collection = null, items =
           <div>
             <p className="eyebrow">Watch Order</p>
             <h3>{order.title || "Imported Watch Order"}</h3>
-            <p>{queueRows.length} rows · only visible rows are rendered{order.sourceUrl ? " · source saved locally" : ""}</p>
+            <p>{queueRows.length} entries{order.sourceUrl ? " · source saved locally" : ""}</p>
           </div>
           <div className="shared-imported-actions">
             <button
@@ -14964,15 +14908,15 @@ function SharedImportedWatchOrderView({ order = null, collection = null, items =
                       <strong>{title}</strong>
                       <em>{detail}</em>
                     </span>
-                    <span className="shared-timeline-status">{playable ? "Playable" : isOwned ? "Missing file" : "Missing"}</span>
+                    <span className="shared-timeline-status">{playable ? "Playable" : ownedItem?.library === "books" ? "Book" : isOwned ? "Missing file" : "Missing"}</span>
                   </button>
                   <button
                     type="button"
                     className="secondary-button contained-watch-order-play"
-                    onClick={() => playFromIndex(row.queueIndex)}
-                    disabled={!playable && !skipMissing}
+                    onClick={() => ownedItem?.library === "books" ? openOwnedItem(ownedItem) : playFromIndex(row.queueIndex)}
+                    disabled={ownedItem?.library !== "books" && !playable && !skipMissing}
                   >
-                    {playable ? "▶ Play" : skipMissing ? "Skip" : "Unavailable"}
+                    {ownedItem?.library === "books" ? "Open book" : playable ? "▶ Play" : skipMissing ? "Skip" : "Unavailable"}
                   </button>
                 </div>
               );
@@ -15448,7 +15392,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
     return "grid";
   };
   const [displayMode, setDisplayMode] = useState(getDefaultDisplayMode);
-  const [watchOrder, setWatchOrder] = useState(null);
+  const [watchOrder, setWatchOrder] = useState(collection.watchOrder || null);
   const [watchOrderLoading, setWatchOrderLoading] = useState(false);
   const [watchImportOpen, setWatchImportOpen] = useState(false);
   const [watchImportUrl, setWatchImportUrl] = useState("");
@@ -15462,7 +15406,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
 
   useEffect(() => {
     setDisplayMode(getDefaultDisplayMode());
-    setWatchOrder(null);
+    setWatchOrder(collection.watchOrder || null);
     setWatchImportOpen(false);
     setWatchImportUrl("");
     setWatchImportText("");
@@ -15473,6 +15417,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
     setManageMenuOpen(false);
     setCollectionMediaFilter("all");
     if (!collection?.id) return;
+    if (collection.watchOrder) { setWatchOrderLoading(false); return; }
     let cancelled = false;
     setWatchOrderLoading(true);
     fetch(`/api/collections/watch-order/${encodeURIComponent(collection.id)}`, { cache: "no-store" })
@@ -15482,7 +15427,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
         setWatchOrder(data.order || null);
       })
       .catch(() => {
-        if (!cancelled) setWatchOrder(null);
+        if (!cancelled) setWatchOrder(collection.watchOrder || null);
       })
       .finally(() => {
         if (!cancelled) setWatchOrderLoading(false);
@@ -15490,7 +15435,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
     return () => {
       cancelled = true;
     };
-  }, [collection?.id, isMcuCollection, prefersEpisodeDateView]);
+  }, [collection?.id, collection.watchOrder?.importedAt, isMcuCollection, prefersEpisodeDateView]);
 
   useEffect(() => {
     if (watchOrder?.sections?.length) {
@@ -15519,7 +15464,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
       headerActions: [
         { id: "collection-display", label: "Sort / Filter", icon: "⇅" },
         ...(collection.knowledgeSources?.[0]?.url ? [{ id: "collection-knowledge", label: collection.knowledgeSources[0].label || "Website", icon: "↗" }] : []),
-        { id: "collection-manage", label: "Manage", icon: "⋯" },
+        { id: "collection-edit", label: "Edit Collection", icon: "✎" },
       ],
       hero: {
         type: "collection",
@@ -15555,8 +15500,8 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
         setDisplayMenuOpen(true);
         setManageMenuOpen(false);
       }
-      if (action === "collection-manage") {
-        setManageMenuOpen(true);
+      if (action === "collection-edit" || action === "collection-manage") {
+        onEditCollection?.({ ...collection, watchOrder: watchOrder || collection.watchOrder });
         setDisplayMenuOpen(false);
       }
       if (action === "collection-appearance") {
@@ -15747,29 +15692,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
             Release Date ↓
           </button>
           </div>}
-          {manageMenuOpen && <div className="collection-ribbon-overlay collection-manage-overlay" role="dialog" aria-label="Manage collection">
-          <header><strong>Manage Collection</strong><button type="button" onClick={() => setManageMenuOpen(false)}>✕</button></header>
-          <button type="button" onClick={() => { onEditCollection?.(collection); setManageMenuOpen(false); }}>Add / Remove Movies, TV & Books</button>
-          {collection?.source !== "custom" && (
-            <button type="button" onClick={() => { onArrangeCollection?.(collection); setManageMenuOpen(false); }}>
-              {collection?.hasManualOrder ? "Edit Manual Order" : "Arrange Order"}
-            </button>
-          )}
-          <button
-            type="button"
-            className={episodeOrderEditorOpen ? "active" : ""}
-            onClick={() => { setEpisodeOrderEditorOpen((current) => !current); setManageMenuOpen(false); }}
-          >
-            Edit Exact Playback Order
-          </button>
-          <button
-            type="button"
-            className={watchImportOpen ? "active" : ""}
-            onClick={() => { openWatchOrderEditor(); setManageMenuOpen(false); }}
-          >
-            {hasImportedWatchOrder ? "Edit Watch Order" : "Import Watch Order"}
-          </button>
-          </div>}
+
       </div>
 
 
@@ -15937,7 +15860,7 @@ function SharedCollectionDetail({ collection, ownershipItems = [], sortMode, set
   );
 }
 
-function MoviesPage({ mediaIndex, setActiveLibrary, query, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, movieLibraryAppearance, onOpenMovieAppearance }) {
+export function MoviesPage({ mediaIndex, setActiveLibrary, query, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, movieLibraryAppearance, onOpenMovieAppearance }) {
 const metadataMatchIndex = useMemo(
   () => loadHomesteadMetadataMatches(),
   [metadataMatchesVersion]
@@ -16074,19 +15997,23 @@ useEffect(() => {
 // deferred until the Collections surface is opened. The normal Movies grid
 // should not pay that cost on every visit.
 const shouldBuildSharedCollections = movieView === "collections" || Boolean(selectedSharedCollectionId) || dashboardOpen?.type === "watch-order";
-const { customCollections, customCollectionsLoading, customCollectionsError, saveCustomCollection, deleteCustomCollection } = useCustomMediaCollections(shouldBuildSharedCollections);
-const { collectionOrderOverrides, collectionOrderOverridesError, saveCollectionOrderOverride, deleteCollectionOrderOverride } = useCollectionOrderOverrides(shouldBuildSharedCollections);
-const { collectionAppearanceOverrides, collectionAppearanceOverridesError, saveCollectionAppearanceOverride } = useCollectionAppearanceOverrides(shouldBuildSharedCollections);
-const sharedCollections = useMemo(
-  () => shouldBuildSharedCollections ? buildSharedMediaCollections(movies, showsForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections) : [],
+const { customCollections, customCollectionsLoading, customCollectionsError, saveCustomCollection, deleteCustomCollection } = useCustomMediaCollections(true);
+const { collectionOrderOverrides, collectionOrderOverridesLoading, collectionOrderOverridesError, saveCollectionOrderOverride, deleteCollectionOrderOverride } = useCollectionOrderOverrides(true);
+const { collectionAppearanceOverrides, collectionAppearanceOverridesLoading, collectionAppearanceOverridesError, saveCollectionAppearanceOverride } = useCollectionAppearanceOverrides(true);
+const collectionGroups = useMemo(
+  () => shouldBuildSharedCollections ? buildSharedMediaCollections(movies, showsForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections, { includeSuggestions: true }) : [],
   [shouldBuildSharedCollections, movies, showsForCollections, booksForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides]
 );
+const sharedCollections = useMemo(() => collectionGroups.filter(group => !group.isSuggestion), [collectionGroups]);
+const collectionCountLoading = customCollectionsLoading || collectionOrderOverridesLoading || collectionAppearanceOverridesLoading;
+const collectionCountError = customCollectionsError || collectionOrderOverridesError || collectionAppearanceOverridesError;
+const collectionCount = useMemo(() => countSavedSharedCollections(movies, showsForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections), [movies, showsForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections]);
+const collectionCountLabel = collectionCountError ? "Unavailable" : collectionCountLoading ? "…" : collectionCount;
 const selectedSharedCollection = useMemo(() => {
   const wantedId = String(selectedSharedCollectionId || "");
   if (!wantedId) return null;
   return sharedCollections.find((collection) => String(collection?.id || "") === wantedId) || null;
 }, [sharedCollections, selectedSharedCollectionId]);
-const movieCollectionsCount = shouldBuildSharedCollections ? sharedCollections.length : "View";
 
 const normalizeMovieText = (value = "") =>
   String(value || "")
@@ -16111,10 +16038,6 @@ const getMovieCollections = (movie) =>
     .map(normalizeMovieText)
     .filter(Boolean);
 
-const movieCollections = useMemo(() => Array.from(
-  new Set(movies.flatMap((movie) => getMovieCollections(movie)))
-).sort((a, b) => a.localeCompare(b)), [movies]);
-
 const movieGenres = useMemo(() => Array.from(
   new Set(movies.flatMap((movie) => getMovieGenres(movie)))
 ).sort((a, b) => a.localeCompare(b)), [movies]);
@@ -16122,11 +16045,6 @@ const movieGenres = useMemo(() => Array.from(
 const movieYears = useMemo(() => Array.from(
   new Set(movies.map((movie) => normalizeMovieText(movie.year)).filter(Boolean))
 ).sort((a, b) => Number(b) - Number(a)), [movies]);
-
-const movieLibraryTabs = [
-  { id: "all", label: "All Movies", count: movies.length },
-  { id: "collections", label: "Collections", count: movieCollectionsCount },
-];
 
 const tabFilteredMovies = useMemo(() => movies.filter((movie) => {
   if (movieView === "collections") return getMovieCollections(movie).length > 0;
@@ -16165,6 +16083,7 @@ const requestPlaceholderMovie = {
 const [selectedMovie, setSelectedMovie] = useState(null);
 
 useEffect(() => {
+  if (selectedSharedCollection) return; // The detail view owns its order/status header.
   const isCollections = movieView === "collections";
   const title = selectedMovie?.title || selectedSharedCollection?.name || (isCollections ? "Collections" : "Movies");
   const appearanceScope = selectedMovie
@@ -16183,12 +16102,12 @@ useEffect(() => {
     backAction: selectedSharedCollection ? "back-collections" : "",
     backLabel: selectedSharedCollection ? "Back to Collections" : "",
     appearanceAction: selectedSharedCollection ? "collection-appearance" : "",
-    stats: selectedSharedCollection ? [`${selectedSharedCollection.count || selectedSharedCollection.items?.length || 0} Titles`] : [],
+    stats: selectedSharedCollection ? [`${selectedSharedCollection.count || selectedSharedCollection.items?.length || 0} Titles`] : isCollections ? [`${collectionCountLabel} Collections`] : [],
     headerActions: selectedSharedCollection ? [
       { id: "collection-display", label: "Sort / Filter", icon: "⇅" },
       ...(selectedSharedCollection.knowledgeSources?.[0]?.url ? [{ id: "collection-knowledge", label: selectedSharedCollection.knowledgeSources[0].label || "Website", icon: "↗" }] : []),
-      { id: "collection-manage", label: "Manage", icon: "⋯" },
-    ] : [],
+      { id: "collection-edit", label: "Edit Collection", icon: "✎" },
+    ] : [{ id: isCollections ? "show-movies" : "show-collections", label: isCollections ? "Movies" : `Collections · ${collectionCountLabel}`, icon: isCollections ? "🎬" : "▦" }],
     hero: selectedSharedCollection ? {
       type: "collection",
       render: false,
@@ -16200,11 +16119,13 @@ useEffect(() => {
       backgroundPosition: selectedSharedCollection.backgroundPosition || "center",
     } : null,
   } }));
-}, [movieView, selectedMovie?.id, selectedSharedCollection?.id, selectedSharedCollection?.name, selectedSharedCollection?.description, selectedSharedCollection?.poster, selectedSharedCollection?.banner, selectedSharedCollection?.background, selectedSharedCollection?.backgroundOpacity, selectedSharedCollection?.backgroundBlur, selectedSharedCollection?.backgroundBrightness, selectedSharedCollection?.backgroundPosition, JSON.stringify(selectedSharedCollection?.knowledgeSources || []), selectedSharedCollection?.count, selectedSharedCollection?.movieCount, selectedSharedCollection?.tvCount, selectedSharedCollection?.bookCount]);
+}, [movieView, selectedMovie?.id, selectedSharedCollection?.id, selectedSharedCollection?.name, selectedSharedCollection?.description, selectedSharedCollection?.poster, selectedSharedCollection?.banner, selectedSharedCollection?.background, selectedSharedCollection?.backgroundOpacity, selectedSharedCollection?.backgroundBlur, selectedSharedCollection?.backgroundBrightness, selectedSharedCollection?.backgroundPosition, JSON.stringify(selectedSharedCollection?.knowledgeSources || []), collectionCount, collectionCountLabel, customCollectionsLoading, selectedSharedCollection?.count, selectedSharedCollection?.movieCount, selectedSharedCollection?.tvCount, selectedSharedCollection?.bookCount]);
 
 useEffect(() => {
   const handlePageAction = (event) => {
     if (event?.detail?.library !== "movies") return;
+    if (event.detail.action === "show-collections") { setMovieView("collections"); setSelectedSharedCollectionId(""); return; }
+    if (event.detail.action === "show-movies") { setMovieView("all"); setSelectedSharedCollectionId(""); return; }
     if (event.detail.action === "filter-sort") setMovieFilterOverlayOpen(true);
     if (event.detail.action === "create-collection") setCustomCollectionEditor({ source: "custom", items: [] });
     if (event.detail.action === "back-collections") setSelectedSharedCollectionId("");
@@ -16262,6 +16183,8 @@ useEffect(() => {
 
   if (selectedSharedCollection) {
     return (
+      <>
+      {customCollectionEditor && <CustomCollectionEditor enabledLibraries={setupConfig?.enabledLibraries} collection={customCollectionEditor} movies={movies} shows={showsForCollections} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { const saved = await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(String(saved.id)); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
       <div className="tv-page">
         <MediaSectionTabs
           activeLibrary="movies"
@@ -16298,7 +16221,7 @@ useEffect(() => {
             setDashboardOpen({ type: "book", id: sourceId });
             setActiveLibrary("books");
           }}
-          onEditCollection={(collection) => { setCustomCollectionEditor(collection); setSelectedSharedCollectionId(""); }}
+          onEditCollection={(collection) => setCustomCollectionEditor(collection)}
           onSaveAppearance={async (collection, appearance) => {
             if (collection?.source === "custom") {
               await saveCustomCollection({ ...collection, ...appearance, items: collection.savedItems || collection.items || [] });
@@ -16309,11 +16232,13 @@ useEffect(() => {
           onArrangeCollection={(collection) => { setCollectionOrderEditor(collection); setSelectedSharedCollectionId(""); }}
         />
       </div>
+      </>
     );
   }
 
   return (
     <div className="tv-page">
+      {customCollectionEditor && <CustomCollectionEditor enabledLibraries={setupConfig?.enabledLibraries} collection={customCollectionEditor} movies={movies} shows={showsForCollections} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { const saved = await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(String(saved.id)); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
       <MediaSectionTabs
   activeLibrary="movies"
   setActiveLibrary={(nextTab) => {
@@ -16332,25 +16257,8 @@ useEffect(() => {
 }}
   setupConfig={setupConfig}
 />
+      <LibraryDiagnostics library="movies" />
       <div className="movie-library-browser">
-        <div className="movie-library-command-row">
-        <div className="movie-library-tabs" role="tablist" aria-label="Movie library views">
-          {movieLibraryTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={`movie-library-tab ${movieView === tab.id ? "active" : ""}`}
-              onClick={() => {
-                setMovieView(tab.id);
-              }}
-            >
-              <span>{tab.label}</span>
-              <small>{tab.count}</small>
-            </button>
-          ))}
-        </div>
-        </div>
-
         {movieView === "all" && (movieGenreFilters.length > 0 || movieYearFilters.length > 0) && <div className="movie-filter-strip movie-active-filter-strip" aria-label="Active movie filters">
           {movieGenreFilters.map((genre) => <button type="button" className="movie-filter-chip active" key={`genre-${genre}`} onClick={() => setMovieGenreFilters((current) => current.filter((item) => item !== genre))}>Genre: {genre} ×</button>)}
           {movieYearFilters.map((year) => <button type="button" className="movie-filter-chip active" key={`year-${year}`} onClick={() => setMovieYearFilters((current) => current.filter((item) => item !== year))}>Year: {year} ×</button>)}
@@ -16374,9 +16282,11 @@ useEffect(() => {
         <>
           {customCollectionsLoading && <p className="small-muted">Loading custom collections…</p>}
           {customCollectionsError && <p className="small-muted">{customCollectionsError}</p>}
-          {customCollectionEditor && <CustomCollectionEditor collection={customCollectionEditor.id ? customCollectionEditor : null} movies={movies} shows={showsForCollections} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
+
           {collectionOrderOverridesError && <p className="small-muted">{collectionOrderOverridesError}</p>}
           {collectionOrderEditor && <CollectionOrderEditor collection={collectionOrderEditor} onCancel={() => setCollectionOrderEditor(null)} onSave={async (draft) => { await saveCollectionOrderOverride(draft); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} onReset={async (collection) => { await deleteCollectionOrderOverride(collection.id); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} />}
+          {!customCollectionsLoading && !customCollectionsError && !sharedCollections.length && <div className="collections-empty-state panel"><h3>No collections yet.</h3><p>Click + to add custom collections.</p><button type="button" className="primary-button" onClick={() => setCustomCollectionEditor({ source: "custom", items: [] })}>＋ Create Collection</button></div>}
+          <SmartCollectionSuggestions groups={collectionGroups.filter(group => group.isSuggestion)} saved={sharedCollections} onCreate={group => setCustomCollectionEditor({ ...group, id: undefined, source: "custom", generatedCollectionId: group.id })} />
           <div className="shared-collection-grid">
             {sharedCollections.map((collection) => (
               <SharedCollectionCard key={collection.id} collection={collection} onClick={() => { setCollectionSort(collection.source === "custom" || collection.hasManualOrder ? "manual" : "release-asc"); setSelectedSharedCollectionId(String(collection.id)); }} />
@@ -16394,16 +16304,11 @@ useEffect(() => {
     data-alpha-letter={getAlphabetBucket(movie.title)}
     onClick={() => setSelectedMovie(movie)}
   >
-    <img
-  src={movie.poster}
-  alt=""
-  loading="lazy"
-  decoding="async"
-  onError={handlePosterFallback}
-/>
+    <LibraryPoster src={movie.poster} />
 
     <div className="tv-card-overlay">
       <h3>{movie.title}</h3>
+      {!movie.files.some(file => file.type === "video") && <small className="media-availability-label">{movie.files.some(file => /\.(?:iso|img)$/i.test(file.name || file.path || "")) ? "Disc image · playback unsupported" : movie.files.length ? "No supported video" : "No media found"}</small>}
     </div>
   </button>
 )} />
@@ -16430,7 +16335,7 @@ useEffect(() => {
   );
 }
 
-function TVShowsPage({ mediaIndex, setActiveLibrary, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, tvLibraryAppearance, onOpenTvAppearance }) {
+export function TVShowsPage({ mediaIndex, setActiveLibrary, watchlist, setWatchlist, requests, setRequests, dashboardOpen, setDashboardOpen, setupConfig, metadataMatchesVersion, setRequestedMediaToolPage, tvLibraryAppearance, onOpenTvAppearance }) {
 const metadataMatchIndex = useMemo(
   () => loadHomesteadMetadataMatches(),
   [metadataMatchesVersion]
@@ -16466,6 +16371,7 @@ const normalizedShows = Object.values(mediaIndex?.libraries?.tv || {}).map((item
     year:
       savedMatch?.year ||
       item.metadata?.year ||
+      item.year ||
       "",
 
     releaseDate:
@@ -16482,6 +16388,7 @@ const normalizedShows = Object.values(mediaIndex?.libraries?.tv || {}).map((item
     genres:
       savedMatch?.genres ||
       item.metadata?.genres ||
+      item.genres ||
       [],
 
     description:
@@ -16566,7 +16473,9 @@ const booksForCollections = useMemo(
 
 const tvSearchText = "";
 const [tvView, setTvView] = useState("all");
-const [tvFilter, setTvFilter] = useState("");
+const [tvGenreFilters, setTvGenreFilters] = useState([]);
+const [tvYearFilters, setTvYearFilters] = useState([]);
+const [tvFilterOpen, setTvFilterOpen] = useState(false);
 const [tvSort, setTvSort] = useState("title");
 const [selectedSharedCollectionId, setSelectedSharedCollectionId] = useState("");
 const [collectionSort, setCollectionSort] = useState("release-asc");
@@ -16576,19 +16485,23 @@ const [collectionOrderEditor, setCollectionOrderEditor] = useState(null);
 // Shared collection assembly is deliberately deferred. Opening the normal TV
 // grid should not pay the cross-library collection cost.
 const shouldBuildTvSharedCollections = tvView === "collections" || Boolean(selectedSharedCollectionId) || dashboardOpen?.type === "watch-order";
-const { customCollections, customCollectionsLoading, customCollectionsError, saveCustomCollection, deleteCustomCollection } = useCustomMediaCollections(shouldBuildTvSharedCollections);
-const { collectionOrderOverrides, collectionOrderOverridesError, saveCollectionOrderOverride, deleteCollectionOrderOverride } = useCollectionOrderOverrides(shouldBuildTvSharedCollections);
-const { collectionAppearanceOverrides, collectionAppearanceOverridesError, saveCollectionAppearanceOverride } = useCollectionAppearanceOverrides(shouldBuildTvSharedCollections);
-const sharedCollections = useMemo(
-  () => shouldBuildTvSharedCollections ? buildSharedMediaCollections(moviesForCollections, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections) : [],
+const { customCollections, customCollectionsLoading, customCollectionsError, saveCustomCollection, deleteCustomCollection } = useCustomMediaCollections(true);
+const { collectionOrderOverrides, collectionOrderOverridesLoading, collectionOrderOverridesError, saveCollectionOrderOverride, deleteCollectionOrderOverride } = useCollectionOrderOverrides(true);
+const { collectionAppearanceOverrides, collectionAppearanceOverridesLoading, collectionAppearanceOverridesError, saveCollectionAppearanceOverride } = useCollectionAppearanceOverrides(true);
+const collectionGroups = useMemo(
+  () => shouldBuildTvSharedCollections ? buildSharedMediaCollections(moviesForCollections, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections, { includeSuggestions: true }) : [],
   [shouldBuildTvSharedCollections, moviesForCollections, shows, booksForCollections, customCollections, collectionOrderOverrides, collectionAppearanceOverrides]
 );
+const sharedCollections = useMemo(() => collectionGroups.filter(group => !group.isSuggestion), [collectionGroups]);
+const collectionCountLoading = customCollectionsLoading || collectionOrderOverridesLoading || collectionAppearanceOverridesLoading;
+const collectionCountError = customCollectionsError || collectionOrderOverridesError || collectionAppearanceOverridesError;
+const collectionCount = useMemo(() => countSavedSharedCollections(moviesForCollections, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections), [moviesForCollections, shows, customCollections, collectionOrderOverrides, collectionAppearanceOverrides, booksForCollections]);
+const collectionCountLabel = collectionCountError ? "Unavailable" : collectionCountLoading ? "…" : collectionCount;
 const selectedSharedCollection = useMemo(() => {
   const wantedId = String(selectedSharedCollectionId || "");
   if (!wantedId) return null;
   return sharedCollections.find((collection) => String(collection?.id || "") === wantedId) || null;
 }, [sharedCollections, selectedSharedCollectionId]);
-const tvCollectionsCount = shouldBuildTvSharedCollections ? sharedCollections.length : "View";
 
 const normalizeTvText = (value = "") =>
   String(value || "")
@@ -16605,41 +16518,19 @@ const getTvGenres = (show) =>
 
 const tvGenres = useMemo(() => Array.from(new Set(shows.flatMap((show) => getTvGenres(show)))).sort((a, b) => a.localeCompare(b)), [shows]);
 const tvYears = useMemo(() => Array.from(new Set(shows.map((show) => normalizeTvText(show.year)).filter(Boolean))).sort((a, b) => Number(b) - Number(a)), [shows]);
-const tvLibraryTabs = [
-  { id: "all", label: "All Shows", count: shows.length },
-  { id: "collections", label: "Collections", count: tvCollectionsCount },
-  { id: "genres", label: "Genres", count: tvGenres.length },
-  { id: "years", label: "Years", count: tvYears.length },
-];
-
-const currentTvFilterOptions =
-  tvView === "genres"
-    ? tvGenres
-    : tvView === "years"
-    ? tvYears
-    : [];
+const tabFilteredShows = useMemo(() => shows.filter(show => (!tvGenreFilters.length || tvGenreFilters.some(genre => getTvGenres(show).includes(genre))) && (!tvYearFilters.length || tvYearFilters.includes(normalizeTvText(show.year)))), [shows, tvGenreFilters, tvYearFilters]);
 
 useEffect(() => {
-  if (tvView === "all" || tvView === "collections") {
-    if (tvFilter) setTvFilter("");
-    return;
-  }
-  if (tvFilter && !currentTvFilterOptions.includes(tvFilter)) {
-    setTvFilter("");
-  }
-}, [tvView, tvFilter, currentTvFilterOptions]);
-
-const tabFilteredShows = useMemo(() => shows.filter((show) => {
-  if (tvView === "genres") {
-    if (!tvFilter) return getTvGenres(show).length > 0;
-    return getTvGenres(show).includes(tvFilter);
-  }
-  if (tvView === "years") {
-    if (!tvFilter) return Boolean(normalizeTvText(show.year));
-    return normalizeTvText(show.year) === tvFilter;
-  }
-  return true;
-}), [shows, tvView, tvFilter]);
+  const action = event => {
+    if (event.detail?.library !== "tv") return;
+    if (event.detail.action === "filter-sort") setTvFilterOpen(true);
+    if (event.detail.action === "show-collections") setTvView("collections");
+    if (event.detail.action === "show-tv") setTvView("all");
+    if (event.detail.action === "create-collection") setCustomCollectionEditor({ source: "custom", items: [] });
+  };
+  window.addEventListener("homestead-page-action", action);
+  return () => window.removeEventListener("homestead-page-action", action);
+}, []);
 
 const filteredShows = useMemo(() => sortSharedMediaItems(
   tvSearchText
@@ -16649,6 +16540,15 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
 ), [tabFilteredShows, tvSearchText, tvSort]);
 
   const [selectedShow, setSelectedShow] = useState(null);
+useEffect(() => {
+  if (selectedSharedCollectionId || selectedShow) return;
+  window.dispatchEvent(new CustomEvent("homestead-page-context", { detail: {
+    library: "tv", title: tvView === "collections" ? "Collections" : "TV Shows", filterSort: tvView !== "collections", filterSortActive: tvSort !== "title" || tvGenreFilters.length > 0 || tvYearFilters.length > 0, filterSortCount: tvGenreFilters.length + tvYearFilters.length,
+    stats: tvView === "collections" ? [`${collectionCountLabel} Collections`] : [],
+    addActions: tvView === "collections" ? [{ id: "create-collection", label: "Create Collection", icon: "＋" }] : [],
+    headerActions: [{ id: tvView === "collections" ? "show-tv" : "show-collections", label: tvView === "collections" ? "TV Shows" : `Collections · ${collectionCountLabel}`, icon: "▦" }],
+  }}));
+}, [tvView, selectedSharedCollectionId, collectionCount, collectionCountLabel, customCollectionsLoading, selectedShow?.id, tvSort, tvGenreFilters, tvYearFilters]);
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("homestead-page-context", { detail: {
       library: "tv", title: selectedShow?.title || selectedSharedCollection?.name || "TV Shows",
@@ -16698,6 +16598,8 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
 
   if (selectedSharedCollection) {
     return (
+      <>
+      {customCollectionEditor && <CustomCollectionEditor enabledLibraries={setupConfig?.enabledLibraries} collection={customCollectionEditor} movies={moviesForCollections} shows={shows} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { const saved = await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(String(saved.id)); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
       <div className="tv-page">
         <MediaSectionTabs
           activeLibrary="tv"
@@ -16735,7 +16637,7 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
             setDashboardOpen({ type: "book", id: sourceId });
             setActiveLibrary("books");
           }}
-          onEditCollection={(collection) => { setCustomCollectionEditor(collection); setSelectedSharedCollectionId(""); }}
+          onEditCollection={(collection) => setCustomCollectionEditor(collection)}
           onSaveAppearance={async (collection, appearance) => {
             if (collection?.source === "custom") {
               await saveCustomCollection({ ...collection, ...appearance, items: collection.savedItems || collection.items || [] });
@@ -16746,11 +16648,13 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
           onArrangeCollection={(collection) => { setCollectionOrderEditor(collection); setSelectedSharedCollectionId(""); }}
         />
       </div>
+      </>
     );
   }
 
   return (
     <div className="tv-page">
+      {customCollectionEditor && <CustomCollectionEditor enabledLibraries={setupConfig?.enabledLibraries} collection={customCollectionEditor} movies={moviesForCollections} shows={shows} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { const saved = await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(String(saved.id)); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
 <MediaSectionTabs
   activeLibrary="tv"
   setActiveLibrary={(nextTab) => {
@@ -16770,84 +16674,19 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
   setupConfig={setupConfig}
 />
       <div className="movie-library-browser tv-library-browser">
-        <div className="movie-library-command-row">
-          <div className="movie-library-tabs" role="tablist" aria-label="TV library views">
-            {tvLibraryTabs.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                className={`movie-library-tab ${tvView === tab.id ? "active" : ""}`}
-                onClick={() => {
-                  if (tab.id === "collections") {
-                    setDashboardOpen({ type: "shared-collections", entryLibrary: "tv" });
-                    setActiveLibrary("movies");
-                    return;
-                  }
-                  setTvView(tab.id);
-                  setTvFilter("");
-                }}
-              >
-                <span>{tab.label}</span>
-                <small>{tab.count}</small>
-              </button>
-            ))}
-          </div>
-
-          {tvView !== "collections" && (
-            <label className="library-sort-control library-sort-control-inline">
-              <span>Sort</span>
-              <select value={tvSort} onChange={(event) => setTvSort(event.target.value)}>
-                <option value="title">Title A-Z</option>
-                <option value="title-desc">Title Z-A</option>
-                <option value="release-desc">Release Date Newest</option>
-                <option value="release-asc">Release Date Oldest</option>
-              </select>
-            </label>
-          )}
-        </div>
-
-        {tvView !== "all" && tvView !== "collections" && (
-          <div className="movie-filter-strip" aria-label={`${tvView} filter`}>
-            <button
-              type="button"
-              className={`movie-filter-chip ${!tvFilter ? "active" : ""}`}
-              onClick={() => setTvFilter("")}
-            >
-              All {tvLibraryTabs.find((tab) => tab.id === tvView)?.label || "Items"}
-            </button>
-            {currentTvFilterOptions.map((option) => (
-              <button
-                key={option}
-                type="button"
-                className={`movie-filter-chip ${tvFilter === option ? "active" : ""}`}
-                onClick={() => setTvFilter(option)}
-              >
-                {option}
-                <small>
-                  {shows.filter((show) => {
-                    if (tvView === "genres") return getTvGenres(show).includes(option);
-                    if (tvView === "years") return normalizeTvText(show.year) === option;
-                    return false;
-                  }).length}
-                </small>
-              </button>
-            ))}
-          </div>
-        )}
-
+        {tvFilterOpen && <LibraryFilterOverlay title="TV Shows" genres={tvGenres} years={tvYears} selectedGenres={tvGenreFilters} selectedYears={tvYearFilters} sort={tvSort} onClose={() => setTvFilterOpen(false)} onChange={value => { setTvGenreFilters(value.genres); setTvYearFilters(value.years); setTvSort(value.sort); }} />}
+        {tvView !== "collections" && (tvGenreFilters.length > 0 || tvYearFilters.length > 0) && <div className="movie-filter-strip movie-active-filter-strip" aria-label="Active TV filters">{tvGenreFilters.map(genre => <button className="movie-filter-chip active" key={genre} onClick={() => setTvGenreFilters(current => current.filter(item => item !== genre))}>Genre: {genre} ×</button>)}{tvYearFilters.map(year => <button className="movie-filter-chip active" key={year} onClick={() => setTvYearFilters(current => current.filter(item => item !== year))}>Year: {year} ×</button>)}</div>}
       </div>
 
       {tvView === "collections" ? (
         <>
-          <div className="shared-collection-toolbar">
-            <div><strong>Shared Collections</strong><span>Mix Movies, TV Shows, and Books in your own manual order.</span></div>
-            <button type="button" className="primary-button" onClick={() => setCustomCollectionEditor({ source: "custom", items: [] })}>＋ Create Collection</button>
-          </div>
           {customCollectionsLoading && <p className="small-muted">Loading custom collections…</p>}
           {customCollectionsError && <p className="small-muted">{customCollectionsError}</p>}
-          {customCollectionEditor && <CustomCollectionEditor collection={customCollectionEditor.id ? customCollectionEditor : null} movies={moviesForCollections} shows={shows} books={booksForCollections} onCancel={() => setCustomCollectionEditor(null)} onSave={async (draft) => { await saveCustomCollection(draft); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} onDelete={async (collection) => { if (!window.confirm(`Delete ${collection.name}?`)) return; await deleteCustomCollection(collection.id); setCustomCollectionEditor(null); setSelectedSharedCollectionId(""); }} />}
+
           {collectionOrderOverridesError && <p className="small-muted">{collectionOrderOverridesError}</p>}
           {collectionOrderEditor && <CollectionOrderEditor collection={collectionOrderEditor} onCancel={() => setCollectionOrderEditor(null)} onSave={async (draft) => { await saveCollectionOrderOverride(draft); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} onReset={async (collection) => { await deleteCollectionOrderOverride(collection.id); setCollectionOrderEditor(null); setSelectedSharedCollectionId(""); }} />}
+          {!customCollectionsLoading && !customCollectionsError && sharedCollections.length === 0 && <div className="library-empty-state"><h3>No collections yet</h3><p>Click + to add a custom collection, or create one from the suggestions below.</p></div>}
+          <SmartCollectionSuggestions groups={collectionGroups.filter(group => group.isSuggestion)} saved={sharedCollections} onCreate={group => setCustomCollectionEditor({ ...group, id: undefined, source: "custom", generatedCollectionId: group.id })} />
           <div className="shared-collection-grid">
             {sharedCollections.map((collection) => (
               <SharedCollectionCard key={collection.id} collection={collection} onClick={() => { setCollectionSort(collection.source === "custom" || collection.hasManualOrder ? "manual" : "release-asc"); setSelectedSharedCollectionId(String(collection.id)); }} />
@@ -16856,6 +16695,7 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
         </>
       ) : (
         <>
+      {!filteredShows.length && <p className="library-empty-state">No TV shows match these filters.</p>}
       <AlphaJumpRail items={filteredShows} libraryId="tv" />
       <ProgressiveLibraryGrid className="tv-grid alpha-aware-grid" libraryId="tv" items={filteredShows} getLetter={(item) => getAlphabetBucket(item.title)} renderItem={(show) => (
 <button
@@ -16865,13 +16705,7 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
             data-alpha-letter={getAlphabetBucket(show.title)}
             onClick={() => setSelectedShow(show)}
           >
-            <img
-  src={show.poster}
-  alt=""
-  loading="lazy"
-  decoding="async"
-  onError={handlePosterFallback}
-/>
+            <LibraryPoster src={show.poster} />
 
             <div className="tv-card-overlay">
               <h3>{show.title}</h3>
@@ -16884,7 +16718,14 @@ const filteredShows = useMemo(() => sortSharedMediaItems(
   );
 }
 
-function SetupWizard({ onComplete, subscription = null }) {
+function subscriptionIncludesLibrary(subscription, id) {
+  const key = String(id || "").toLowerCase();
+  if (["movies", "tvshows", "music", "books", "youtube"].includes(key)) return true;
+  return subscription?.libraryAccess?.[key] === true;
+}
+
+function SetupWizard({ onComplete, subscription = null, storage = null }) {
+  const [folderCheck, setFolderCheck] = useState({ busy: false, results: [] });
   const TOTAL_STEPS = 10;
   const integrationsAvailable = subscription?.features?.externalIntegrations === true;
   const [step, setStep] = useState(1);
@@ -16907,7 +16748,7 @@ function SetupWizard({ onComplete, subscription = null }) {
     10: "Ready",
   };
 
-  const defaultFolderPaths = {
+  const defaultFolderPaths = storage?.folderDefaults || {
     movies: "/media/movies",
     tvshows: "/media/tv",
     liveTV: "/media/livetv/recordings",
@@ -16927,8 +16768,8 @@ function SetupWizard({ onComplete, subscription = null }) {
     { id: "tvshows", icon: "📺", label: "TV Shows", description: "Shows, seasons, episodes, collections, watch orders, and playback.", stage: "Core" },
     { id: "music", icon: "🎵", label: "Music", description: "Artists, albums, songs, videos, playlists, and listening progress.", stage: "Core" },
     { id: "books", icon: "📚", label: "Books", description: "Books, authors, series, EPUB reading, and reading progress.", stage: "Core" },
-    { id: "photos", icon: "🖼️", label: "Photos", description: "Local photo browsing with Family and Cloud connections later.", stage: "Core" },
-    { id: "youtube", icon: "▶️", label: "YouTube", description: "Creators, series, seasons, archived videos, and TubeArchivist.", stage: "Optional" },
+    { id: "photos", icon: "🖼️", label: "Photos", description: "Photo albums and local photos in your Media library.", stage: "Core" },
+    { id: "youtube", icon: "▶️", label: "YouTube", description: "Creators, series, seasons, and locally archived videos.", stage: "Optional" },
     { id: "liveTV", icon: "📡", label: "Live TV", description: "IPTV, M3U/EPG guide data, channels, DVR, and recordings.", stage: "Optional" },
     { id: "family", icon: "👪", label: "Family", description: "Family Archive, profiles, tree, pets, reviewed schedule imports, calendar, and saved recipes.", stage: "Optional" },
     { id: "cloud", icon: "☁️", label: "Cloud", description: "Local and connected cloud files. Provider support remains optional.", stage: "Preview" },
@@ -17112,9 +16953,14 @@ function SetupWizard({ onComplete, subscription = null }) {
     scanOnFinish: true,
   });
 
-  const enabledLibraryEntries = Object.entries(setupConfig.enabledLibraries).filter(([, enabled]) => enabled);
+  useEffect(() => {
+    setSetupConfig((previous) => ({ ...previous, enabledLibraries: Object.fromEntries(Object.entries(previous.enabledLibraries).map(([id, enabled]) => [id, enabled && subscriptionIncludesLibrary(subscription, id)])) }));
+  }, [subscription]);
+
+  const enabledLibraryEntries = Object.entries(setupConfig.enabledLibraries).filter(([id, enabled]) => enabled && subscriptionIncludesLibrary(subscription, id));
 
   function invalidateFolderWork() {
+    setFolderCheck({ busy: false, results: [] });
     setFolderCreationState({ status: "idle", results: [], error: "" });
     setScanState({ status: "idle", results: [], skipped: [], error: "" });
   }
@@ -17146,6 +16992,7 @@ function SetupWizard({ onComplete, subscription = null }) {
   }
 
   function toggleLibrary(id) {
+    if (!subscriptionIncludesLibrary(subscription, id)) return;
     invalidateFolderWork();
     setSetupConfig((previous) => {
       const nextEnabled = !previous.enabledLibraries[id];
@@ -17487,12 +17334,32 @@ function SetupWizard({ onComplete, subscription = null }) {
     return "";
   }
 
+  async function checkFolders() {
+    if (folderCheck.busy) return false;
+    setFolderCheck({ busy: true, results: [] });
+    try {
+      const response = await fetch("/api/setup/check-folders", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabledLibraries: setupConfig.enabledLibraries, folderMappings: getResolvedFolderMappings() }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to check storage.");
+      setFolderCheck({ busy: false, results: data.results || [] });
+      return data.ok === true;
+    } catch (error) {
+      setFolderCheck({ busy: false, results: [{ status: "error", message: error.message }] });
+      return false;
+    }
+  }
+
   async function handleNext() {
     const validationError = validateCurrentStep();
     if (validationError) {
       alert(validationError);
       return;
     }
+
+    if (step === 5 && !await checkFolders()) return;
 
     if (step === 8) {
       if (folderCreationState.status === "running") return;
@@ -17514,6 +17381,7 @@ function SetupWizard({ onComplete, subscription = null }) {
   }
 
   function nextButtonLabel() {
+    if (step === 5 && folderCheck.busy) return "Checking Folders…";
     if (step === 8) {
       if (folderCreationState.status === "running") return "Creating Folders…";
       if (folderCreationState.status === "error") return "Retry Folder Creation";
@@ -17602,20 +17470,21 @@ function SetupWizard({ onComplete, subscription = null }) {
           <div className="panel setup-step-panel">
             <p className="setup-step-eyebrow">Libraries</p>
             <h3>Choose Your Libraries</h3>
-            <p>Only enabled libraries appear in navigation. Optional and preview libraries can be enabled later in Settings.</p>
+            <p>Only libraries included in your plan can be enabled. You can change available libraries later in Settings.</p>
             <div className="setup-library-grid setup-library-grid-final">
               {libraryCatalog.map((library) => {
-                const enabled = !!setupConfig.enabledLibraries[library.id];
+                const included = subscriptionIncludesLibrary(subscription, library.id);
+                const enabled = included && !!setupConfig.enabledLibraries[library.id];
                 return (
-                  <button key={library.id} type="button" className={`setup-library-card ${enabled ? "enabled" : ""}`} onClick={() => toggleLibrary(library.id)}>
+                  <button key={library.id} type="button" disabled={!included} className={`setup-library-card ${enabled ? "enabled" : ""}`} onClick={() => toggleLibrary(library.id)}>
                     <div className="setup-library-icon">{library.icon}</div>
                     <div className="setup-library-copy">
                       <div className="setup-library-title-row">
                         <h4>{library.label}</h4>
-                        <span className={`setup-stage-badge stage-${library.stage.toLowerCase()}`}>{library.stage}</span>
+                        <span className={`setup-stage-badge stage-${library.stage.toLowerCase()}`}>{included ? library.stage : "Paid plan"}</span>
                       </div>
                       <p>{library.description}</p>
-                      <strong className="setup-library-state">{enabled ? "✓ Enabled" : "○ Disabled"}</strong>
+                      <strong className="setup-library-state">{!included ? "🔒 Not included" : enabled ? "✓ Enabled" : "○ Disabled"}</strong>
                     </div>
                   </button>
                 );
@@ -17778,14 +17647,17 @@ function SetupWizard({ onComplete, subscription = null }) {
           <div className="panel setup-step-panel">
             <p className="setup-step-eyebrow">Folder Mapping</p>
             <h3>Map Local Storage</h3>
-            <p>Assign one or more paths to every enabled library. Existing folders are reused; missing folders are created in the next step.</p>
+            <p>Assign folders on the computer running Homestead. Existing folders are reused; missing local folders are created during setup.</p>
+            {storage?.platform === "win32" && <div className="setup-info-callout">Use a local folder, mapped drive, or actual network share such as <code>{"\\\\server\\share\\Movies"}</code>. Windows Network Shortcuts are not media folders. Open the share in File Explorer and sign in with the same Windows account before continuing.</div>}
             <div className="setup-form setup-folder-groups">
               {enabledLibraryEntries.map(([id]) => {
                 const paths = getFolderPathList(id);
                 return <div key={id} className="folder-mapping-group"><div className="setup-folder-heading"><strong>{libraryDisplayNames[id] || titleFromId(id)}</strong>{id === "liveTV" && <span>DVR recordings</span>}</div>{paths.map((pathValue, index) => <div className="folder-path-row" key={`${id}-${index}`}><input value={pathValue} onChange={(event) => { const nextPaths = [...paths]; nextPaths[index] = event.target.value; saveFolderPathList(id, nextPaths); }} />{paths.length > 1 && <button type="button" className="secondary-button" onClick={() => saveFolderPathList(id, paths.filter((_, pathIndex) => pathIndex !== index))}>Remove</button>}</div>)}<button type="button" className="secondary-button" onClick={() => saveFolderPathList(id, [...paths, ""])}>＋ Add Media Path</button></div>;
               })}
             </div>
-            <div className="setup-info-callout">Collections, watch orders, named watchlists, appearance overrides, and setup data are stored separately in Homestead’s persistent <strong>/app/data</strong> volume.</div>
+            <button type="button" className="secondary-button" disabled={folderCheck.busy} onClick={checkFolders}>{folderCheck.busy ? "Checking Folders…" : "Check Folder Access"}</button>
+            {folderCheck.results.map((result, index) => <div key={index} role={result.status === "error" ? "alert" : "status"} className={result.status === "error" ? "setup-error-callout" : "setup-info-callout"}><strong>{libraryDisplayNames[result.libraryId] || "Storage"}</strong>{result.path && <div>{result.path}</div>}{result.message}</div>)}
+            <div className="setup-info-callout">Collections, progress, and settings are stored separately in Homestead’s persistent data folder{storage?.dataDirectory ? <>: <strong>{storage.dataDirectory}</strong></> : "."}</div>
           </div>
         )}
 
@@ -18931,7 +18803,7 @@ async function fetchSeerrRequests() {
   return response.json();
 }
 
-function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, requests, setDashboardOpen, setupConfig, setSearchOpen, }) {
+export function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, requests, setDashboardOpen, setupConfig, setSearchOpen, }) {
   const [watchProgress, setWatchProgress] = useState(() => getWatchProgress());
   const [watchOrderProgress, setWatchOrderProgress] = useState(() => getWatchOrderProgress());
   const [activeWatchOrderProgress, setActiveWatchOrderProgress] = useState(() => getActiveWatchOrderProgress());
@@ -18975,14 +18847,16 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
 
     async function refreshHomeCollectionAppearance() {
       try {
-        const [appearanceResponse, customResponse] = await Promise.all([
+        const [appearanceResponse, customResponse, orderResponse] = await Promise.all([
           fetch("/api/collections/appearance-overrides", { cache: "no-store" }),
           fetch("/api/collections/custom", { cache: "no-store" }),
+          fetch("/api/collections/order-overrides", { cache: "no-store" }),
         ]);
 
-        const [appearanceData, customData] = await Promise.all([
+        const [appearanceData, customData, orderData] = await Promise.all([
           appearanceResponse.json().catch(() => ({})),
           customResponse.json().catch(() => ({})),
+          orderResponse.json().catch(() => ({})),
         ]);
 
         const next = {};
@@ -19027,6 +18901,12 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
           });
         }
 
+        if (orderResponse.ok && orderData?.ok !== false) {
+          (Array.isArray(orderData?.overrides) ? orderData.overrides : []).forEach((override) => {
+            const id = String(override?.collectionId || "").trim();
+            if (id && !next[id]) next[id] = {};
+          });
+        }
         if (!cancelled) setHomeCollectionAppearance(next);
       } catch (error) {
         console.warn("Unable to refresh collection artwork for Home", error);
@@ -19204,9 +19084,6 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
   const movieRequestCount = requests?.movies?.length || 0;
   const tvRequestCount = requests?.tv?.length || 0;
 
-  const recentMovies = movies.slice(-6).reverse();
-  const recentTV = tv.slice(-6).reverse();
-  const recentBooks = books.slice(-6).reverse();
   const recentMusic = music.slice(-6).reverse();
 
   const findDashboardMusicTrack = useMemo(() => createHomeMusicLookup(music, normalizeLocalMusicSong), [music]);
@@ -19280,15 +19157,11 @@ function HomePage({ setActiveLibrary, mediaIndex, youtubeIndex, watchlist, reque
   const [showWidgetCustomizer, setShowWidgetCustomizer] = useState(false);
   useDialogFocus({ selector: ".home-appearance-overlay", open: showWidgetCustomizer, onClose: () => setShowWidgetCustomizer(false) });
   const dashboardWidgetOptions = [
-    { id: "libraryStats", label: "Library Stats", description: "Show quick counts for Movies, TV, Books, and Music." },
-    { id: "continueWatching", label: "Continue Watching", description: "Resume movies and TV from the home dashboard." },
-    { id: "continueReading", label: "Continue Reading", description: "Show in-progress books." },
-    { id: "continueListening", label: "Continue Listening", description: "Show in-progress music playback." },
-    { id: "continueYouTube", label: "Continue YouTube", description: "Show in-progress YouTube videos." },
-    { id: "recentActivity", label: "Recent Activity", description: "Show requests, watchlist, scanner, and Seerr summary rows." },
-    { id: "family", label: "Family", description: "Show the Family dashboard shortcut." },
-    { id: "inventory", label: "Inventory", description: "Show the Inventory dashboard shortcut." },
-    { id: "adult", label: "Adult", description: "Show the Adult library dashboard shortcut when enabled." },
+    { id: "libraryStats", label: "Library counts", description: "Show library counts in the header." },
+    { id: "recentActivity", label: "Activity ribbon", description: "Watchlist, requests, and the latest library scan." },
+    { id: "continueWatching", label: "Continue Watching", description: "One resume row for video, books, and audio." },
+    { id: "recentlyAdded", label: "Recently Added", description: "One row across your enabled media libraries." },
+    { id: "relatedItems", label: "Related titles", description: "Owned titles related to your recent viewing." },
   ];
   const [dashboardWidgetPrefs, setDashboardWidgetPrefs] = useState(() => {
     try {
@@ -19384,39 +19257,6 @@ const continueWatching = (() => {
     .slice(0, 6);
 })();
 
-const continueReading = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "book")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const continueListening = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "music" || item.type === "audiobook")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const continueYouTube = Object.entries(watchProgress)
-  .map(([id, progress]) => ({
-    id,
-    ...progress,
-  }))
-  .filter((item) => item.type === "youtube")
-  .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
-  .slice(0, 6);
-
-const recentYouTube = recentYouTubeEntries(youtubeCreators).map((video) => ({
-  ...video,
-  poster: getDashboardYouTubePoster(video),
-  name: video.title || video.name || video.filename || video.creatorName,
-}));
-
 const showMovies = !!enabledLibraries.movies;
 const showTV = !!enabledLibraries.tvshows;
 const showBooks = !!enabledLibraries.books;
@@ -19446,6 +19286,33 @@ const homeStatItems = [
   showCloud ? { id: "cloud", label: "Cloud", value: "Ready", target: "cloud" } : null,
   showAI ? { id: "ai", label: "AI", value: "Tools", target: "ai" } : null,
 ].filter(Boolean);
+
+  const homeItems = useMemo(() => homeCatalog(mediaIndex, youtubeCreators, enabledLibraries), [mediaIndex, youtubeCreators, enabledLibraries]);
+  const recentItems = useMemo(() => homeRecentlyAdded(homeItems), [homeItems]);
+  const resumeItems = homeProgress(homeItems, watchProgress, continueWatching.filter((item) => item.type === "watch-order").map(getHomeCollectionDisplay), Object.keys(homeCollectionAppearance)).filter((item) => item.type === "book" ? widgetEnabled("continueReading") : ["music", "audiobook"].includes(item.type) ? widgetEnabled("continueListening") : item.type === "youtube" ? widgetEnabled("continueYouTube") : true);
+  const relatedItems = useMemo(() => homeRelated(homeItems, watchProgress), [homeItems, watchProgress]);
+  const lastScan = Object.entries(mediaIndex?.scanHistory || {}).filter(([key]) => enabledLibraries[{ tv: "tvshows" }[key] || key] === true && ["movies", "tv", "books", "music", "youtube", "photos"].includes(key)).map(([, scan]) => scan.completedAt).filter(Boolean).sort((a, b) => Date.parse(b) - Date.parse(a))[0] || mediaIndex?.updatedAt || mediaIndex?.generatedAt || mediaIndex?.scannedAt;
+  const homeActivity = [
+    (showMovies || showTV) && { label: "Watchlist", value: `${(showMovies ? movieWatchCount : 0) + (showTV ? tvWatchCount : 0)} saved`, onClick: () => setActiveLibrary("watchlist") },
+    (showMovies || showTV) && { label: "Requests", value: `${(showMovies ? movieRequestCount : 0) + (showTV ? tvRequestCount : 0)} tracked`, onClick: () => setActiveLibrary("requests") },
+    { label: "Library scan", value: lastScan && Number.isFinite(Date.parse(lastScan)) ? formatHomesteadDateTime(lastScan) : "No scans yet", onClick: () => setActiveLibrary("dashboard") },
+  ].filter(Boolean);
+  function openHomeItem(item) {
+    if (item.type === "watch-order") {
+      localStorage.setItem("homesteadPendingWatchOrderResume", JSON.stringify({ collectionId: item.collectionId, queueIndex: item.queueIndex || 0 }));
+      setDashboardOpen({ type: "watch-order", id: item.collectionId }); setActiveLibrary("movies"); return;
+    }
+    const type = item.type === "audiobook" ? "book" : item.type;
+    const library = { movie: "movies", tv: "tv", book: "books", music: "music", youtube: "youtube", photo: "photos" }[type];
+    setDashboardOpen({ type, id: type === "music" ? item.entity?.name || item.targetId : item.targetId, ...(type === "youtube" ? { videoPath: item.path || item.sourcePath || item.publicPath || item.file || item.id } : {}) });
+    setActiveLibrary(library);
+  }
+  function renderHomeCard(item, onClick) {
+    const type = item.type === "audiobook" ? "book" : item.type;
+    const entity = item.entity || item;
+    const poster = type === "book" ? getDashboardBookPoster({ ...entity, ...item }) : type === "music" ? getDashboardMusicPoster(item) || entity.poster || entity.cover : type === "youtube" ? getDashboardYouTubePoster(item) : ["movie", "tv"].includes(type) ? getMatchedPosterOrLocalPoster(type === "movie" ? "movies" : "tv", entity, item.poster || "") : item.poster;
+    return <HomeDashboardMiniPosterCard item={item} title={item.type === "tv" ? item.showTitle || entity.name || entity.title : item.title || item.name} subtitle={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : item.artist || item.creatorName} poster={poster} libraryType={type === "watch-order" ? "movie" : type} progress={item.progress ?? null} pills={[item.libraryLabel, item.episodePill].filter(Boolean)} onClick={onClick} />;
+  }
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("homestead-page-context", {
@@ -19495,367 +19362,7 @@ const homeStatItems = [
         </div>, document.body
       )}
 
-<div className="dashboard-grid">
-<div className="home-overview-row">
-
-  {widgetEnabled("continueWatching") && showMedia && continueWatching.length > 0 && (
-  <div className="panel dashboard-panel dashboard-continue-watching-panel">
-    <div className="panel-header">
-      <h3>Continue Watching</h3>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueWatching.map((rawItem) => {
-        const item = getHomeCollectionDisplay(rawItem);
-        return (
-        <HomeDashboardMiniPosterCard
-          key={`continue-watch-${item.id}`}
-          item={item}
-          title={item.name || item.title}
-          subtitle={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : item.showTitle}
-          poster={item.poster}
-          libraryType={item.type === "tv" ? "tv" : "movie"}
-          progress={item.type === "watch-order"
-            ? (item.episodeCount ? ((item.episodeNumber || 1) / item.episodeCount) * 100 : 0)
-            : item.duration ? (item.currentTime / item.duration) * 100 : 0}
-          progressLabel={item.type === "watch-order" ? `Episode ${item.episodeNumber || 1} of ${item.episodeCount || "?"}` : ""}
-          onClick={() => {
-            if (item.type === "watch-order") {
-              localStorage.setItem("homesteadPendingWatchOrderResume", JSON.stringify({
-                collectionId: item.collectionId,
-                queueIndex: item.queueIndex || 0,
-              }));
-              const targetCollectionId = String(item.collectionId || "").trim();
-              if (!targetCollectionId) {
-                console.warn("Watch-order progress is missing a collectionId", item);
-                setActiveLibrary("movies");
-                return;
-              }
-              setDashboardOpen({ type: "watch-order", id: targetCollectionId });
-              setActiveLibrary("movies");
-              return;
-            }
-            const dashboardTargetId = item.type === "tv"
-              ? (
-                  item.showId ||
-                  item.seriesId ||
-                  item.parentShowId ||
-                  tv.find((show) => {
-                    const savedTitle = String(item.showTitle || item.seriesTitle || "").trim().toLowerCase();
-                    const showTitle = String(show.title || show.name || "").trim().toLowerCase();
-                    return savedTitle && showTitle === savedTitle;
-                  })?.id ||
-                  item.id
-                )
-              : item.id;
-
-            setDashboardOpen({
-              type: item.type || "movie",
-              id: dashboardTargetId,
-            });
-            setActiveLibrary(item.type === "tv" ? "tv" : "movies");
-          }}
-        />
-        );
-      })}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("recentActivity") && showMedia && (
-  <div className="panel dashboard-panel dashboard-recent-activity-panel">
-    <div className="panel-header">
-      <h3>Your Recent Activity</h3>
-
-      <button
-        className="secondary-button"
-        onClick={() => setActiveLibrary("dashboard")}
-      >
-        View Dashboard
-      </button>
-    </div>
-
-    <div className="dashboard-stat-list">
-      <button
-        className="dashboard-stat-row"
-        type="button"
-        onClick={() => setActiveLibrary("watchlist")}
-      >
-        <strong>Watchlist</strong>
-        <p>{movieWatchCount + tvWatchCount} saved items</p>
-        <span>
-          {movieWatchCount} movies • {tvWatchCount} TV shows
-        </span>
-      </button>
-
-      <button
-  className="dashboard-stat-row"
-  type="button"
-  onClick={() => setActiveLibrary("requests")}
->
-  <strong>Requests</strong>
-  <p>{movieRequestCount + tvRequestCount} pending requests</p>
-  <span>
-    {movieRequestCount} movie requests • {tvRequestCount} TV requests
-  </span>
-</button>
-
-<div className="dashboard-stat-row">
-  <strong>Your request services</strong>
-  <p>{movieRequestCount + tvRequestCount} tracked items</p>
-  <span>Only requests created by this Homestead account are shown.</span>
-</div>
-
-<div className="dashboard-stat-row">
-  <strong>Scanner</strong>
-        <p>Recent imports coming soon</p>
-        <span>Movies, TV, books, music, and YouTube scan activity.</span>
-      </div>
-    </div>
-  </div>
-)}
-</div>
-
-{widgetEnabled("continueReading") && showBooks && continueReading.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Reading</h3>
-      <button className="secondary-button" onClick={() => setActiveLibrary("books")}>
-        View Books
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueReading.map((book) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-read-${book.id}`}
-          item={book}
-          title={book.title || book.name}
-          poster={getDashboardBookPoster(book)}
-          libraryType="book"
-          progress={book.percentage != null ? Math.round(book.percentage * 100) : null}
-          progressLabel={book.percentage != null ? `${Math.round(book.percentage * 100)}% complete` : ""}
-          onClick={() => {
-            setDashboardOpen({ type: "book", id: book.id });
-            setActiveLibrary("books");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("continueListening") && (showMusic || showBooks) && continueListening.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Listening</h3>
-
-      <button
-        className="secondary-button"
-        type="button"
-        onClick={() => setActiveLibrary("music")}
-      >
-        View Music
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueListening.filter((song) => song.type === 'audiobook' ? showBooks : showMusic).map((song) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-music-${song.id}`}
-          item={song}
-          title={song.title || song.name}
-          subtitle={song.artist}
-          poster={getDashboardMusicPoster(song)}
-          libraryType="music"
-          progress={song.duration ? (song.currentTime / song.duration) * 100 : 0}
-          onClick={() => {
-            setDashboardOpen({
-              type: song.type === 'audiobook' ? 'book' : 'music',
-              id: song.type === 'audiobook' ? song.bookId : song.artist,
-            });
-            setActiveLibrary(song.type === 'audiobook' ? 'books' : 'music');
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{widgetEnabled("continueYouTube") && showYouTube && continueYouTube.length > 0 && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Continue Watching YouTube</h3>
-
-      <button
-        className="secondary-button"
-        onClick={() => setActiveLibrary("youtube")}
-      >
-        View YouTube
-      </button>
-    </div>
-
-    <div className="mini-poster-row">
-      {continueYouTube.map((video) => (
-        <HomeDashboardMiniPosterCard
-          key={`continue-youtube-${video.id}`}
-          item={video}
-          title={video.title || video.name}
-          poster={getDashboardYouTubePoster(video)}
-          libraryType="youtube"
-          progress={video.duration ? (video.currentTime / video.duration) * 100 : 0}
-          onClick={() => {
-            setDashboardOpen({
-              type: "youtube",
-              id: video.creatorId || video.creatorName || video.channelId || video.id,
-              videoPath: video.path || video.sourcePath || video.publicPath || video.file || video.id,
-            });
-            setActiveLibrary("youtube");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-  {showMovies && (
-    <div className="panel dashboard-panel">
-      <div className="panel-header">
-        <h3>Recently Added Movies</h3>
-      </div>
-
-      <div className="mini-poster-row">
-        {recentMovies.map((movie) => (
-          <HomeDashboardMiniPosterCard
-            key={movie.id}
-            item={movie}
-            title={movie.name || movie.title}
-            poster={getMatchedPosterOrLocalPoster("movies", movie, "")}
-            libraryType="movie"
-            onClick={() => {
-              setDashboardOpen({ type: "movie", id: movie.id });
-              setActiveLibrary("movies");
-            }}
-          />
-        ))}
-      </div>
-    </div>
-  )}
-
-
-{showTV && (
-  <div className="panel dashboard-panel">
-    <div className="panel-header">
-      <h3>Recently Added TV</h3>
-    </div>
-
-    <div className="mini-poster-row">
-      {recentTV.map((show) => (
-        <HomeDashboardMiniPosterCard
-          key={show.id}
-          item={show}
-          title={show.name || show.title}
-          poster={getMatchedPosterOrLocalPoster("tv", show, "")}
-          libraryType="tv"
-          onClick={() => {
-            setDashboardOpen({ type: "tv", id: show.id });
-            setActiveLibrary("tv");
-          }}
-        />
-      ))}
-    </div>
-  </div>
-)}
-
-{showBooks && (       
- <div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added Books</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("books")}>
-      View Books
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-    {recentBooks.map((book) => (
-      <HomeDashboardMiniPosterCard
-        key={book.id}
-        item={book}
-        title={book.name || book.title}
-        poster={getDashboardBookPoster(book)}
-        libraryType="book"
-        onClick={() => {
-          setDashboardOpen({ type: "book", id: book.id });
-          setActiveLibrary("books");
-        }}
-      />
-    ))}
-  </div>
-</div>
-)}
-
-{showMusic && (
-<div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added Music</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("music")}>
-      View Music
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-    {recentMusic.map((artist) => (
-      <HomeDashboardMiniPosterCard
-        key={artist.id || artist.name}
-        item={artist}
-        title={artist.name || artist.title}
-        poster={artist.poster || artist.cover || homeMusicArtwork.artists?.[artist.name || artist.title || artist.id]?.artwork?.poster || homeMusicArtwork.artists?.[artist.name || artist.title || artist.id]?.artwork?.cover}
-        libraryType="music"
-        onClick={() => {
-          setDashboardOpen({ type: "music", id: artist.name });
-          setActiveLibrary("music");
-        }}
-      />
-    ))}
-  </div>
-</div>
-)}
-
-{showYouTube && (
-<div className="panel dashboard-panel">
-  <div className="panel-header">
-    <h3>Recently Added YouTube</h3>
-    <button className="secondary-button" onClick={() => setActiveLibrary("youtube")}>
-      View YouTube
-    </button>
-  </div>
-
-  <div className="mini-poster-row">
-{recentYouTube.map((creator, index) => (
-  <HomeDashboardMiniPosterCard
-    key={`${creator.id || creator.creatorId || creator.name}-${index}`}
-    item={creator}
-    title={creator.name || creator.title}
-    poster={getDashboardYouTubePoster(creator)}
-    libraryType="youtube"
-    onClick={() => {
-      setDashboardOpen({
-        type: "youtube",
-        id:
-          creator.id ||
-          creator.creatorId ||
-          creator.name ||
-          creator.title,
-      });
-      setActiveLibrary("youtube");
-    }}
-  />
-    ))}
-  </div>
-</div>
-)}
-
-      </div>
+<ServerHomeFeed recent={recentItems} resume={resumeItems} related={relatedItems} activity={homeActivity} onOpen={openHomeItem} renderCard={renderHomeCard} showRecent={widgetEnabled("recentlyAdded")} showResume={widgetEnabled("continueWatching")} showRelated={widgetEnabled("relatedItems")} showActivity={widgetEnabled("recentActivity")} />
     </div>
   );
 }
@@ -19940,12 +19447,14 @@ function HomeDashboardMiniPosterCard({
   libraryType = "media",
   progress = null,
   progressLabel = "",
+  pills = [],
   onClick,
 }) {
   const [imageCandidateIndex, setImageCandidateIndex] = useState(0);
   const rawTitle = title || item.title || item.name || item.filename || "Untitled";
   const displayTitle = cleanDashboardMediaTitle(rawTitle, libraryType);
-  const displaySubtitle = getDashboardMediaSubtitle(item, libraryType, subtitle);
+  const rawSubtitle = getDashboardMediaSubtitle(item, libraryType, subtitle);
+  const displaySubtitle = String(rawSubtitle).trim() === displayTitle.trim() ? "" : rawSubtitle;
   const posterCandidates = Array.from(new Set([
     poster,
     ...(Array.isArray(item.posterCandidates) ? item.posterCandidates : []),
@@ -20008,6 +19517,7 @@ function HomeDashboardMiniPosterCard({
         {progressLabel && <small>{progressLabel}</small>}
         <span>{displayTitle}</span>
         {displaySubtitle && <small>{displaySubtitle}</small>}
+        {pills.length > 0 && <span className="home-media-pills">{pills.map((pill) => <small key={pill}>{pill}</small>)}</span>}
       </div>
     </button>
   );
@@ -30841,7 +30351,7 @@ function getLibraryFolders(id) {
     return [value];
   }
 
-  return [`/media/${id}`];
+  return [setupConfig?.storage?.folderDefaults?.[id] || `/media/${id}`];
 }
 
 function normalizeScanHistoryLibraryId(id) {
@@ -31329,6 +30839,7 @@ function updateIntegrationSetting(id, key, value) {
 }
 
 function toggleLibrarySetting(id) {
+  if (!subscriptionIncludesLibrary(setupConfig?.subscription, id)) return;
   const updatedConfig = {
     ...setupConfig,
     enabledLibraries: {
@@ -31433,7 +30944,8 @@ return (
         <button
           key={id}
           className="settings-library-card"
-	    onClick={() => setSelectedSettingsLibrary(id)}
+	    disabled={!subscriptionIncludesLibrary(setupConfig?.subscription, id)}
+          onClick={() => setSelectedSettingsLibrary(id)}
         >
           <div className="settings-library-icon">
             {id === "movies" && "🎬"}
@@ -31455,7 +30967,7 @@ return (
 </h4>
 
           <p>
-            {enabled
+            {!subscriptionIncludesLibrary(setupConfig?.subscription, id) ? "Not included in your plan" : enabled
               ? "Enabled"
               : "Disabled"}
           </p>
@@ -31494,6 +31006,7 @@ return (
 <button
   className="secondary-button"
   type="button"
+  disabled={!subscriptionIncludesLibrary(setupConfig?.subscription, selectedSettingsLibrary)}
   onClick={() => toggleLibrarySetting(selectedSettingsLibrary)}
 >
   {enabledLibraries[selectedSettingsLibrary]
@@ -31506,6 +31019,7 @@ return (
   <div className="settings-section-header">
     <div>
       <h3>Media Folders</h3>
+      {["movies", "tv", "tvshows"].includes(selectedSettingsLibrary) && <LibraryDiagnostics library={selectedSettingsLibrary === "tvshows" ? "tv" : selectedSettingsLibrary} />}
       <p>Add one or more folders for this library.</p>
     </div>
 
@@ -47126,6 +46640,7 @@ function HomesteadApp({ sessionUser, onLogout }) {
   const appearanceSaveQueue = useRef(null);
   if (!appearanceSaveQueue.current) appearanceSaveQueue.current = createAppearanceSaveQueue();
   const [photoAlbumId, setPhotoAlbumId] = useState("");
+
   const [adultPhotoAlbums, setAdultPhotoAlbums] = useState([]);
   const isPhotoLibrary = activeLibrary === "photos" || activeLibrary === "adultPhotos";
   const activePhotoAlbum = isPhotoLibrary ? (activeLibrary === "adultPhotos" ? adultPhotoAlbums : Object.values(mediaIndex?.libraries?.photos || {})).find((album) => String(album.id) === photoAlbumId) : null;
@@ -47370,6 +46885,13 @@ function HomesteadApp({ sessionUser, onLogout }) {
     setPageContext({ library: activeLibrary, title: "", appearanceScope: "", addActions: [], filterSort: false, filterSortActive: false, filterSortCount: 0, backAction: "", backLabel: "", appearanceAction: "", stats: [], headerActions: [], hero: null });
     setMediaAppearanceScope("library"); setLibraryActionsOpen(false); setMediaAppearanceOpen(false); setMediaAppearanceInitialTab("library");
   }, [activeLibrary]);
+
+  useEffect(() => {
+    if (activeLibrary !== "photos" || dashboardOpen?.type !== "photo") return;
+    const album = Object.values(mediaIndex?.libraries?.photos || {}).find((item) => String(item.id) === String(dashboardOpen.id));
+    setPhotoAlbumId(album ? String(album.id) : "");
+    setDashboardOpen(null);
+  }, [activeLibrary, dashboardOpen?.type, dashboardOpen?.id, mediaIndex]);
 
   function openAdultProfileModal(defaultType = "") {
     setShowAddModal(false);
@@ -48958,7 +48480,7 @@ if (setupConfigLoading) {
 }
 
 if (!setupConfig?.completed) {
-  return <SetupWizard onComplete={setSetupConfig} subscription={setupConfig?.subscription} />;
+  return <SetupWizard onComplete={setSetupConfig} subscription={setupConfig?.subscription} storage={setupConfig?.storage} />;
 }
 
 if (selectedAdvancedAdultSearch) {

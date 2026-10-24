@@ -5,17 +5,17 @@ const TIER_ORDER = Object.freeze(["free", "family", "plus", "pro"]);
 const TIER_DEFINITIONS = Object.freeze({
   free: {
     name: "Homestead Free",
-    features: ["coreMedia"],
+    features: ["coreMedia", "photos", "adult"],
     limits: { users: 1, concurrentStreams: 1 },
   },
   family: {
     name: "Homestead Family",
-    features: ["coreMedia", "multiUser", "librarySharing", "photos", "familyLibrary", "households", "familyProfiles", "familyTree", "calendar", "recipes", "pets"],
+    features: ["coreMedia", "multiUser", "librarySharing", "photos", "familyLibrary", "households", "familyProfiles", "familyTree", "calendar", "recipes", "pets", "adult"],
     limits: { users: null, concurrentStreams: null },
   },
   plus: {
     name: "Homestead Plus",
-    features: ["coreMedia", "multiUser", "librarySharing", "photos", "familyLibrary", "households", "familyProfiles", "familyTree", "calendar", "recipes", "pets", "inventory", "cloud", "appearance"],
+    features: ["coreMedia", "multiUser", "librarySharing", "photos", "familyLibrary", "households", "familyProfiles", "familyTree", "calendar", "recipes", "pets", "inventory", "cloud", "appearance", "adult"],
     limits: { users: null, concurrentStreams: null },
   },
   pro: {
@@ -102,6 +102,7 @@ function createSubscriptionService({ env = process.env, now = () => Date.now() }
     developmentPreview,
     features: { ...features },
     limits: { ...definition.limits },
+    libraryAccess: Object.fromEntries(["movies", "tvshows", "music", "books", "youtube", ...Object.keys(LIBRARY_FEATURES)].map((libraryId) => [libraryId, allowsLibrary(libraryId)])),
     customerId: verifiedLicense?.customerId || null,
     subscriptionId: verifiedLicense?.subscriptionId || null,
     expiresAt: verifiedLicense?.expiresAt ? new Date(Number(verifiedLicense.expiresAt) * 1000).toISOString() : null,

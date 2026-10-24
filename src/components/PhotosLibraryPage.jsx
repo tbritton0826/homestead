@@ -1,3 +1,5 @@
+import LibraryPoster from "./LibraryPoster.jsx";
+import ProgressiveLibraryGrid from "./ProgressiveLibraryGrid.jsx";
 import { handlePosterFallback } from "../utils/image-fallback.js";
 import { useEffect, useMemo, useState } from "react";
 import { photoUrl } from "./PhotoLibraryPicker.jsx";
@@ -29,20 +31,19 @@ export default function PhotosLibraryPage({ mediaIndex, libraryKey = "photos", a
         {!externalCount && <span className="photo-count">{photos.length} photos</span>}
       </div>}
     </header>}
-    {!album ? <div className="photos-poster-grid">
-      {albums.map((item) => {
+    {!album ? <><ProgressiveLibraryGrid className="photos-poster-grid" libraryId="photo-albums" items={albums} getLetter={item => String(item.name || '').slice(0, 1).toUpperCase()} renderItem={(item) => {
         const files = (item.files || []).filter((file) => file.type === "image");
         const cover = covers[item.id] || photoUrl(item.poster || files[0]);
         return <button className="photos-poster-card" type="button" key={item.id} onClick={() => onAlbumChange?.(String(item.id))}>
-          <span className="photos-poster-image"><span className="photos-empty-poster" aria-hidden="true">▧</span>{cover && <img key={cover} src={cover} alt="" loading="lazy" decoding="async" onError={(event) => { event.currentTarget.style.display = "none"; }} />}</span>
+          <span className="photos-poster-image"><span className="photos-empty-poster" aria-hidden="true">▧</span>{cover && <LibraryPoster key={cover} src={cover} />}</span>
           <span className="photos-poster-caption"><strong>{item.name}</strong><small>{files.length} photos</small></span>
         </button>;
-      })}
+      }} />
       {!albums.length && <p>No photo albums found. Add a folder mapping for this library and scan it.</p>}
-    </div> : <>
+    </> : <>
       <MediaFolderTabs folders={folders} />
       <div className="photos-detail-grid">{folders.files.slice(0, visible).map((photo, index) => <button className="photos-detail-photo" key={`${photo.path || photo.sourcePath}-${index}`} onClick={() => openImageViewer ? openImageViewer(folders.files, index) : setFallbackPhoto(photo)}>
-        <img src={photoUrl(photo)} alt={photo.name || "Photo"} loading="lazy" decoding="async" onError={handlePosterFallback} /><span>{photo.name}</span>
+        <LibraryPoster src={photoUrl(photo)} width={480} alt={photo.name || "Photo"} /><span>{photo.name}</span>
       </button>)}</div>
       {!folders.files.length && <p>No photos in this folder.</p>}
       {folders.files.length > visible && <button className="secondary-button" onClick={() => setVisible(visible + 120)}>Show More Photos ({folders.files.length - visible} remaining)</button>}

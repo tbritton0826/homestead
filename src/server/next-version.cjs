@@ -229,6 +229,7 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
   };
   const normalizeAccountPreferences = (value = {}, existing = {}) => ({
     ...existing,
+    dismissedCollectionSuggestions: [...new Set([...(existing.dismissedCollectionSuggestions || []), ...(Array.isArray(value.dismissedCollectionSuggestions) ? value.dismissedCollectionSuggestions : [])].filter(id => typeof id === "string" && /^[a-z0-9][a-z0-9:_-]{0,159}$/i.test(id)))].slice(0, 5000),
     displayPreferences: Object.fromEntries(Object.entries({ ...existing.displayPreferences, ...value.displayPreferences }).filter(([key, value]) => ({ dateFormat: ["MMM_D_YYYY", "MM_DD_YYYY_DASH", "MM_DD_YYYY_SLASH", "YYYY_MM_DD_SLASH", "YYYY_MM_DD_DASH", "D_MMM_YYYY", "MMM_D"], heightFormat: ["FT_IN_DASH", "INCHES", "CM"], weightFormat: ["LBS", "KG"], measurementFormat: ["INCHES", "CM"] }[key] || []).includes(value))),
     adultRecommendations: normalizeAdultRecommendationPreferences(value.adultRecommendations || existing.adultRecommendations || {}),
     adultEmptyStates: {
@@ -263,6 +264,7 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
     res.json({ ok: true, platform: {
       version: "0.6.8.64",
       edition: subscription.tier,
+      installationId: String(process.env.HOMESTEAD_INSTALLATION_ID || ""),
       planLabel: subscription.name,
       publicOrigin: configuredOrigin,
       publicHostnameConfigured: Boolean(configuredOrigin),
