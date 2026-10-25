@@ -47,3 +47,16 @@
 .shared-collection-detail .collection-order-column:has(> .contained-watch-order) { overflow: hidden; }
 .shared-collection-detail .collection-order-column > .contained-watch-order { flex: 1 1 auto; height: 100%; overflow: hidden !important; }
 .shared-collection-detail .contained-watch-order-viewport { min-height: 0; max-height: none; }
+.library-view-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 18px; }
+.library-view-tabs button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 14px; border: 1px solid #ffffff26; border-radius: 999px; color: inherit; background: var(--media-filter-ribbon-color, #171b24); cursor: pointer; font-weight: 650; }
+.library-view-tabs button[aria-current="page"] { border-color: #7775ff; background: #5650d52b; }
+.library-view-tabs span { border-radius: 999px; padding: 2px 7px; background: #ffffff14; font-size: .8rem; font-variant-numeric: tabular-nums; }
+.library-view-tabs button:focus-visible, .library-settings-options button:focus-visible { outline: 2px solid #9ca4ff; outline-offset: 3px; }
+.polish-modal-card.library-settings-dialog { width: min(440px, calc(100vw - 24px)); }
+.library-settings-options { display: grid; gap: 8px; padding: 16px; }
+.library-settings-options button { display: flex; align-items: center; gap: 12px; text-align: left; min-height: 48px; padding: 12px; border: 1px solid #ffffff20; border-radius: 12px; color: inherit; background: #ffffff06; cursor: pointer; }
+.library-settings-options button:hover { background: #ffffff10; }
+.library-settings-options small { margin-left: auto; color: #b8bfff; }
+.app-ribbon-settings-button { position: relative; }
+.app-ribbon-settings-button.active { border-color: #7775ff; }
+.app-ribbon-settings-button b { position: absolute; top: -4px; right: -4px; min-width: 18px; padding: 2px; border-radius: 999px; background: #5953d5; color: #fff; font-size: 10px; }
