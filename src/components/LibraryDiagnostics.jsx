@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useDialogFocus from '../hooks/useDialogFocus.js';
 
-function DiagnosticsDialog({ library, onClose }) {
+export function DiagnosticsDialog({ library, onClose }) {
   const [data, setData] = useState(null), [error, setError] = useState(''), [query, setQuery] = useState(''), [kind, setKind] = useState('all'), [retry, setRetry] = useState(0);
   useDialogFocus({ selector: '.library-diagnostics-dialog', onClose });
   useEffect(() => { const controller = new AbortController(); setError(''); setData(null); fetch(`/api/libraries/${library}/diagnostics`, { signal: controller.signal, cache: 'no-store' }).then(async response => { const data = await response.json(); if (!response.ok) throw Error(data.message || 'Unable to inspect library.'); setData(data); }).catch(error => { if (error.name !== 'AbortError') setError(error.message); }); return () => controller.abort(); }, [library, retry]);

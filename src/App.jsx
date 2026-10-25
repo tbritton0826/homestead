@@ -3,6 +3,7 @@ import LibraryPoster from "./components/LibraryPoster.jsx";
 import CollectionWizard from "./components/CollectionWizard.jsx";
 import SmartCollectionSuggestions from "./components/SmartCollectionSuggestions.jsx";
 import LibraryDiagnostics from "./components/LibraryDiagnostics.jsx";
+import LibrarySettingsMenu from "./components/LibrarySettingsMenu.jsx";
 import LibraryFilterOverlay from "./components/LibraryFilterOverlay.jsx";
 import { posterPreviewUrl } from "./utils/poster-preview.js";
 import ServerHomeFeed from "./components/ServerHomeFeed.jsx";
@@ -15981,6 +15982,7 @@ const [movieGenreFilters, setMovieGenreFilters] = useState([]);
 const [movieYearFilters, setMovieYearFilters] = useState([]);
 const [movieSort, setMovieSort] = useState("title");
 const [movieFilterOverlayOpen, setMovieFilterOverlayOpen] = useState(false);
+useDialogFocus({ selector: ".movie-filter-overlay", open: movieFilterOverlayOpen, onClose: () => setMovieFilterOverlayOpen(false) });
 const [selectedSharedCollectionId, setSelectedSharedCollectionId] = useState("");
 const [collectionSort, setCollectionSort] = useState("release-asc");
 const [customCollectionEditor, setCustomCollectionEditor] = useState(null);
@@ -16099,6 +16101,8 @@ useEffect(() => {
       ? [{ id: "create-collection", label: "Create Collection", icon: "＋" }]
       : [],
     filterSort: !selectedMovie && !selectedSharedCollection && !isCollections,
+    filterSortActive: movieSort !== "title" || movieGenreFilters.length > 0 || movieYearFilters.length > 0,
+    filterSortCount: movieGenreFilters.length + movieYearFilters.length,
     backAction: selectedSharedCollection ? "back-collections" : "",
     backLabel: selectedSharedCollection ? "Back to Collections" : "",
     appearanceAction: selectedSharedCollection ? "collection-appearance" : "",
@@ -16107,7 +16111,7 @@ useEffect(() => {
       { id: "collection-display", label: "Sort / Filter", icon: "⇅" },
       ...(selectedSharedCollection.knowledgeSources?.[0]?.url ? [{ id: "collection-knowledge", label: selectedSharedCollection.knowledgeSources[0].label || "Website", icon: "↗" }] : []),
       { id: "collection-edit", label: "Edit Collection", icon: "✎" },
-    ] : [{ id: isCollections ? "show-movies" : "show-collections", label: isCollections ? "Movies" : `Collections · ${collectionCountLabel}`, icon: isCollections ? "🎬" : "▦" }],
+    ] : [],
     hero: selectedSharedCollection ? {
       type: "collection",
       render: false,
@@ -16119,7 +16123,7 @@ useEffect(() => {
       backgroundPosition: selectedSharedCollection.backgroundPosition || "center",
     } : null,
   } }));
-}, [movieView, selectedMovie?.id, selectedSharedCollection?.id, selectedSharedCollection?.name, selectedSharedCollection?.description, selectedSharedCollection?.poster, selectedSharedCollection?.banner, selectedSharedCollection?.background, selectedSharedCollection?.backgroundOpacity, selectedSharedCollection?.backgroundBlur, selectedSharedCollection?.backgroundBrightness, selectedSharedCollection?.backgroundPosition, JSON.stringify(selectedSharedCollection?.knowledgeSources || []), collectionCount, collectionCountLabel, customCollectionsLoading, selectedSharedCollection?.count, selectedSharedCollection?.movieCount, selectedSharedCollection?.tvCount, selectedSharedCollection?.bookCount]);
+}, [movieView, movieSort, movieGenreFilters, movieYearFilters, selectedMovie?.id, selectedSharedCollection?.id, selectedSharedCollection?.name, selectedSharedCollection?.description, selectedSharedCollection?.poster, selectedSharedCollection?.banner, selectedSharedCollection?.background, selectedSharedCollection?.backgroundOpacity, selectedSharedCollection?.backgroundBlur, selectedSharedCollection?.backgroundBrightness, selectedSharedCollection?.backgroundPosition, JSON.stringify(selectedSharedCollection?.knowledgeSources || []), collectionCount, collectionCountLabel, customCollectionsLoading, selectedSharedCollection?.count, selectedSharedCollection?.movieCount, selectedSharedCollection?.tvCount, selectedSharedCollection?.bookCount]);
 
 useEffect(() => {
   const handlePageAction = (event) => {
@@ -16257,7 +16261,10 @@ useEffect(() => {
 }}
   setupConfig={setupConfig}
 />
-      <LibraryDiagnostics library="movies" />
+      <nav className="library-view-tabs" aria-label="Movie views">
+        <button type="button" aria-current={movieView === "all" ? "page" : undefined} onClick={() => setMovieView("all")}>All Movies <span>{movies.length}</span></button>
+        <button type="button" aria-current={movieView === "collections" ? "page" : undefined} onClick={() => setMovieView("collections")}>Collections <span>{collectionCountLabel}</span></button>
+      </nav>
       <div className="movie-library-browser">
         {movieView === "all" && (movieGenreFilters.length > 0 || movieYearFilters.length > 0) && <div className="movie-filter-strip movie-active-filter-strip" aria-label="Active movie filters">
           {movieGenreFilters.map((genre) => <button type="button" className="movie-filter-chip active" key={`genre-${genre}`} onClick={() => setMovieGenreFilters((current) => current.filter((item) => item !== genre))}>Genre: {genre} ×</button>)}
@@ -16545,11 +16552,13 @@ useEffect(() => {
   window.dispatchEvent(new CustomEvent("homestead-page-context", { detail: {
     library: "tv", title: tvView === "collections" ? "Collections" : "TV Shows", filterSort: tvView !== "collections", filterSortActive: tvSort !== "title" || tvGenreFilters.length > 0 || tvYearFilters.length > 0, filterSortCount: tvGenreFilters.length + tvYearFilters.length,
     stats: tvView === "collections" ? [`${collectionCountLabel} Collections`] : [],
+    appearanceScope: tvView === "collections" ? "collections" : "all",
     addActions: tvView === "collections" ? [{ id: "create-collection", label: "Create Collection", icon: "＋" }] : [],
-    headerActions: [{ id: tvView === "collections" ? "show-tv" : "show-collections", label: tvView === "collections" ? "TV Shows" : `Collections · ${collectionCountLabel}`, icon: "▦" }],
+    headerActions: [],
   }}));
 }, [tvView, selectedSharedCollectionId, collectionCount, collectionCountLabel, customCollectionsLoading, selectedShow?.id, tvSort, tvGenreFilters, tvYearFilters]);
   useEffect(() => {
+    if (!selectedShow && !selectedSharedCollection) return;
     window.dispatchEvent(new CustomEvent("homestead-page-context", { detail: {
       library: "tv", title: selectedShow?.title || selectedSharedCollection?.name || "TV Shows",
       appearanceScope: selectedShow ? `tv:${selectedShow.id}` : selectedSharedCollection ? `collection:${selectedSharedCollection.id}` : "all",
@@ -16674,6 +16683,10 @@ useEffect(() => {
   setupConfig={setupConfig}
 />
       <div className="movie-library-browser tv-library-browser">
+        <nav className="library-view-tabs" aria-label="TV views">
+          <button type="button" aria-current={tvView === "all" ? "page" : undefined} onClick={() => setTvView("all")}>All Shows <span>{shows.length}</span></button>
+          <button type="button" aria-current={tvView === "collections" ? "page" : undefined} onClick={() => setTvView("collections")}>Collections <span>{collectionCountLabel}</span></button>
+        </nav>
         {tvFilterOpen && <LibraryFilterOverlay title="TV Shows" genres={tvGenres} years={tvYears} selectedGenres={tvGenreFilters} selectedYears={tvYearFilters} sort={tvSort} onClose={() => setTvFilterOpen(false)} onChange={value => { setTvGenreFilters(value.genres); setTvYearFilters(value.years); setTvSort(value.sort); }} />}
         {tvView !== "collections" && (tvGenreFilters.length > 0 || tvYearFilters.length > 0) && <div className="movie-filter-strip movie-active-filter-strip" aria-label="Active TV filters">{tvGenreFilters.map(genre => <button className="movie-filter-chip active" key={genre} onClick={() => setTvGenreFilters(current => current.filter(item => item !== genre))}>Genre: {genre} ×</button>)}{tvYearFilters.map(year => <button className="movie-filter-chip active" key={year} onClick={() => setTvYearFilters(current => current.filter(item => item !== year))}>Year: {year} ×</button>)}</div>}
       </div>
@@ -48918,7 +48931,7 @@ const floatingActions = {
         </button>
         ))}
 
-      {pageContext.library === activeLibrary && pageContext.headerActions?.map((action) => (
+      {pageContext.library === activeLibrary && pageContext.headerActions?.filter(action => !(["movies", "tv"].includes(activeLibrary) && action.id === "collection-display")).map((action) => (
         <button
           key={action.id}
           className="global-search-icon-button app-ribbon-page-action"
@@ -48931,7 +48944,7 @@ const floatingActions = {
         </button>
       ))}
 
-      {((pageContext.library === activeLibrary && pageContext.filterSort) || ["personal", "performers", "celebrities"].includes(activeLibrary)) && (
+      {!["movies", "tv"].includes(activeLibrary) && ((pageContext.library === activeLibrary && pageContext.filterSort) || ["personal", "performers", "celebrities"].includes(activeLibrary)) && (
         <button
           className={`global-search-icon-button app-ribbon-filter-button ${pageContext.filterSortActive ? "active" : ""}`}
           type="button"
@@ -48966,7 +48979,20 @@ const floatingActions = {
         <span aria-hidden="true">＋</span><strong>Add</strong>
       </button>
 
-      {supportsLibraryAppearance(activeLibrary) && (
+      {["movies", "tv"].includes(activeLibrary) && <LibrarySettingsMenu
+        key={`${activeLibrary}:${pageContext.appearanceScope}`}
+        library={activeLibrary}
+        canReview={canManageActivity}
+        filterActive={pageContext.library === activeLibrary && pageContext.filterSortActive}
+        filterCount={pageContext.library === activeLibrary ? pageContext.filterSortCount : 0}
+        onFilter={pageContext.library === activeLibrary && (pageContext.filterSort || pageContext.headerActions?.some(action => action.id === "collection-display")) ? () => window.dispatchEvent(new CustomEvent("homestead-page-action", { detail: { library: activeLibrary, action: pageContext.headerActions?.some(action => action.id === "collection-display") ? "collection-display" : "filter-sort" } })) : undefined}
+        onAppearance={() => {
+          if (pageContext.library === activeLibrary && pageContext.appearanceAction) {
+            window.dispatchEvent(new CustomEvent("homestead-page-action", { detail: { library: activeLibrary, action: pageContext.appearanceAction } }));
+          } else { setMediaAppearanceInitialTab("library"); setMediaAppearanceOpen(true); }
+        }}
+      />}
+      {!["movies", "tv"].includes(activeLibrary) && supportsLibraryAppearance(activeLibrary) && (
         <button
           className="global-search-icon-button app-ribbon-appearance-button"
           type="button"
