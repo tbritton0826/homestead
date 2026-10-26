@@ -1,0 +1,13 @@
+{
+  "mode": "test",
+  "version": 3,
+  "currency": "usd",
+  "plans": [
+    { "tier": "family", "interval": "month", "amount": 499, "priceId": "price_1UUcMT2IrcC4J4efX0dQC5FO" },
+    { "tier": "family", "interval": "year", "amount": 4999, "priceId": "price_1UUcOJ2IrcC4J4efMu9wnw9Y" },
+    { "tier": "plus", "interval": "month", "amount": 1199, "priceId": "price_1UUcRJ2IrcC4J4efj0HlzEVa" },
+    { "tier": "plus", "interval": "year", "amount": 10999, "priceId": "price_1UUcRb2IrcC4J4ef7jX4jouT" },
+    { "tier": "pro", "interval": "month", "amount": 1999, "priceId": "price_1UUcPV2IrcC4J4efhd1Xew5K" },
+    { "tier": "pro", "interval": "year", "amount": 18999, "priceId": "price_1UUcQR2IrcC4J4efUPxKXk3q" }
+  ]
+}
