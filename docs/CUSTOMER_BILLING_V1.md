@@ -65,7 +65,7 @@ variables, tracked plan files, screenshots, logs, or frontend code.
 | HOMESTEAD_CUSTOMER_DATABASE_URL | Dedicated PostgreSQL URL; URL-encode password characters |
 | HOMESTEAD_CUSTOMER_DB_TLS | `true` requires verified database TLS; optional on isolated Docker networking |
 | HOMESTEAD_CUSTOMER_ORIGIN | Exact external origin, e.g. `https://accounts.example.com`; no path/query |
-| HOMESTEAD_TRUST_PROXY | Exact trusted reverse-proxy IP/CIDR; never broad `true` or an untrusted subnet |
+| HOMESTEAD_CUSTOMER_TRUSTED_PROXIES | Comma-separated exact reverse-proxy socket IPs; empty trusts no forwarded headers. See CUSTOMER_PROXY_TRUST.md. |
 | HOMESTEAD_CUSTOMER_SMTP_URL | SMTP/SMTPS connection URL with credentials |
 | HOMESTEAD_CUSTOMER_MAIL_FROM | Verified sender address |
 | HOMESTEAD_CUSTOMER_MAIL_KEY | 32 random bytes encoded as 64 hex characters, retained securely with backups |
@@ -205,7 +205,7 @@ existing media container or alter its volumes. A reverse proxy on the same host
 can forward the public customer hostname to `127.0.0.1:7315`. If the proxy is itself
 in Docker, use an explicitly configured shared proxy network and backend service
 name; do not expose the database or broadly publish the backend to solve routing.
-Set `HOMESTEAD_TRUST_PROXY` to the proxy's exact address/CIDR, and have it overwrite
+Set `HOMESTEAD_CUSTOMER_TRUSTED_PROXIES` to the proxy's exact socket address(es), and have it overwrite
 forwarded headers. TLS terminates there; forward the original Host and
 `X-Forwarded-Proto: https`. API origin must equal the external HTTPS hostname.
 An internal `10.x` LAN URL is not a public webhook endpoint. Do not cache customer
