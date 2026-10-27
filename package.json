@@ -16,7 +16,7 @@
     "lint:mobile-v12": "eslint --config eslint.mobile-v12.config.mjs src/utils/mobile-polish.js src/server/recipe-edit.cjs scripts/test-mobile-v12.cjs",
     "artwork:recovery": "node scripts/artwork-recovery.cjs",
     "test:artwork-recovery": "node --test scripts/test-artwork-recovery.cjs",
-    "test:customer": "node --test scripts/test-customer-billing.cjs scripts/test-catalog-release.cjs",
+    "test:customer": "node --test scripts/test-customer-billing.cjs scripts/test-catalog-release.cjs scripts/test-customer-proxy-trust.cjs",
     "customer:admin": "node scripts/customer-admin.cjs",
     "customer:migrate": "node scripts/customer-admin.cjs migrate",
     "dev": "vite",

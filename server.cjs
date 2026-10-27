@@ -72,6 +72,7 @@ const {
 } = require("./src/components/livetv/livetv.cjs");
 
 const app = express();
+require("./src/server/customer/proxy-trust.cjs").configureProxyTrust(app);
 const PORT = Number(process.env.PORT || 7312);
 const ADULT_PERSON_FULL_FETCH_TIMEOUT_MS = Math.min(
   60000,
@@ -204,7 +205,6 @@ function saveAdultRecommendationProviders(input = []) {
   return readAdultRecommendationProviders();
 }
 
-app.set("trust proxy", process.env.HOMESTEAD_TRUST_PROXY || "loopback");
 app.disable("x-powered-by");
 // Dedicated commercial deployment must not expose the installation's local owner/media APIs.
 if (process.env.HOMESTEAD_CUSTOMER_ONLY === "true") {

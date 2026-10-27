@@ -208,7 +208,8 @@ Cloudflare Tunnel can forward an approved customer hostname to host-loopback
 customer-web to a reviewed shared ingress network and target `customer-web:7312`;
 keep PostgreSQL off that network. Preserve Host and overwrite forwarded protocol
 with HTTPS; narrowly trust the actual connector/proxy address using
-`HOMESTEAD_TRUST_PROXY`, not a broad/untrusted network. Do not expose DB ports or
+`HOMESTEAD_CUSTOMER_TRUSTED_PROXIES` (exact IPs only; see CUSTOMER_PROXY_TRUST.md).
+Do not expose DB ports or
 personal media endpoints to solve routing. No public DNS/tunnel changes were made.
 
 For Ubuntu/Unraid Bash, example **backup procedure** after approval:
