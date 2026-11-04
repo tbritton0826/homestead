@@ -3,9 +3,19 @@ const fs=require('node:fs/promises');
 const {createPool,migrate}=require('../src/server/customer/database.cjs');
 const {seedDrafts,publishPlan,configurePrices}=require('../src/server/customer/catalog.cjs');
 const {createStripeProvider}=require('../src/server/customer/providers/stripe.cjs');
+const {initializeSigningKey}=require('../src/server/customer/license-signing.cjs');
 async function main() {
+  if(process.argv[2]==='init-signing-key') {
+    initializeSigningKey();console.log('Activation signing key created in private application storage. Back it up securely; it was not printed.');return;
+  }
   const pool=createPool();
   try {
+    if(process.argv[2]==='readiness') {
+      const result=await require('../src/server/customer/readiness.cjs').customerReadiness({pool});
+      console.log(JSON.stringify(result,null,2));
+      if(!result.ready)process.exitCode=2;
+      return;
+    }
     await migrate(pool);await seedDrafts(pool);
     if(process.argv[2]==='configure-prices') {
       if(!process.argv[3])throw new Error('Supply an untracked test Price mappings JSON file');

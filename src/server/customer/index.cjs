@@ -5,6 +5,8 @@ const {createMailer}=require('./mail.cjs');
 const {createAuth}=require('./auth.cjs');
 const {createBilling}=require('./billing.cjs');
 const {createStripeProvider}=require('./providers/stripe.cjs');
+const {createServerLinking}=require('./server-linking.cjs');
+const {licenseSigningKey}=require('./license-signing.cjs');
 
 function customerOnlyGate(req,res,next) {
   if (req.path==='/') return res.redirect(302,'/customer/pricing');
@@ -26,7 +28,11 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
   const ready=migrate(pool).then(()=>seedDrafts(pool));
   // Keep startup failure handled even if no customer request has arrived yet.
   let startupFailed=false;ready.catch(()=>{startupFailed=true;console.error('Customer database initialization failed. Run the migration diagnostics.');});
-  const auth=createAuth({pool,config,mailer});const billing=createBilling({pool,provider,config,auth,mailer});
+  const auth=createAuth({pool,config,mailer});
+  const billing=createBilling({pool,provider,config,auth,mailer,assertActivationReady:()=>{
+    licenseSigningKey(env);
+    if(!env.STRIPE_WEBHOOK_SECRET)throw failure(503,'Stripe webhook signing is not configured.');
+  }});
   router.use(async(req,res,next)=>{
     res.set('Cache-Control','no-store');res.set('X-Content-Type-Options','nosniff');
     if (startupFailed) return res.status(503).json({message:'Customer database is unavailable.'});
@@ -43,6 +49,8 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
     }catch(error){next(error);}
   });
   router.use(express.json({limit:'32kb'}));
+  const linking=createServerLinking({pool,env,config,auth,billing});
+  linking.machineRoutes(router);
   router.get('/health',async(req,res)=>{await pool.query('SELECT 1');res.json({ok:true,mode:'test'});});
   router.use(async(req,res,next)=>{
     try {
@@ -62,15 +70,16 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
     }catch(error){next(error);}
   });
   auth.register(router);billing.register(router);
+  linking.browserRoutes(router);
   router.post('/license',async(req,res)=>{
     const customer=auth.requireVerified(req);const access=await billing.entitlements(customer.id);
     if (!access.active) throw failure(403,'No active license is available.');
-    if (!env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY) throw failure(503,'License signing is not configured.');
+    const signingKey=licenseSigningKey(env);
     const license=access.effectiveLicense;
     const now=Math.floor(Date.now()/1000);const lifetime=Boolean(license.purchaseId && license.productKind==='one_time');
     const expiration=lifetime?null:Math.min(now+86400,license.expiresAt?Math.floor(new Date(license.expiresAt).getTime()/1000):Infinity);
     const payload=Buffer.from(JSON.stringify({customerId:customer.id,licenseId:license.id,tier:license.tier,productKind:license.productKind,notBefore:now,...(expiration?{expiresAt:expiration}:{})})).toString('base64url');
-    const signature=require('node:crypto').sign(null,Buffer.from(payload),env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY.replace(/\\n/g,'\n')).toString('base64url');
+    const signature=require('node:crypto').sign(null,Buffer.from(payload),signingKey).toString('base64url');
     res.json({token:`${payload}.${signature}`,expiresAt:expiration?new Date(expiration*1000).toISOString():null});
   });
   router.use((req,res)=>res.status(404).json({message:'Customer endpoint not found.'}));
@@ -87,7 +96,7 @@ function mountCustomer({app,express,env=process.env,pool,provider,sendMail,backg
   let timer,cleanupTimer,busy=false;
   if (background) {
     timer=setInterval(async()=>{if(busy || startupFailed)return;busy=true;try{await ready;await mailer.flush();}catch{console.error('Customer mail delivery retry deferred.');}finally{busy=false;}},30000);timer.unref();
-    cleanupTimer=setInterval(async()=>{try{await ready;await pool.query('DELETE FROM customer_rate_limits WHERE expires_at<now()');await pool.query('DELETE FROM customer_sessions WHERE expires_at<now()');await pool.query('DELETE FROM customer_tokens WHERE expires_at<now()');}catch{/* A later interval retries cleanup. */}},3600000);cleanupTimer.unref();
+    cleanupTimer=setInterval(async()=>{try{await ready;await pool.query('DELETE FROM customer_rate_limits WHERE expires_at<now()');await pool.query('DELETE FROM customer_sessions WHERE expires_at<now()');await pool.query('DELETE FROM customer_tokens WHERE expires_at<now()');await pool.query('DELETE FROM customer_server_pairings WHERE expires_at<now()');await pool.query('DELETE FROM customer_server_nonces WHERE expires_at<now()');}catch{/* A later interval retries cleanup. */}},3600000);cleanupTimer.unref();
   }
   return {ready,auth,billing,mailer,close:async()=>{clearInterval(timer);clearInterval(cleanupTimer);mailer.close();await pool.end?.();}};
 }

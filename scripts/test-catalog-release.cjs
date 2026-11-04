@@ -76,7 +76,8 @@ test('sandbox release validates, commits atomically, survives retries, and prese
       const origin=`http://127.0.0.1:${server.address().port}`;
       // The service uses the same DB but its test shutdown must not close the shared pool twice.
       const shared={query:pool.query.bind(pool),connect:pool.connect.bind(pool)};
-      const service=mountCustomer({app,express,pool:shared,provider,background:false,env:{NODE_ENV:'test',HOMESTEAD_CUSTOMER_ENABLED:'true',HOMESTEAD_CUSTOMER_ORIGIN:origin,HOMESTEAD_CUSTOMER_MAIL_KEY:'a'.repeat(64)}});
+      const signing=require('node:crypto').generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'pem'});
+      const service=mountCustomer({app,express,pool:shared,provider,background:false,env:{NODE_ENV:'test',HOMESTEAD_CUSTOMER_ENABLED:'true',HOMESTEAD_CUSTOMER_ORIGIN:origin,HOMESTEAD_CUSTOMER_MAIL_KEY:'a'.repeat(64),HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY:signing,STRIPE_WEBHOOK_SECRET:'whsec_fixture_only'}});
       try {
         await service.ready;const response=await fetch(`${origin}/api/customer/plans`);assert.equal(response.status,200);
         const catalog=await response.json();const recurring=catalog.plans.filter(plan=>plan.amount>0 && plan.productKind==='subscription');

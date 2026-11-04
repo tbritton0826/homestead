@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const express = require('express');
 const Stripe = require('stripe');
 const { configureProxyTrust } = require('../src/server/customer/proxy-trust.cjs');
@@ -54,6 +55,7 @@ test('real customer routes enforce the trusted proxy boundary over HTTP sockets'
     HOMESTEAD_CUSTOMER_ORIGIN: origin, HOMESTEAD_CUSTOMER_MAIL_FROM: 'accounts@example.test',
     HOMESTEAD_CUSTOMER_MAIL_KEY: 'a'.repeat(64), HOMESTEAD_PAYMENT_MODE: 'test',
     STRIPE_SECRET_KEY: 'sk_test_fixture_only', STRIPE_WEBHOOK_SECRET: 'whsec_fixture_only',
+    HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY: crypto.generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'pem'}),
   };
   const app = express();
   configureProxyTrust(app, env);
@@ -101,6 +103,8 @@ test('real customer routes enforce the trusted proxy boundary over HTTP sockets'
       assert.doesNotMatch(response.setCookies[0], /Domain=/i);
       const probe = await request('/customer/proxy-fixture', undefined, { 'X-Forwarded-For': '198.51.100.99, 203.0.113.20' });
       assert.deepEqual(probe.data, { secure: true, ip: '203.0.113.20' }, 'client-supplied leftmost addresses do not extend the single-hop boundary');
+      const metadata=await request('/api/customer/linking/metadata');
+      assert.equal(metadata.status,200);assert.equal(metadata.data.mode,'test');
     });
 
     await t.test('missing or non-HTTPS protocol still fails behind the trusted tunnel', async () => {
@@ -126,6 +130,8 @@ test('real customer routes enforce the trusted proxy boundary over HTTP sockets'
         assert.deepEqual(response.setCookies, []);
       }
       assert.deepEqual((await request('/customer/proxy-fixture')).data, { secure: false, ip: '127.0.0.1' });
+      const linking=await request('/api/customer/linking/metadata');
+      assert.equal(linking.status,400);assert.equal(linking.data.message,'Server linking requires HTTPS.');
       configureProxyTrust(app, { ...env, HOMESTEAD_CUSTOMER_TRUSTED_PROXIES: '' });
       assert.equal((await request('/api/customer/session')).status, 400, 'empty allowlist ignores even loopback forwarded headers');
       configureProxyTrust(app, env);
