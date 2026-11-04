@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import './CustomerApp.css';
 import { money } from './money.js';
 import { annualSavings,checkoutMessage } from './billing-view.js';
+import CustomerServers from './CustomerServers.jsx';
 const featureLabels={coreMedia:'Core media',multiUser:'Multiple users',librarySharing:'Library sharing',photos:'Photos',familyLibrary:'Family library',households:'Households',familyProfiles:'Family profiles',familyTree:'Family tree',calendar:'Calendar',recipes:'Recipes',pets:'Pets',inventory:'Inventory',cloud:'Cloud',appearance:'Appearance settings',liveTV:'Live TV',adult:'Adult library',ai:'AI',externalIntegrations:'External integrations',automation:'Automation',plugins:'Plugins'};
 
 export default function CustomerApp() {
@@ -47,12 +48,12 @@ export default function CustomerApp() {
     event.preventDefault();const values=Object.fromEntries(new FormData(event.currentTarget));
     action(async()=> {
       const data=await api(endpoint,{...values,token});
-      if(endpoint==='/login')window.location.assign('/customer/dashboard');
+      if(endpoint==='/login')window.location.assign(new URLSearchParams(window.location.search).get('next')==='servers'?'/customer/servers':'/customer/dashboard');
       else setMessage(data.message);
     });
   }
   const authPage=['login','register','forgot-password','verify','reset'].find(name=>path===`/customer/${name}`);
-  const needsAccount=['/customer/dashboard','/customer/purchases','/customer/checkout/success'].includes(path);
+  const needsAccount=['/customer/dashboard','/customer/purchases','/customer/checkout/success','/customer/servers'].includes(path);
   const features=dashboard?.entitlements?.features || [];
   const access=dashboard?.entitlements;
   const hasRecurring=dashboard?.subscriptions?.some(sub=>!['canceled','incomplete_expired'].includes(sub.status));
@@ -68,7 +69,7 @@ export default function CustomerApp() {
       {savings>0 && <p className="customer-savings">Save {money(savings,plan.currency)} per year compared with monthly billing.</p>}
       {current && <p className="customer-current" role="status">{lifetime?'Lifetime owned':'Current tier'}</p>}
       <p>{plan.description}</p><ul>{plan.features.map(feature=><li key={feature}>{featureLabels[feature] || feature}</li>)}</ul>
-      {!plan.available && plan.amount>0 && <p>Test checkout unavailable until its Stripe Price is configured and validated.</p>}
+      {!plan.available && plan.amount>0 && <p>Test checkout is not available yet. Please try again later.</p>}
       {!customer?<a href="/customer/register">Create an account</a>:!customer.emailVerified?<a href="/customer/dashboard">Verify email to select a plan</a>:<button className="customer-primary" disabled={busy || !plan.available || owned || (!lifetime && plan.amount>0 && hasRecurring)} onClick={()=>action(async()=> {
         if(plan.amount===0){await api('/select-free',{planId:plan.id});await refresh();setMessage('Free plan selected.');}
         else redirect((await api('/checkout',{planId:plan.id,requestId:crypto.randomUUID()})).url);
@@ -78,7 +79,7 @@ export default function CustomerApp() {
   }
   return <div className="customer-page">
     <header className="customer-header"><a href="/" className="customer-brand">Homestead</a><span className="customer-test-badge">Test billing</span>
-      <nav aria-label="Customer navigation"><a href="/customer/pricing">Plans</a><a href="/customer/dashboard">My account</a><a href="/customer/purchases">Purchase history</a>
+      <nav aria-label="Customer navigation"><a href="/customer/pricing">Plans</a><a href="/customer/dashboard">My account</a><a href="/customer/servers">My servers</a><a href="/customer/purchases">Purchase history</a>
         {customer?<button disabled={busy} onClick={()=>action(async()=>{await api('/logout',{});window.location.assign('/customer/login');})}>Sign out</button>:<a href="/customer/login">Sign in</a>}</nav>
     </header>
     <main className="customer-main">
@@ -92,7 +93,8 @@ export default function CustomerApp() {
             {['verify','reset'].includes(authPage) && !token?<p role="alert">Open the link from your email. If it expired, request a new one.</p>:<button className="customer-primary" disabled={busy || !csrf}>{busy?'Working…':{login:'Sign in',register:'Register','forgot-password':'Send reset email',verify:'Verify email',reset:'Save password'}[authPage]}</button>}
           </form><div className="customer-links"><a href="/customer/login">Sign in</a><a href="/customer/register">Create account</a><a href="/customer/forgot-password">Forgot password</a></div>
         </section>}
-        {needsAccount && !customer && <section className="customer-card"><h1>Sign in to continue</h1><p>Your customer account is separate from accounts on a private Homestead server.</p><a href="/customer/login">Sign in</a></section>}
+        {needsAccount && !customer && <section className="customer-card"><h1>Sign in to continue</h1><p>Your customer account is separate from accounts on a private Homestead server.</p><a href={path==='/customer/servers'?'/customer/login?next=servers':'/customer/login'}>Sign in</a></section>}
+        {path==='/customer/servers' && customer && <CustomerServers api={api} customer={customer}/>}
         {(path==='/customer' || path==='/customer/pricing') && <><h1>Homestead plans</h1><p>Approved prices in USD. Checkout is test mode only.</p>
           {access?.active && <p>Current effective plan: {access.effectiveLicense.plan}</p>}
           <div className="customer-interval" role="group" aria-label="Billing interval">{['month','year'].map(value=><button key={value} aria-pressed={interval===value} onClick={()=>setInterval(value)}>{value==='month'?'Monthly':'Annual'}</button>)}</div>
@@ -110,6 +112,7 @@ export default function CustomerApp() {
             <button disabled={busy || !billing || !customer.emailVerified || !dashboard?.billingAccount} onClick={()=>action(async()=>redirect((await api('/portal',{})).url))}>Manage billing / change plan</button><p>Upgrades, downgrades, and cancellation use the configured test billing portal. A lifetime purchase does not automatically cancel a separate subscription.</p>
           </section>
           <section className="customer-card"><h2>Effective access</h2><p>{access?.effectiveLicense?.plan || 'No active plan'}</p>
+            <p><a href="/customer/servers">Link and manage my servers</a></p><p>Linked servers refresh their plan automatically, usually within 15 minutes. Use Refresh activation on your server to check now.</p>
             {dashboard?.lifetimes?.map(item=><p key={item.id}>{item.name}: {item.manual_revoked_at?'revoked':item.status}{item.status==='active' && !item.manual_revoked_at?' · no expiration or automatic renewal':''}</p>)}
             {features.length?<ul>{features.map(feature=><li key={feature}>{featureLabels[feature] || feature}</li>)}</ul>:<p>No active entitlements. Select a configured plan after verifying your email.</p>}
             <button disabled={busy || !features.length || !customer.emailVerified} onClick={()=>action(async()=>setLicense((await api('/license',{})).token))}>Get installation license</button>

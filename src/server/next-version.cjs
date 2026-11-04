@@ -576,6 +576,11 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
       audit(event, req?.homesteadUser || currentUser(req), details);
     },
     requireOwner: ownerOnly,
+    verifyOwnerPassword(req) {
+      const user = currentUser(req);
+      const password = req.body?.ownerPassword;
+      return user?.role === "owner" && typeof password === "string" && password.length <= 256 && verifyPassword(password, user.passwordHash);
+    },
     requireAdmin: accountAdminOnly,
     requireFeature: subscriptionService.requireFeature,
     subscription: subscriptionService,

@@ -70,32 +70,49 @@ const decodeBase64Url = (value) => Buffer.from(String(value || ""), "base64url")
 
 function verifyLicenseToken(token, publicKey, nowMs = Date.now()) {
   try {
-    const [payloadPart, signaturePart] = String(token || "").trim().split(".");
+    const parts = String(token || "").trim().split(".");
+    if (parts.length !== 2 || parts.some(part => !/^[\w-]+$/.test(part))) return null;
+    const [payloadPart, signaturePart] = parts;
     if (!payloadPart || !signaturePart || !publicKey) return null;
     const verified = crypto.verify(null, Buffer.from(payloadPart), publicKey, decodeBase64Url(signaturePart));
     if (!verified) return null;
     const payload = JSON.parse(decodeBase64Url(payloadPart).toString("utf8"));
     const tier = normalizeTier(payload.tier);
     if (tier !== payload.tier) return null;
-    if (payload.notBefore && Number(payload.notBefore) * 1000 > nowMs) return null;
-    if (payload.expiresAt && Number(payload.expiresAt) * 1000 <= nowMs) return null;
+    if (payload.notBefore !== undefined && (!Number.isFinite(payload.notBefore) || payload.notBefore * 1000 > nowMs)) return null;
+    if (payload.expiresAt !== undefined && (!Number.isFinite(payload.expiresAt) || payload.expiresAt * 1000 <= nowMs)) return null;
     return { ...payload, tier };
   } catch {
     return null;
   }
 }
 
-function createSubscriptionService({ env = process.env, now = () => Date.now() } = {}) {
+function createSubscriptionService({ env = process.env, now = () => Date.now(), linkedLicense = () => null } = {}) {
   const developmentPreview = String(env.NODE_ENV || "development").toLowerCase() !== "production";
-  const verifiedLicense = verifyLicenseToken(env.HOMESTEAD_LICENSE_TOKEN, env.HOMESTEAD_LICENSE_PUBLIC_KEY, now());
   const developmentTier = developmentPreview ? normalizeTier(env.HOMESTEAD_SUBSCRIPTION_TIER || "pro") : "free";
-  const tier = verifiedLicense?.tier || developmentTier;
-  const source = verifiedLicense ? "signed-license" : developmentPreview ? "development-preview" : "free-default";
-  const definition = TIER_DEFINITIONS[tier];
-  const features = Object.freeze(Object.fromEntries(TIER_DEFINITIONS.pro.features.map((feature) => [feature, definition.features.includes(feature)])));
+  let cached, cacheKey, cacheUntil=0;
+  function resolve() {
+    const nowMs=now();
+    const linked = linkedLicense();
+    const key = [linked?.token, linked?.publicKey, env.HOMESTEAD_LICENSE_TOKEN, env.HOMESTEAD_LICENSE_PUBLIC_KEY].join('|');
+    if (key === cacheKey && nowMs<cacheUntil) return cached;
+    const verifiedLinked = linked?.token ? verifyLicenseToken(linked.token, linked.publicKey, nowMs) : null;
+    const manualLicense = verifyLicenseToken(env.HOMESTEAD_LICENSE_TOKEN, env.HOMESTEAD_LICENSE_PUBLIC_KEY, nowMs);
+    // Bound grants must pass the local installation check; they are not portable manual keys.
+    const verifiedLicense = verifiedLinked || (manualLicense?.audience ? null : manualLicense);
+    const tier = verifiedLicense?.tier || developmentTier;
+    const definition = TIER_DEFINITIONS[tier];
+    cacheKey = key;
+    cacheUntil=Math.min(Math.floor(nowMs/1000+1)*1000,verifiedLicense?.expiresAt*1000 || Infinity);
+    return cached = {verifiedLicense,tier,definition,
+      source:verifiedLinked?'linked-account':verifiedLicense?'signed-license':developmentPreview?'development-preview':'free-default',
+      features:Object.fromEntries(TIER_DEFINITIONS.pro.features.map(feature => [feature, definition.features.includes(feature)]))};
+  }
   const activeStreams = new Map();
 
-  const status = () => ({
+  const status = () => {
+    const {tier,definition,source,features,verifiedLicense} = resolve();
+    return ({
     tier,
     name: definition.name,
     source,
@@ -106,9 +123,10 @@ function createSubscriptionService({ env = process.env, now = () => Date.now() }
     customerId: verifiedLicense?.customerId || null,
     subscriptionId: verifiedLicense?.subscriptionId || null,
     expiresAt: verifiedLicense?.expiresAt ? new Date(Number(verifiedLicense.expiresAt) * 1000).toISOString() : null,
-  });
+    });
+  };
 
-  const has = (feature) => features[String(feature || "")] === true;
+  const has = (feature) => resolve().features[String(feature || "")] === true;
   const allowsLibrary = (libraryId) => {
     const feature = LIBRARY_FEATURES[String(libraryId || "").trim().toLowerCase()];
     return !feature || has(feature);
@@ -119,13 +137,13 @@ function createSubscriptionService({ env = process.env, now = () => Date.now() }
       ok: false,
       code: "SUBSCRIPTION_REQUIRED",
       feature,
-      currentTier: tier,
+      currentTier: resolve().tier,
       message: `${TIER_DEFINITIONS[TIER_ORDER[Math.min(TIER_ORDER.length - 1, TIER_ORDER.findIndex((candidate) => TIER_DEFINITIONS[candidate].features.includes(feature)))]]?.name || "A paid Homestead plan"} is required for this feature.`,
     });
   };
 
   const claimStream = ({ clientId, mediaKey }) => {
-    const limit = definition.limits.concurrentStreams;
+    const limit = resolve().definition.limits.concurrentStreams;
     if (!Number.isFinite(limit)) return { allowed: true };
     const cutoff = now() - 120000;
     for (const [key, stream] of activeStreams.entries()) if (stream.lastSeen < cutoff) activeStreams.delete(key);

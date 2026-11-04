@@ -143,7 +143,7 @@ test('commercial customer foundation and billing lifecycle',async t=> {
       assert.throws(()=>configuration({...env,HOMESTEAD_CUSTOMER_ORIGIN:'http://10.0.0.224:7312'}));
     });
     await t.test('migrations are repeatable and reject changed applied checksums',async()=> {
-      await migrate(pool);assert.equal((await pool.query('SELECT * FROM customer_schema_migrations')).rows.length,2);
+      await migrate(pool);assert.equal((await pool.query('SELECT * FROM customer_schema_migrations')).rows.length,3);
       const row=(await pool.query('SELECT name,checksum FROM customer_schema_migrations ORDER BY name')).rows[0];
       await pool.query("UPDATE customer_schema_migrations SET checksum='changed' WHERE name=$1",[row.name]);await assert.rejects(migrate(pool));
       await pool.query('UPDATE customer_schema_migrations SET checksum=$1 WHERE name=$2',[row.checksum,row.name]);
@@ -186,6 +186,21 @@ test('commercial customer foundation and billing lifecycle',async t=> {
       assert.equal((await request('/verify',{token},a)).status,400);await request('/session',null,a);
       assert.equal((await request('/profile',{displayName:'Updated A',preferences:{theme:'dark'},status:'closed',email:'evil@example.test'},a,{method:'PATCH'})).status,200);
       assert.equal((await pool.query('SELECT email,status FROM customers WHERE id=$1',[customerA.id])).rows[0].email,'a@example.test');
+    });
+    await t.test('checkout refuses missing activation or webhook signing before creating billing records',async()=> {
+      const signing=env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY,webhook=env.STRIPE_WEBHOOK_SECRET;
+      env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY_FILE=path.join(directory,'missing-signing-key.pem');
+      try {
+        delete env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY;
+        const unsigned=await request('/checkout',{planId:'family-month-v1',requestId:crypto.randomUUID()},a);
+        assert.equal(unsigned.status,503);assert.equal(unsigned.data.message,'The request could not be completed. Please retry.');
+        env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY=signing;delete env.STRIPE_WEBHOOK_SECRET;
+        const unconfigured=await request('/checkout',{planId:'family-month-v1',requestId:crypto.randomUUID()},a);
+        assert.equal(unconfigured.status,503);assert.equal(unconfigured.data.message,'The request could not be completed. Please retry.');
+        assert.equal((await pool.query('SELECT * FROM customer_checkouts')).rows.length,0);
+        assert.equal((await pool.query('SELECT * FROM customer_provider_accounts')).rows.length,0);
+        assert.equal(checkoutCreates,0);
+      }finally{env.HOMESTEAD_CUSTOMER_LICENSE_PRIVATE_KEY=signing;env.STRIPE_WEBHOOK_SECRET=webhook;}
     });
     await t.test('checkout uses server-owned customer/price and is idempotent',async()=> {
       const id=crypto.randomUUID();const input={planId:'family-month-v1',requestId:id,price:'price_evil',customerId:'someone-else',amount:1};

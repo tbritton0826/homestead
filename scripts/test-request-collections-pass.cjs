@@ -113,7 +113,7 @@ async function run() {
   await Promise.all([reader.requests(), reader.requests()]); assert.equal(calls, 2, 'shared polling is cached');
   await reader.json('request?take=100&skip=0&sort=added', 0); assert.equal(calls, 3, 'fresh lifecycle reads cannot inherit long metadata TTLs');
   const { transformWithOxc } = await import('vite');
-  const text = fs.readFileSync(path.join(root, 'src/components/RequestRows.jsx'), 'utf8').replace(/^import .*;\n/gm, '').replace(/export default /g, '').replace(/export /g, '');
+  const text = fs.readFileSync(path.join(root, 'src/components/RequestRows.jsx'), 'utf8').replace(/^import .*;\r?\n/gm, '').replace(/export default /g, '').replace(/export /g, '');
   const code = await transformWithOxc(text, 'rows.jsx', { jsx: { runtime: 'classic' } });
   const components = vm.runInNewContext(`${code.code}; ({RequestRows, REQUEST_TYPES, RequestStatePill})`, { React, useRef: React.useRef, ...displayFormat });
   const rows = components.REQUEST_TYPES.map(([library], i) => ({ id: `${library}:${i}`, library, title: `Test ${library}`, status: 'available', createdAt: '2026-08-31' }));

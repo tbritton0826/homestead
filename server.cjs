@@ -232,7 +232,9 @@ require("./src/server/customer/index.cjs").mountCustomer({ app, express });
 app.use(express.json({ limit: "32mb" }));
 
 // Register authentication before every API route, including plugin management.
-const subscriptionService = createSubscriptionService();
+const {createLinkedAccount,registerLinkedAccount}=require("./src/server/linked-account.cjs");
+const linkedAccount = createLinkedAccount({directory:path.join(dataDir,"server-account")});
+const subscriptionService = createSubscriptionService({linkedLicense:linkedAccount.license});
 const homesteadAccess = registerNextVersionRoutes({
   app,
   express,
@@ -241,6 +243,7 @@ const homesteadAccess = registerNextVersionRoutes({
   writeSetupConfig: (config) => fs.writeFileSync(setupConfigPath, JSON.stringify(config, null, 2)),
   subscriptionService,
 });
+registerLinkedAccount({app,express,service:linkedAccount,access:homesteadAccess,serverName:()=>readSetupConfig()?.serverName});
 
 // Product entitlements are enforced at the API boundary. Hiding navigation is
 // useful UX, but it is never the security boundary for a paid feature.

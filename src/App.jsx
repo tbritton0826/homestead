@@ -4,6 +4,7 @@ import CollectionWizard from "./components/CollectionWizard.jsx";
 import SmartCollectionSuggestions from "./components/SmartCollectionSuggestions.jsx";
 import LibraryDiagnostics from "./components/LibraryDiagnostics.jsx";
 import LibrarySettingsMenu from "./components/LibrarySettingsMenu.jsx";
+import ServerAccountPanel from "./components/ServerAccountPanel.jsx";
 import LibraryFilterOverlay from "./components/LibraryFilterOverlay.jsx";
 import { posterPreviewUrl } from "./utils/poster-preview.js";
 import ServerHomeFeed from "./components/ServerHomeFeed.jsx";
@@ -32859,7 +32860,7 @@ function AdultRecommendationProviderSettings() {
   </section>;
 }
 
-function AccountPage({ setupConfig, sessionUser, accountPreferences = {}, setAccountPreferences }) {
+function AccountPage({ setupConfig, setSetupConfig, sessionUser, accountPreferences = {}, setAccountPreferences }) {
   const canManageUsers = ["owner", "admin"].includes(sessionUser?.role) && setupConfig?.subscription?.features?.multiUser === true;
   const showDisplayPreferences = Boolean(
     setupConfig?.enabledLibraries?.family || setupConfig?.enabledLibraries?.adult
@@ -32884,6 +32885,7 @@ function AccountPage({ setupConfig, sessionUser, accountPreferences = {}, setAcc
           </section>
           <section className="panel"><h3>Access</h3><div className="metadata-grid"><div><strong>Server</strong><p>{setupConfig?.serverName || "Homestead"}</p></div><div><strong>Plan</strong><p>{setupConfig?.subscription?.name || "Homestead Free"}{setupConfig?.subscription?.developmentPreview ? " · development preview" : ""}</p></div><div><strong>Libraries</strong><p>{sessionUser?.allowedLibraries?.includes("*") ? "All plan libraries" : `${sessionUser?.allowedLibraries?.length || 0} assigned`}</p></div><div><strong>Streams</strong><p>{setupConfig?.subscription?.limits?.concurrentStreams || "Household plan"}</p></div><div><strong>Adult access</strong><p>{setupConfig?.subscription?.features?.adult ? (sessionUser?.fullAdultAccess ? "Complete library" : sessionUser?.linkedAdultProfileId ? "Linked profile only" : "None") : "Requires Homestead Pro"}</p></div><div><strong>Account type</strong><p>Local account</p></div></div></section>
           <section className="panel"><h3>Security</h3><p>Your password and sign-in requirement are managed by a Homestead administrator.</p></section>
+          {sessionUser?.role === "owner" && <ServerAccountPanel onSubscriptionChange={subscription => setSetupConfig(current => ({...current,subscription}))} />}
           {showDisplayPreferences && <DisplayPreferencesPanel preferences={accountPreferences} setupConfig={setupConfig} onSaved={setAccountPreferences} />}
           {setupConfig?.enabledLibraries?.adult && <AdultRecommendationAccountPanel preferences={accountPreferences} onSaved={setAccountPreferences} />}
           {setupConfig?.enabledLibraries?.adult && sessionUser?.role === "owner" && <AdultRecommendationProviderSettings />}
@@ -49205,7 +49207,7 @@ const floatingActions = {
 	) : activePlugin ? (
 	  <PluginHostPage plugin={activePlugin} command={pluginHostCommand} onSectionChange={setActivePluginSection} onAppearance={receivePluginHostAppearance} appearance={effectiveMediaAppearance} />
 	) : activeLibrary === "account" ? (
-	  <AccountPage setupConfig={setupConfig} sessionUser={sessionUser} accountPreferences={accountPreferences} setAccountPreferences={setAccountPreferences} />
+	  <AccountPage setupConfig={setupConfig} setSetupConfig={setSetupConfig} sessionUser={sessionUser} accountPreferences={accountPreferences} setAccountPreferences={setAccountPreferences} />
 	) : activeLibrary === "home" ? (
   	  <HomePage setActiveLibrary={setActiveLibrary} mediaIndex={mediaIndex} watchlist={watchlist} requests={requests} setDashboardOpen={setDashboardOpen} setupConfig={setupConfig} youtubeIndex={youtubeIndex} setSearchOpen={setSearchOpen}/>
 	) : activeLibrary === "dashboard" ? (

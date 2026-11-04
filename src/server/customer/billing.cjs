@@ -5,11 +5,13 @@ const {snapshot}=require('./catalog.cjs');
 const {billingMessage}=require('./billing-mail.cjs');
 const uuid=value=>typeof value==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
 
-function createBilling({pool,provider,config,auth,mailer}) {
+function createBilling({pool,provider,config,auth,mailer,assertActivationReady=()=>{}}) {
   const priceAvailability=new Map();
+  function activationAvailable() {try{assertActivationReady();return true;}catch{return false;}}
   async function available(plan) {
     if(!plan.active || plan.draft) return false;
     if(Number(plan.amount)===0) return true;
+    if(!activationAvailable()) return false;
     if(!provider || !plan.external_price_id) return false;
     const key=`${plan.id}:${plan.external_price_id}`;
     let cached=priceAvailability.get(key);
@@ -170,6 +172,7 @@ function createBilling({pool,provider,config,auth,mailer}) {
     router.post('/checkout',async(req,res)=> {
       const customer=auth.requireVerified(req);
       if (!provider) throw failure(503,'Stripe test checkout is not configured.');
+      assertActivationReady();
       if (!uuid(req.body.requestId)) throw failure(400,'A new UUID requestId is required.');
       // Commit the customer mapping and intent before asking the provider to create
       // a session. A lost response or failed second commit remains safely retryable.

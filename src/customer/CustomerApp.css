@@ -29,6 +29,7 @@
 .customer-interval { display:flex; gap:12px; margin-bottom:20px; }
 .customer-interval button[aria-pressed=true] { background:#6546ef; border-color:#9c88ff; }
 .customer-table-wrap { overflow-x:auto; }
+.customer-server-list { display:grid; gap:16px; margin:20px 0; }
 .customer-page table { width:100%; border-collapse:collapse; }
 .customer-page th,.customer-page td { text-align:left; padding:12px; border-bottom:1px solid #303647; }
 @media(max-width:600px) { .customer-header nav { margin-left:0; width:100%; gap:12px; } .customer-main { padding:20px 12px; } .customer-card { padding:18px; } }
