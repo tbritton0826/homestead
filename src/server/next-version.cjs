@@ -326,25 +326,37 @@ function registerNextVersionRoutes({ app, express, dataDir, readSetupConfig, wri
     audit("account.preferences.updated", user, { sections: Object.keys(req.body?.preferences || {}) });
     res.json({ ok: true, preferences });
   });
+  function readBookLinks() {
+    if (!fs.existsSync(bookEditionLinksPath)) return {};
+    const records = JSON.parse(fs.readFileSync(bookEditionLinksPath, "utf8"));
+    if (!records || typeof records !== "object" || Array.isArray(records)) throw new Error("Invalid saved edition links");
+    if (Object.values(records).some(links => !links || typeof links !== "object" || Array.isArray(links) || Object.values(links).some(value => typeof value !== "string"))) throw new Error("Invalid account edition links");
+    return records;
+  }
   app.get("/api/books/edition-links", (req, res) => {
     const user = currentUser(req);
     if (!user) return res.status(401).json({ ok: false, message: "Sign in to Homestead." });
-    const records = readJson(bookEditionLinksPath, {});
-    res.json({ ok: true, links: records[user.id] || {} });
+    try {
+      const records = readBookLinks();
+      res.set("Cache-Control", "no-store").json({ ok: true, links: records[user.id] || {} });
+    } catch {res.status(503).json({ok: false, message: "Saved edition links could not be read. Their original file has been preserved."});}
   });
   app.put("/api/books/edition-links", express.json({ limit: "256kb" }), (req, res) => {
     const user = currentUser(req);
     if (!user) return res.status(401).json({ ok: false, message: "Sign in to Homestead." });
-    const incoming = req.body?.links && typeof req.body.links === "object" && !Array.isArray(req.body.links) ? req.body.links : {};
+    const incoming = req.body?.links;
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming) || Object.values(incoming).some(value => typeof value !== "string")) return res.status(400).json({ok: false, message: "An edition links object is required."});
     const links = Object.fromEntries(Object.entries(incoming)
       .map(([recordId, groupId]) => [String(recordId).trim().slice(0, 600), String(groupId).trim().slice(0, 600)])
       .filter(([recordId, groupId]) => recordId && groupId)
       .slice(0, 5000));
-    const records = readJson(bookEditionLinksPath, {});
-    records[user.id] = links;
-    writeJson(bookEditionLinksPath, records);
-    audit("books.edition-links.updated", user, { linkedRecords: Object.keys(links).length });
-    res.json({ ok: true, links });
+    try {
+      const records = readBookLinks();
+      records[user.id] = links;
+      writeJson(bookEditionLinksPath, records);
+      audit("books.edition-links.updated", user, { linkedRecords: Object.keys(links).length });
+      res.json({ ok: true, links });
+    } catch {res.status(503).json({ok: false, message: "Edition changes could not be saved. Retry after checking the existing edition-link storage."});}
   });
   app.post("/api/auth/login", (req, res) => {
     const state = ensureAccounts();

@@ -1,4 +1,5 @@
 import { collectionDraftId } from "./utils/collection-draft.js";
+import { getBookReadingProgress } from "./utils/book-progress.js";
 import LibraryPoster from "./components/LibraryPoster.jsx";
 import CollectionWizard from "./components/CollectionWizard.jsx";
 import SmartCollectionSuggestions from "./components/SmartCollectionSuggestions.jsx";
@@ -8735,29 +8736,27 @@ function compactHomesteadMetadataMatches(matches = {}) {
 
 function persistHomesteadMetadataMatches(matches = {}) {
   const compact = compactHomesteadMetadataMatches(matches);
+  // Server results remain usable even when private browsing or quota prevents a
+  // disk cache. Never delete the last good browser cache while attempting a save.
+  loadHomesteadMetadataMatches.current = compact;
   const serialized = JSON.stringify(compact);
   try {
     localStorage.setItem(HOMESTEAD_METADATA_MATCHES_KEY, serialized);
     return true;
   } catch (error) {
-    console.warn("Metadata match cache reached browser storage capacity; rebuilding the compact cache.", error);
-    try {
-      localStorage.removeItem(HOMESTEAD_METADATA_MATCHES_KEY);
-      localStorage.setItem(HOMESTEAD_METADATA_MATCHES_KEY, serialized);
-      return true;
-    } catch (retryError) {
-      console.warn("Metadata match browser cache is unavailable; server-persisted matches remain authoritative.", retryError);
-      return false;
-    }
+    console.warn("Metadata browser cache is unavailable; server-persisted matches remain authoritative in memory.", error);
+    return false;
   }
 }
 
 function loadHomesteadMetadataMatches() {
+  if (loadHomesteadMetadataMatches.current) return loadHomesteadMetadataMatches.current;
   try {
     const serialized = localStorage.getItem(HOMESTEAD_METADATA_MATCHES_KEY) || "{}";
     const compact = compactHomesteadMetadataMatches(JSON.parse(serialized));
     const compactSerialized = JSON.stringify(compact);
     if (compactSerialized.length < serialized.length) persistHomesteadMetadataMatches(compact);
+    loadHomesteadMetadataMatches.current = compact;
     return compact;
   } catch {
     return {};
@@ -8873,10 +8872,10 @@ async function syncHomesteadMetadataMatchesFromServer() {
         body: JSON.stringify({ matches: localMatches }),
       }).catch(() => null);
     }
-    const res = await fetch("/api/metadata/matches");
+    const res = await fetch("/api/metadata/matches", { cache: "no-store" });
     const data = await res.json();
 
-    if (!res.ok || data.ok === false) {
+    if (!res.ok || data.ok === false || !data.matches || typeof data.matches !== "object" || Array.isArray(data.matches)) {
       throw new Error(data.message || "Failed to load metadata matches");
     }
 
@@ -8887,9 +8886,11 @@ async function syncHomesteadMetadataMatchesFromServer() {
     });
 
     persistHomesteadMetadataMatches(mergedMatches);
+    syncHomesteadMetadataMatchesFromServer.lastError = "";
 
     return mergedMatches;
   } catch (error) {
+    syncHomesteadMetadataMatchesFromServer.lastError = "Saved matches could not be refreshed. Your existing matches are still kept; retry loading them.";
     console.error("Failed to sync metadata matches from server:", error);
     return loadHomesteadMetadataMatches();
   }
@@ -21052,7 +21053,7 @@ function BookReader({ file, book, onClose, compact = false }) {
     let rendition = null;
 
     async function loadBook() {
-      const savedProgress = getWatchProgress()[progressKey] || getWatchProgress()[book?.id];
+      const savedProgress = (typeof getBookReadingProgress === "function" ? getBookReadingProgress(book, file, getWatchProgress()) : null) || getWatchProgress()[progressKey] || getWatchProgress()[book?.id];
 
       const { default: ePub } = await loadEpub();
       if (cancelled || !readerRef.current) return;
@@ -23621,6 +23622,7 @@ function normalizeBookWorkIdentity(book = {}, manualLinks = {}) {
   const matched = book.metadataMatch || {};
   const recordId = bookEditionRecordId(book);
   const manualGroup = manualLinks[recordId];
+  if (manualGroup === "!separate") return `local:${recordId}`;
   if (manualGroup) return `manual:${manualGroup}`;
 
   // Only explicit work-level identifiers may merge separate scanner records.
@@ -23672,7 +23674,7 @@ function BookEditionChooser({ book, editions = [], onClose, onChoose }) {
   );
 }
 
-function BookEditionManager({ book, books = [], links = {}, onLink, onUnlink, onClose }) {
+function BookEditionManager({ book, books = [], links = {}, busy = false, error = "", onRetry, onLink, onUnlink, onClose }) {
   useDialogFocus({ selector: ".book-edition-overlay", open: Boolean(book), onClose: onClose });
   const [query, setQuery] = useState("");
   if (!book) return null;
@@ -23686,6 +23688,7 @@ function BookEditionManager({ book, books = [], links = {}, onLink, onUnlink, on
     <div className="book-edition-overlay" role="dialog" aria-modal="true" aria-label={`Manage editions of ${book.title}`} onClick={onClose}>
       <section className="book-edition-card book-edition-manager" onClick={(event) => event.stopPropagation()}>
         <header><div><p className="eyebrow">Manage Editions</p><h2>{book.title}</h2><p>Link only releases that are truly versions of this same work. Files are never moved or deleted.</p></div><button type="button" className="book-detail-close" onClick={onClose} aria-label="Close edition manager">✕</button></header>
+        {error && <p role="alert">{error} <button type="button" disabled={busy} onClick={onRetry}>Retry loading</button></p>}
         <label className="book-edition-search"><span>Find another library item</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title or author" /></label>
         <div className="book-edition-manage-list">
           {rows.map((candidate) => {
@@ -23693,7 +23696,7 @@ function BookEditionManager({ book, books = [], links = {}, onLink, onUnlink, on
             return <article className="book-edition-manage-row" key={bookEditionRecordId(candidate)}>
               <img src={candidate.poster || "/media/books/default-poster.jpg"} alt="" />
               <span><strong>{candidate.title}</strong><small>{candidate.author}</small><em>{bookEditionLabel(candidate, candidate.ebookFiles?.[0] || candidate.audiobookFiles?.[0] || {})}</em></span>
-              <button type="button" className={linked ? "secondary-button" : "primary-button"} onClick={() => linked ? onUnlink?.(candidate) : onLink?.(candidate)}>{linked ? "Unlink edition" : "Link as edition"}</button>
+              <button type="button" disabled={busy || Boolean(error)} className={linked ? "secondary-button" : "primary-button"} onClick={() => linked ? onUnlink?.(candidate) : onLink?.(candidate)}>{linked ? "Unlink edition" : "Link as edition"}</button>
             </article>;
           })}
           {!rows.length && <p className="book-edition-empty">No other matching library items are available.</p>}
@@ -23729,7 +23732,7 @@ function BookDetailOverlay({ book, editionCount = 0, onClose, onRead, onListen, 
           </div>
           <p className="book-detail-description">{book.description}</p>
           <div className="book-detail-actions">
-            <button className="primary-button" type="button" disabled={!hasEbook} onClick={onRead}>📖 {getWatchProgress()[book.id]?.location ? "Resume Reading" : "Read"}</button>
+            <button className="primary-button" type="button" disabled={!hasEbook} onClick={onRead}>📖 {getBookReadingProgress(book, null, getWatchProgress())?.location ? "Resume Reading" : "Read"}</button>
             <button className="secondary-button" type="button" disabled={!hasAudiobook} onClick={onListen}>🎧 Listen</button>
             <button className="secondary-button" type="button" onClick={onAuthor}>✍ Author</button>
             <SharedMediaActionsMenu library="books" item={book} extraActions={[
@@ -23762,7 +23765,7 @@ function BookAuthorOverlay({ author, books = [], onClose, onOpenBook }) {
   );
 }
 
-function BooksPage({ mediaIndex, dashboardOpen, setDashboardOpen, setActiveLibrary, setNavBackAction, setHideSidebar, setHideLibraryHeader, setupConfig, setRequestedMediaToolPage, metadataMatchesVersion, setGlobalAudioTrack,}) {
+function BooksPage({ mediaIndex, dashboardOpen, setDashboardOpen, setActiveLibrary, setNavBackAction, setHideSidebar, setHideLibraryHeader, setupConfig, setRequestedMediaToolPage, metadataMatchesVersion, metadataMatchesLoading = false, metadataMatchesError = "", setGlobalAudioTrack,}) {
   const [selectedBook, setSelectedBook] = useState(null);
   const [selectedAuthor, setSelectedAuthor] = useState("");
   const [tab, setTab] = useState("overview");
@@ -23770,29 +23773,26 @@ function BooksPage({ mediaIndex, dashboardOpen, setDashboardOpen, setActiveLibra
   const [readingFile, setReadingFile] = useState(null);
   const [editionChooser, setEditionChooser] = useState(null);
   const [editionManagerBook, setEditionManagerBook] = useState(null);
-  const [bookEditionLinks, setBookEditionLinks] = useState(() => readBookEditionLinks());
+  const [bookEditionLinks, setBookEditionLinks] = useState({});
+  const [editionLinksBusy, setEditionLinksBusy] = useState(true);
+  const [editionLinksError, setEditionLinksError] = useState("");
+  const editionSaveInFlight = useRef(false);
+  const loadEditionLinks = useCallback(async () => {
+    setEditionLinksBusy(true);
+    try {
+      const response = await fetch("/api/books/edition-links", {cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok || data.ok === false || !data.links || typeof data.links !== "object" || Array.isArray(data.links)) throw new Error("Saved edition links could not be loaded.");
+      setBookEditionLinks(data.links); setEditionLinksError("");
+    } catch (error) {setEditionLinksError(error.message);}
+    finally {setEditionLinksBusy(false);}
+  }, []);
   const [bookSeriesAppearances, setBookSeriesAppearances] = useState({});
   const [seriesAppearanceEditor, setSeriesAppearanceEditor] = useState("");
 
   metadataMatchesVersion;
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/books/edition-links", { cache: "no-store" })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Edition links unavailable")))
-      .then((data) => {
-        if (cancelled || !data?.links || typeof data.links !== "object") return;
-        if (Object.keys(data.links).length) {
-          setBookEditionLinks(data.links);
-          try { localStorage.setItem(BOOK_EDITION_LINKS_KEY, JSON.stringify(data.links)); } catch {}
-        } else {
-          const migrated = readBookEditionLinks();
-          if (Object.keys(migrated).length) fetch("/api/books/edition-links", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: migrated }) }).catch(() => {});
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
+  useEffect(() => {loadEditionLinks();}, [loadEditionLinks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -23988,26 +23988,31 @@ useEffect(() => {
       .flatMap((candidate) => (candidate.ebookFiles || []).map((file) => ({ book: candidate, file })));
   };
 
-  const saveBookEditionLinks = (next) => {
-    setBookEditionLinks(next);
-    try { localStorage.setItem(BOOK_EDITION_LINKS_KEY, JSON.stringify(next)); } catch {}
-    fetch("/api/books/edition-links", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: next }) }).catch(() => {});
+  const saveBookEditionLinks = async (next) => {
+    if (editionSaveInFlight.current || editionLinksBusy || editionLinksError) return;
+    editionSaveInFlight.current = true; setEditionLinksBusy(true);
+    try {
+      const response = await fetch("/api/books/edition-links", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({links: next})});
+      const data = await response.json();
+      if (!response.ok || data.ok === false || !data.links || typeof data.links !== "object" || Array.isArray(data.links)) throw new Error(data.message || "Edition changes could not be saved. Your previous links are unchanged.");
+      setBookEditionLinks(data.links); setEditionLinksError("");
+    } catch (error) {setEditionLinksError(error.message);}
+    finally {editionSaveInFlight.current = false; setEditionLinksBusy(false);}
   };
 
   const linkBookEdition = (candidate) => {
     const rootId = bookEditionRecordId(editionManagerBook);
     const candidateId = bookEditionRecordId(candidate);
     if (!rootId || !candidateId) return;
-    const groupId = bookEditionLinks[rootId] || `work-${rootId}`;
-    saveBookEditionLinks({ ...bookEditionLinks, [rootId]: groupId, [candidateId]: groupId });
+    const groupId = bookEditionLinks[rootId] && bookEditionLinks[rootId] !== "!separate" ? bookEditionLinks[rootId] : `work-${rootId}`;
+    return saveBookEditionLinks({...bookEditionLinks, [rootId]: groupId, [candidateId]: groupId});
   };
 
   const unlinkBookEdition = (candidate) => {
     const candidateId = bookEditionRecordId(candidate);
     if (!candidateId) return;
-    const next = { ...bookEditionLinks };
-    delete next[candidateId];
-    saveBookEditionLinks(next);
+    // A persistent separation overrides provider grouping on refresh and rescan.
+    return saveBookEditionLinks({...bookEditionLinks, [candidateId]: "!separate"});
   };
 
   const readSelectedBook = () => {
@@ -24211,6 +24216,8 @@ const hasAudiobook = audiobookFiles.length > 0;
 
   return (
     <div className="library-page books-library-page">
+      {metadataMatchesLoading && <p role="status">Loading saved book matches…</p>}
+      {metadataMatchesError && <p role="alert">{metadataMatchesError} <button type="button" onClick={() => window.dispatchEvent(new Event("homestead-metadata-match-updated"))}>Retry saved matches</button></p>}
 <MediaSectionTabs
   activeLibrary="books"
   setActiveLibrary={(nextTab) => {
@@ -24339,6 +24346,9 @@ const hasAudiobook = audiobookFiles.length > 0;
         book={editionManagerBook}
         books={books}
         links={bookEditionLinks}
+        busy={editionLinksBusy}
+        error={editionLinksError}
+        onRetry={loadEditionLinks}
         onClose={() => setEditionManagerBook(null)}
         onLink={linkBookEdition}
         onUnlink={unlinkBookEdition}
@@ -46407,6 +46417,8 @@ function HomesteadApp({ sessionUser, onLogout }) {
   const [mediaIndex, setMediaIndex] = useState(null);
   const loadMediaIndex = useMemo(() => createSharedIndexLoader(() => fetchJsonIfExists("/data/media-index.json")), []);
   const [metadataMatchesVersion, setMetadataMatchesVersion] = useState(0);
+  const [metadataMatchesLoading, setMetadataMatchesLoading] = useState(true);
+  const [metadataMatchesError, setMetadataMatchesError] = useState("");
 
   useEffect(() => {
     const openPerson = (event) => setSelectedTmdbPerson(event.detail || null);
@@ -47129,7 +47141,10 @@ function HomesteadApp({ sessionUser, onLogout }) {
   
   useEffect(() => {
   function handleMetadataMatchUpdated() {
+    setMetadataMatchesLoading(true);
     syncHomesteadMetadataMatchesFromServer().then(() => {
+      setMetadataMatchesError(syncHomesteadMetadataMatchesFromServer.lastError || "");
+      setMetadataMatchesLoading(false);
       setMetadataMatchesVersion((value) => value + 1);
     });
   }
@@ -47248,6 +47263,8 @@ useEffect(() => {
   
 useEffect(() => {
   syncHomesteadMetadataMatchesFromServer().then(() => {
+    setMetadataMatchesError(syncHomesteadMetadataMatchesFromServer.lastError || "");
+    setMetadataMatchesLoading(false);
     setMetadataMatchesVersion((value) => value + 1);
   });
 }, []);
@@ -49253,7 +49270,7 @@ const floatingActions = {
 	) : activeLibrary === "music" ? (
 	  <MusicPage mediaIndex={mediaIndex} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setNavBackAction={setNavBackAction} setActiveLibrary={setActiveLibrary} setHideLibraryHeader={setHideLibraryHeader} setHideSidebar={setHideSidebar} selectedArtist={selectedArtist} setSelectedArtist={setSelectedArtist} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} setGlobalAudioTrack={setGlobalAudioTrack} metadataMatchesVersion={metadataMatchesVersion}/>
 	) : activeLibrary === "books" ? (
-	  <BooksPage mediaIndex={mediaIndex} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setActiveLibrary={setActiveLibrary} setNavBackAction={setNavBackAction} setHideSidebar={setHideSidebar} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} metadataMatchesVersion={metadataMatchesVersion} setGlobalAudioTrack={setGlobalAudioTrack}/>
+	  <BooksPage metadataMatchesLoading={metadataMatchesLoading} metadataMatchesError={metadataMatchesError} mediaIndex={mediaIndex} dashboardOpen={dashboardOpen} setDashboardOpen={setDashboardOpen} setActiveLibrary={setActiveLibrary} setNavBackAction={setNavBackAction} setHideSidebar={setHideSidebar} setHideLibraryHeader={setHideLibraryHeader} setupConfig={setupConfig} setRequestedMediaToolPage={setRequestedMediaToolPage} metadataMatchesVersion={metadataMatchesVersion} setGlobalAudioTrack={setGlobalAudioTrack}/>
 	) : activeLibrary === "inventory" ? (
 	  <InventoryPage setupConfig={setupConfig} setActiveLibrary={setActiveLibrary} onNewIntake={(request = {}) => setIntakeRequest({ mode: request.mode || "home", preset: request.preset || {}, key: Date.now() })} />
 	) : activeLibrary === "ai" ? (

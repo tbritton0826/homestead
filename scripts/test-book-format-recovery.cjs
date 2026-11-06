@@ -16,6 +16,7 @@ function scannerFixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const scannerSource = serverSource.slice(serverSource.indexOf('const BOOK_EBOOK_EXTENSIONS ='), serverSource.indexOf('function reconcileNestedBooksMediaIndex()'));
   const scan = vm.runInNewContext(scannerSource + '\nscanNestedBooksLibrary', {
+    require: name => { assert.equal(name, "./src/server/book-library-scan.cjs"); return require("../src/server/book-library-scan.cjs"); },
     fs: { ...fs, statSync: target => {
       assert.equal(path.resolve(target), directory, 'the scanner fixture may only access its generated root');
       return fs.statSync(target);

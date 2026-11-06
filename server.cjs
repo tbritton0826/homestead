@@ -1035,10 +1035,12 @@ function readMetadataMatches() {
       return {};
     }
 
-    return compactMetadataMatches(JSON.parse(fs.readFileSync(METADATA_MATCHES_FILE, "utf8")));
+    const stored = JSON.parse(fs.readFileSync(METADATA_MATCHES_FILE, "utf8"));
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) throw new Error("Invalid match storage");
+    return compactMetadataMatches(stored);
   } catch (error) {
-    console.error("Failed to read metadata matches:", error);
-    return {};
+    console.error("Saved metadata matches could not be read; preserving the original file.");
+    throw Object.assign(new Error("Saved metadata matches are temporarily unavailable. Restore or repair their existing storage before saving new matches."), {status: 503});
   }
 }
 
@@ -7032,19 +7034,6 @@ function configuredBookRoots() {
   }))];
 }
 
-function normalizedBookPath(value = "") {
-  try { return path.resolve(String(value || "")).toLowerCase(); } catch { return ""; }
-}
-
-function bookTitleFromFile(fileName = "") {
-  return path.basename(fileName, path.extname(fileName))
-    .replace(/\s+--\s+.+$/, "")
-    .replace(/\s*\((?:ebook|audiobook)\)\s*$/i, "")
-    .replace(/[_]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim() || "Untitled";
-}
-
 function scanNestedBooksLibrary(existingLibrary = {}, { force = false } = {}) {
   if (!force && nestedBooksLibraryCache.library && nestedBooksLibraryCache.expiresAt > Date.now()) return nestedBooksLibraryCache.library;
   const roots = configuredBookRoots();
@@ -7072,78 +7061,19 @@ function scanNestedBooksLibrary(existingLibrary = {}, { force = false } = {}) {
   }
   if (!discoveredFiles.length) return existingLibrary || {};
 
-  const existingRecords = Object.values(existingLibrary || {});
-  const existingByFile = new Map();
-  const existingByIdentity = new Map();
-  for (const record of existingRecords) {
-    for (const file of Array.isArray(record?.files) ? record.files : []) {
-      for (const candidate of [file?.sourcePath, file?.filePath, file?.path]) {
-        const normalized = normalizedBookPath(candidate);
-        if (normalized) existingByFile.set(normalized, record);
-      }
-    }
-    const identity = `${String(record?.author || record?.metadata?.author || "").toLowerCase()}|${String(record?.title || record?.name || record?.metadata?.title || "").toLowerCase()}`;
-    if (identity !== "|") existingByIdentity.set(identity, record);
-  }
-
-  const groups = new Map();
-  for (const file of discoveredFiles) {
-    const fileParent = path.dirname(file.absolutePath);
-    const formatContainer = file.type === "audiobook"
-      ? /^(audio\s*books?|audio)$/i.test(path.basename(fileParent))
-      : /^e\s*books?$/i.test(path.basename(fileParent));
-    // Both format directories belong to their parent work. Otherwise a cached
-    // ID shared by its root and ebook files can overwrite the audio-bearing row.
-    const bookFolder = formatContainer ? path.dirname(fileParent) : fileParent;
-    const segments = path.relative(file.root, bookFolder).split(path.sep).filter(Boolean);
-    const directInAuthorFolder = segments.length === 1;
-    const title = directInAuthorFolder ? bookTitleFromFile(file.name) : segments.at(-1) || bookTitleFromFile(file.name);
-    const author = segments[0] || "Unknown Author";
-    const series = segments.length >= 3 ? segments.slice(1, -1).join(" / ") : "";
-    const groupKey = directInAuthorFolder
-      ? `${normalizedBookPath(file.root)}|${author.toLowerCase()}|${title.toLowerCase()}`
-      : normalizedBookPath(bookFolder);
-    if (!groups.has(groupKey)) groups.set(groupKey, { bookFolder, title, author, series, files: [] });
-    groups.get(groupKey).files.push({
-      id: crypto.createHash("sha1").update(file.absolutePath).digest("hex").slice(0, 20),
-      name: file.name,
-      type: file.type,
-      format: file.extension.slice(1).toUpperCase(),
-      path: file.absolutePath,
-      filePath: file.absolutePath,
-      sourcePath: file.absolutePath,
-    });
-  }
-
-  const output = {};
-  for (const group of groups.values()) {
-    const fileMatch = group.files.map((file) => existingByFile.get(normalizedBookPath(file.path))).find(Boolean);
-    const identityMatch = existingByIdentity.get(`${group.author.toLowerCase()}|${group.title.toLowerCase()}`);
-    const existing = fileMatch || identityMatch || {};
-    const stableSource = group.files.find((file) => file.type === "ebook")?.path || group.bookFolder;
-    const id = existing.id || existing.localId || `book-${crypto.createHash("sha1").update(stableSource).digest("hex").slice(0, 20)}`;
-    const coverCandidate = ["cover.jpg", "cover.jpeg", "cover.png", "poster.jpg", "poster.png"]
-      .map((name) => path.join(group.bookFolder, name)).find((candidate) => fs.existsSync(candidate));
-    output[id] = {
-      ...existing,
-      id,
-      localId: existing.localId || id,
-      library: "books",
-      name: existing.name || existing.title || group.title,
-      title: existing.title || existing.name || group.title,
-      author: existing.author || existing.metadata?.author || group.author,
-      series: existing.series || existing.metadata?.series || group.series,
-      folderPath: group.bookFolder,
-      sourcePath: group.bookFolder,
-      path: group.bookFolder,
-      poster: existing.poster || existing.cover || coverCandidate || "",
-      files: group.files.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true })),
-      counts: {
-        ...(existing.counts || {}),
-        ebooks: group.files.filter((file) => file.type === "ebook").length,
-        audiobooks: group.files.filter((file) => file.type === "audiobook").length,
-      },
-    };
+  let matches = {};
+  try { if (typeof readMetadataMatches === "function") matches = readMetadataMatches(); }
+  catch { return existingLibrary; }
+  const output = require("./src/server/book-library-scan.cjs").buildBookLibrary(discoveredFiles, existingLibrary, matches);
+  const folderCounts = new Map();
+  for (const book of Object.values(output)) folderCounts.set(book.folderPath, (folderCounts.get(book.folderPath) || 0) + 1);
+  for (const book of Object.values(output)) {
+    if (book.poster || book.cover) continue;
+    const folder = book.folderPath;
+    if (!folder) continue;
+    if (folderCounts.get(folder) !== 1) continue;
+    book.poster = ["cover.jpg", "cover.jpeg", "cover.png", "poster.jpg", "poster.png"]
+      .map(name => path.join(folder, name)).find(candidate => fs.existsSync(candidate)) || "";
   }
   nestedBooksLibraryCache = { expiresAt: Date.now() + 30000, library: output };
   return output;
