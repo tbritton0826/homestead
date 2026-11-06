@@ -35,6 +35,22 @@ test('33 Alex Cross and 11 Maximum Ride novels remain distinct in shared series 
   assert.deepEqual(Object.keys(again).sort(), Object.keys(index).sort());
 });
 
+test('legacy live-scan path hashes reconnect saved matches after a CLI slug replaces the row ID', () => {
+  const base = path.resolve('fixture-books'), item = file(base, 'J.R. Ward/Dark Lover.epub');
+  const legacy = `book-${crypto.createHash('sha1').update(item.absolutePath).digest('hex').slice(0, 20)}`;
+  const wrong = `book-${crypto.createHash('sha1').update(path.join(base, 'Other/Dark Lover.epub')).digest('hex').slice(0, 20)}`;
+  const index = {slug: {id: 'slug', name: 'Filename title', files: [{path: item.absolutePath}]}};
+  const matches = {[`books:${legacy}`]: {localId: legacy, title: 'Dark Lover', poster: '/chosen-cover.jpg'},
+    [`books:${wrong}`]: {localId: wrong, title: 'Dark Lover', poster: '/wrong-author.jpg', updatedAt: '2099-01-01'}};
+  const before = JSON.stringify(matches);
+  const result = buildBookLibrary([item], index, matches);
+  assert.equal(result.slug.id, 'slug', 'collection membership keeps the indexed row ID');
+  assert.equal(result.slug.localId, legacy, 'metadata uses the exact verified legacy file hash');
+  assert.equal(matches[`books:${result.slug.localId}`].poster, '/chosen-cover.jpg');
+  assert.equal(JSON.stringify(matches), before, 'no rematch or metadata rewrite');
+  assert.equal(buildBookLibrary([item], result, matches).slug.localId, legacy);
+});
+
 test('splitting a collapsed row preserves a uniquely identifiable match, file progress IDs, and independent siblings', () => {
   const base = path.resolve('fixture-books');
   const files = ['Along Came a Spider', 'Kiss the Girls'].map(title => file(base, `James Patterson/Alex Cross/${title}.epub`));

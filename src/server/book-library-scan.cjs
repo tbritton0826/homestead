@@ -112,7 +112,19 @@ function buildBookLibrary(discovered, existingLibrary = {}, matches = {}) {
     const existing = available.length === 1 ? available[0] : {};
     const wasCollapsed = existing.id && recordGroups.get(existing)?.length > 1;
     if (existing.id) claimed.add(existing.id);
-    const id = existing.id || `book-${crypto.createHash('sha1').update(group.key).digest('hex').slice(0, 20)}`;
+    // Older live scans used SHA1(exact ebook path) while CLI scans used a title
+    // slug. Recover that verifiable identity without title/author aliases and
+    // without rewriting or discarding either historical metadata record.
+    const matchIds = new Set([existing.localId, existing.id].filter(Boolean));
+    for (const file of group.files.filter(file => file.type === 'ebook')) {
+      for (const value of [file.absolutePath, file.path, ...(file.legacyPaths || []), `/media/books/${path.relative(file.root, file.absolutePath).replaceAll('\\', '/')}`].filter(Boolean)) {
+        matchIds.add(`book-${crypto.createHash('sha1').update(value).digest('hex').slice(0, 20)}`);
+      }
+    }
+    const knownMatch = [...matchIds].map(localId => ({localId, match: matches[`books:${localId}`]}))
+      .filter(row => row.match && !row.match.aliasOf && row.match.localId === row.localId)
+      .sort((a, b) => (Date.parse(b.match.updatedAt || b.match.matchedAt) || 0) - (Date.parse(a.match.updatedAt || a.match.matchedAt) || 0))[0];
+    const id = existing.id || knownMatch?.localId || `book-${crypto.createHash('sha1').update(group.key).digest('hex').slice(0, 20)}`;
     const previous = new Map(groupRecords.get(group).flatMap(record => (record.files || []).flatMap(file => [file.sourcePath, file.filePath, file.path].filter(Boolean).map(value => [pathKey(value), file]))));
     const files = group.files.map(file => {
       const old = previous.get(pathKey(file.absolutePath)) || {};
@@ -124,7 +136,7 @@ function buildBookLibrary(discovered, existingLibrary = {}, matches = {}) {
         format: path.extname(file.name).slice(1).toUpperCase(), addedAt: old.addedAt || existing.addedAt || new Date().toISOString()};
     }).sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
     const splitFromIds = groupRecords.get(group).filter(record => record.id !== existing.id).map(record => record.id);
-    output[id] = {...existing, id, localId: existing.localId || id, library: 'books',
+    output[id] = {...existing, id, localId: knownMatch?.localId || existing.localId || id, library: 'books',
       title: wasCollapsed ? group.title : existing.title || existing.name || group.title,
       name: wasCollapsed ? group.title : existing.name || existing.title || group.title,
       author: existing.author || existing.metadata?.author || group.author,

@@ -20,6 +20,15 @@ review rather than guessing where that metadata belongs. Exact-file bookmark
 lookup and preserved path aliases keep reading positions usable after ID/path
 normalization, without transferring a bookmark to a different novel.
 
+Older live scans used a hash of the exact ebook path as their metadata identity,
+while CLI scans used a filename slug. The shared scanner checks those historical
+path hashes and reconnects an existing match through `localId`, keeping the
+current row ID for collection membership. It chooses among verified identities
+using saved update times, never a title/author-only search. Historical metadata
+records and cover URLs are not rewritten. A read-only production inspection and
+an offline scan of its book-only API snapshot verified this recovery path before
+release; that dry run did not modify the server.
+
 Server-loaded matches are retained in memory; browser storage is an optional
 cache. Failed browser writes preserve the previous cache, and failed match loads
 show a retry message. Unreadable server match/edition-link storage fails closed
