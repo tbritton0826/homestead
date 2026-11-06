@@ -339,59 +339,14 @@ function stripExt(filename) {
 
 function getBookFolderInfo(fullPath) {
   const parts = splitRelativeParts("books", fullPath);
-
-  const formatFolders = [
-    "ebook",
-    "ebooks",
-    "audiobook",
-    "audiobooks",
-  ];
-
-  const formatIndex = parts.findIndex((part) =>
-    formatFolders.includes(part.toLowerCase())
-  );
-
-if (formatIndex !== -1) {
+  const parsed = require("../../src/server/book-library-scan.cjs").describeFile({name: path.basename(fullPath)});
+  const folders = parts.slice(0, -1);
+  const formatIndex = folders.findIndex(part => /^(?:e\s*books?|audio\s*books?|audio)$/i.test(part));
   return {
     author: parts[0] || "Unknown Author",
-    series: null,
-    title:
-      parts[formatIndex - 1] ||
-      stripExt(parts.at(-1) || "Unknown Book"),
-    format: parts[formatIndex],
-  };
-}
-
-  const mode = librarySettings.books.scanMode;
-
-  if (mode === "author-book") {
-    return {
-      author: parts[0] || "Unknown Author",
-      series: null,
-      title: parts[1] || "Unknown Book",
-    };
-  }
-
-  if (mode === "author-series-book") {
-    return {
-      author: parts[0] || "Unknown Author",
-      series: parts[1] || null,
-      title: parts[2] || "Unknown Book",
-    };
-  }
-
-  if (parts.length >= 4) {
-    return {
-      author: parts[0],
-      series: parts[1],
-      title: parts[2],
-    };
-  }
-
-  return {
-    author: parts[0] || "Unknown Author",
-    series: null,
-    title: parts[1] || "Unknown Book",
+    title: formatIndex > 1 ? parts[formatIndex - 1] : parsed.title,
+    series: parsed.series || (formatIndex > 1 ? parts.slice(1, formatIndex - 1) : folders.slice(1)).join(" / ") || null,
+    seriesIndex: parsed.seriesIndex,
   };
 }
 
@@ -1322,82 +1277,23 @@ async function scanAllLibraries() {
 }
 
 async function scanBooksLibrary(overrideFolders = null) {
-const bookDirs = overrideFolders?.length ? overrideFolders : getLibraryDirs("books");
-
-const files = [];
-
-for (const booksDir of bookDirs) {
-  if (!exists(booksDir)) continue;
-  files.push(...await walkFiles(booksDir));
-}
-  const entities = {};
-  const bookFiles = files.filter(
-  (file) =>
-    file.type === "ebook" ||
-    file.type === "audiobook" ||
-    file.type === "image"
-);
-
-  for (const file of bookFiles) {
-    const parsed = file.parsed || {};
-    const cleanTitle = stripExt(file.name);
-
-    const title = parsed.title || cleanTitle;
-    const author = parsed.author || "Unknown Author";
-    const series = parsed.series || null;
-
-    const id = `${author}-${series || "standalone"}-${title}`
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-
-    if (!entities[id]) {
-      entities[id] = {
-        id,
-        library: "books",
-        name: title,
-        metadata: {
-          title,
-          author,
-          series,
-        },
-        poster: null,
-        banner: null,
-        bio: null,
-        timeline: null,
-        files: [],
-        counts: {
-          images: 0,
-          videos: 0,
-          ebooks: 0,
-          audiobooks: 0,
-          audio: 0,
-          documents: 0,
-          total: 0,
-        },
-      };
-    }
-
-    entities[id].files.push(file);
-
-    if (file.type === "ebook") {
-      entities[id].counts.ebooks++;
-    }
-
-    if (file.type === "audiobook") {
-      entities[id].counts.audiobooks++;
-      entities[id].counts.audio++;
-    }
-
-    entities[id].counts.total++;
+  const bookDirs = overrideFolders?.length ? overrideFolders : [...new Set([
+    ...getLibraryDirs("books"),
+    ...(normalizeMappedFolders(setupConfig.folderMappings?.ebooks) || []),
+    ...(normalizeMappedFolders(setupConfig.folderMappings?.audiobooks) || []),
+  ])];
+  const files = [];
+  for (const root of bookDirs) {
+    if (!exists(root)) continue;
+    files.push(...(await walkFiles(root)).filter(file => /\.(?:epub|pdf|mobi|azw3?|cbz|cbr|mp3|m4b|m4a|flac|aac|ogg|wav)$/i.test(file.name))
+      .map(file => ({...file, root, absolutePath: file.sourcePath, type: /\.(?:epub|pdf|mobi|azw3?|cbz|cbr)$/i.test(file.name) ? "ebook" : "audiobook"})));
   }
-
-for (const book of Object.values(entities)) {
-  book.poster = findBookArtwork(book.files);
-  book.banner = findBookBanner(book.files);
-}
-
-  return entities;
+  const index = readJsonIfExists(mediaIndexPath);
+  const matchPath = path.join(dataRoot, "metadata-matches.json");
+  const matches = readJsonIfExists(matchPath);
+  if ((exists(mediaIndexPath) && !index) || (exists(matchPath) && (!matches || typeof matches !== "object" || Array.isArray(matches)))) throw new Error("Existing book index/matches could not be read. Original files have been preserved.");
+  const existing = index?.libraries?.books || {};
+  return require("../../src/server/book-library-scan.cjs").buildBookLibrary(files, existing, matches || {});
 }
 
 
