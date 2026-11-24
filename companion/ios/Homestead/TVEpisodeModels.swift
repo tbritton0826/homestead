@@ -18,7 +18,7 @@ struct TVEpisode: Identifiable, Hashable, Sendable {
         case "upcoming": return "Upcoming"
         case "requested": return "Requested"
         case "requesting": return "Sending request"
-        case "needs-attention": return "Request status uncertain · check Sonarr"
+        case "needs-attention": return "Needs attention · check Sonarr"
         case "downloading": return "Downloading"
         case "importing": return "Importing"
         case "not-indexed": return "In Sonarr · not available here"

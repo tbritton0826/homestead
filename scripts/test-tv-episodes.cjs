@@ -46,6 +46,9 @@ test('complete episodes combine exact local evidence, missing, upcoming, queue a
   assert.equal(result.episodes.find(e => e.id === '1:4').canSearch, false);
   assert.match(result.episodes.find(e => e.id === '1:2').artwork, /thetvdb/);
   assert.equal(f.state.posts.length, 0);
+  f.state.queue[0].trackedDownloadStatus = 'warning';
+  const failedQueue = await f.service.list({ ...f.context, fresh: true });
+  assert.equal(failedQueue.episodes.find(e => e.id === '1:5').status, 'needs-attention');
 });
 
 test('metadata reads are shared and cached, but local availability is always rechecked', async () => {

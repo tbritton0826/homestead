@@ -128,7 +128,8 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
       const date = row.airDateUtc || row.airDate, timestamp = date ? Date.parse(date) : NaN;
       const receipt = receiptPrefix ? submissions.get(`${receiptPrefix}:${row.id}`) : null;
       const receiptState = receipt && now() - receipt.at < 10 * 60000 ? receipt.status : null;
-      const state = file ? 'available' : queued ? (/import/i.test(queued.trackedDownloadState || '') ? 'importing' : 'downloading')
+      const queueProblem = queued && /failed|error|warning|blocked/i.test(`${queued.status || ''} ${queued.trackedDownloadStatus || ''} ${queued.trackedDownloadState || ''}`);
+      const state = file ? 'available' : queueProblem ? 'needs-attention' : queued ? (/import/i.test(queued.trackedDownloadState || '') ? 'importing' : 'downloading')
         : receiptState ? receiptState
         : row.hasFile ? 'not-indexed' : Number.isFinite(timestamp) ? (timestamp > now() ? 'upcoming' : 'missing') : 'unknown';
       const image = (row.images || []).find(image => image.coverType === 'screenshot') || row.images?.[0];
