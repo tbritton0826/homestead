@@ -60,13 +60,19 @@ final class ConnectionReliabilityTests: XCTestCase {
     func testCookieImportRejectsUnrelatedNamesDomainsPathsAndExpiredTokens() throws {
         let server = try XCTUnwrap(URL(string: "https://home.example:7312"))
         let now = Date()
-        let rejected = [
-            try makeCookie(name: "third_party"), try makeCookie(domain: "other.example"),
-            try makeCookie(domain: "example"), try makeCookie(path: "/admin"),
-            try makeCookie(expires: now.addingTimeInterval(-10)),
-            try makeCookie(value: String(repeating: "x", count: 4097))
+        let rejected: [[HTTPCookiePropertyKey: Any]] = [
+            [.name: "third_party"], [.domain: "other.example"], [.domain: "example"], [.path: "/admin"],
+            [.expires: now.addingTimeInterval(-10)], [.value: String(repeating: "x", count: 4097)]
         ]
-        for cookie in rejected { XCTAssertNil(SavedSessionCookie(cookie: cookie, server: server, now: now)) }
+        for override in rejected {
+            var properties: [HTTPCookiePropertyKey: Any] = [.name: "homestead_session", .domain: "home.example", .path: "/", .value: "generated-test-token", .secure: "TRUE"]
+            properties.merge(override) { _, value in value }
+            // Newer Foundation may reject malformed cookies at construction.
+            // If it accepts one, the importer must still reject it.
+            if let cookie = HTTPCookie(properties: properties) {
+                XCTAssertNil(SavedSessionCookie(cookie: cookie, server: server, now: now))
+            }
+        }
         let insecure = try XCTUnwrap(URL(string: "http://home.example:7312"))
         XCTAssertNil(SavedSessionCookie(cookie: try makeCookie(), server: insecure))
         XCTAssertNotNil(SavedSessionCookie(cookie: try makeCookie(secure: false), server: insecure))

@@ -99,6 +99,11 @@ struct ProfileMediaFile: Identifiable, Hashable, Sendable {
         guard let current = address, current.user == nil, current.password == nil,
               current.scheme == server.scheme, current.host == server.host, current.port == server.port,
               current.path.hasPrefix("/media/") || current.path == "/api/file" else { return nil }
+        // Validate before converting a media URL into /api/file's query. URL
+        // normalization after that conversion cannot inspect the embedded path.
+        let requestedFile = current.queryItems?.first(where: { $0.name == "path" })?.value ?? current.path
+        let decodedFile = (requestedFile.removingPercentEncoding ?? requestedFile).replacingOccurrences(of: "\\", with: "/")
+        guard !decodedFile.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
         if preview && current.path.hasPrefix("/media/") {
             address?.path = "/api/file"
             var query = current.queryItems ?? []
