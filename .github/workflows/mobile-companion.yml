@@ -1,5 +1,8 @@
 name: Check iOS companion
 on:
+  push:
+    branches: ['codex/mobile-connection-episodes']
+    paths: ['companion/ios/**', '.github/workflows/mobile-companion.yml']
   pull_request:
     paths: ['companion/ios/**', '.github/workflows/mobile-companion.yml']
   workflow_dispatch:
