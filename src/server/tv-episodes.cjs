@@ -84,7 +84,7 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
     const episodes = await json(`episode?seriesId=${selected.id}&includeImages=true`, { ttl: fresh ? 0 : 30000 });
     return { series: selected, episodes: Array.isArray(episodes) ? episodes : [] };
   }
-  async function list({ show, match, useSonarr, canSearch, fresh = false }) {
+  async function list({ show, match, useSonarr, canSearch, showId, fresh = false, includeReceipt = true }) {
     const files = await local(show), owned = new Map();
     for (const file of files) if (!owned.has(file.key)) owned.set(file.key, file.path);
     let source = { episodes: [] }, warning = '', queue = [], queueKnown = false;
@@ -101,12 +101,16 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
       } catch (error) { warning = error.message; }
     } else { warning = 'Local episodes only. Sonarr metadata and search require an enabled integration and an eligible plan.'; }
     const rows = new Map();
+    const receiptPrefix = source.series && includeReceipt ? scope({ showId, actor: '' }) : null;
     for (const row of source.episodes) {
       const s = integer(row.seasonNumber), e = integer(row.episodeNumber);
       if (s === null || e === null) continue;
       const key = `${s}:${e}`, file = owned.get(key), queued = queue.find(q => Number(q.episodeId ?? q.episode?.id) === Number(row.id));
       const date = row.airDateUtc || row.airDate, timestamp = date ? Date.parse(date) : NaN;
+      const receipt = receiptPrefix ? submissions.get(`${receiptPrefix}:${row.id}`) : null;
+      const receiptState = receipt && now() - receipt.at < 10 * 60000 ? receipt.status : null;
       const state = file ? 'available' : queued ? (/import/i.test(queued.trackedDownloadState || '') ? 'importing' : 'downloading')
+        : receiptState ? receiptState
         : row.hasFile ? 'not-indexed' : Number.isFinite(timestamp) ? (timestamp > now() ? 'upcoming' : 'missing') : 'unknown';
       const image = (row.images || []).find(image => image.coverType === 'screenshot') || row.images?.[0];
       const artwork = /^https:\/\//i.test(image?.remoteUrl || image?.url || '') ? (image.remoteUrl || image.url) : null;
@@ -123,7 +127,7 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
   async function missing(context, episodeId) {
     const id = integer(episodeId);
     if (!id) throw fail('Choose a valid episode.');
-    const snapshot = await list({ ...context, useSonarr: true, canSearch: true, fresh: true });
+    const snapshot = await list({ ...context, useSonarr: true, canSearch: true, fresh: true, includeReceipt: false });
     const episode = snapshot.episodes.find(row => Number(row.episodeId) === id);
     if (!episode) throw fail('This episode is not mapped to this local show.', 404);
     if (!episode.canSearch) throw fail('This episode is available, upcoming, already downloading, or its current status cannot be verified. Refresh first.', 409);
@@ -160,13 +164,18 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
     if (previous && now() - previous.at < 10 * 60000) return previous.promise;
     // Set before awaiting: concurrent taps and ambiguous provider failures may
     // never replay a download. Restart status comes from Sonarr's queue/files.
+    const receipt = { at: now(), status: 'requesting' };
     const submit = (async () => {
-      await missing(context, episodeId);
-      await json('release', { method: 'POST', body: { guid: release.guid, indexerId: release.indexerId, episodeId: integer(episodeId) }, timeout: 30000 });
-      cache.clear();
-      return { ok: true, status: 'requested', message: 'Release sent to Sonarr. Waiting for download/import confirmation.' };
+      try {
+        await missing(context, episodeId);
+        await json('release', { method: 'POST', body: { guid: release.guid, indexerId: release.indexerId, episodeId: integer(episodeId) }, timeout: 30000 });
+        receipt.status = 'requested';
+        cache.clear();
+        return { ok: true, status: 'requested', message: 'Release sent to Sonarr. Waiting for download/import confirmation.' };
+      } catch (error) { receipt.status = 'needs-attention'; throw error; }
     })();
-    submissions.set(dedupe, { at: now(), promise: submit });
+    receipt.promise = submit;
+    submissions.set(dedupe, receipt);
     if (submissions.size > 500) submissions.delete(submissions.keys().next().value);
     return submit;
   }

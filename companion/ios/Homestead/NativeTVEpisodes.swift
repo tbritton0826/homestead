@@ -124,7 +124,7 @@ private struct EpisodeReleaseSearch: View {
                     ForEach(releases) { release in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(release.title).font(.subheadline.bold())
-                            Text([release.quality, ByteCountFormatter.string(fromByteCount: Int64(min(release.size, Double(Int64.max / 2))), countStyle: .file), release.indexer].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption)
+                            Text(release.summary).font(.caption)
                             ForEach(release.rejections, id: \.self) { reason in Text(reason).font(.caption).foregroundStyle(.orange) }
                             Button("Download this release") { chosen = release }
                                 .buttonStyle(.bordered).disabled(!release.canDownload || loading || submitted)

@@ -92,6 +92,9 @@ test('interactive results do not grab; only the selected accepted cached release
   const receipt = await f.service.grab(f.context, { episodeId: 2, searchToken: result.searchToken, releaseId: '0' });
   assert.equal(receipt.status, 'requested');
   assert.deepEqual(f.state.posts, [{ guid: 'accepted', indexerId: 1, episodeId: 2 }]);
+  const refreshed = await f.service.list(f.context);
+  assert.equal(refreshed.episodes.find(e => e.id === '1:2').status, 'requested');
+  assert.equal(refreshed.episodes.find(e => e.id === '1:2').canSearch, false);
 });
 
 test('search/selection is account-bound, episode-bound and expires', async () => {
@@ -122,6 +125,16 @@ test('fresh queue/file checks prevent downloads that became available after sear
     await assert.rejects(f.service.grab(f.context, { episodeId: 2, searchToken: result.searchToken, releaseId: '0' }));
     assert.equal(f.state.posts.length, 0);
   }
+});
+
+test('two administrators cannot grab the same missing episode concurrently', async () => {
+  const f = fixture(), another = { ...f.context, actor: 'another-admin' };
+  const first = await f.service.search(f.context, 2), second = await f.service.search(another, 2);
+  await Promise.all([
+    f.service.grab(f.context, { episodeId: 2, searchToken: first.searchToken, releaseId: '0' }),
+    f.service.grab(another, { episodeId: 2, searchToken: second.searchToken, releaseId: '0' }),
+  ]);
+  assert.equal(f.state.posts.length, 1);
 });
 
 test('unavailable queue status never authorizes search; multi-episode and alternate numbering are explicit', async () => {

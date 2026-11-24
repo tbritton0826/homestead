@@ -17,6 +17,8 @@ struct TVEpisode: Identifiable, Hashable, Sendable {
         case "missing": return "Missing"
         case "upcoming": return "Upcoming"
         case "requested": return "Requested"
+        case "requesting": return "Sending request"
+        case "needs-attention": return "Request status uncertain · check Sonarr"
         case "downloading": return "Downloading"
         case "importing": return "Importing"
         case "not-indexed": return "In Sonarr · not available here"
@@ -73,6 +75,11 @@ struct TVRelease: Identifiable, Sendable {
     let size: Double
     let rejections: [String]
     let canDownload: Bool
+    var summary: String {
+        let boundedSize = size.isFinite ? min(max(0, size), Double(Int64.max / 2)) : 0
+        return [quality, ByteCountFormatter.string(fromByteCount: Int64(boundedSize), countStyle: .file), indexer]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
     init?(_ row: IndexValue) {
         guard let id = row["id"]?.text, let title = row["title"]?.text else { return nil }
         self.id = id; self.title = title
