@@ -1,0 +1,169 @@
+[
+  {
+    "id": "mcu",
+    "name": "Marvel Cinematic Universe",
+    "description": "Marvel Studios movies and shows grouped as a shared universe.",
+    "terms": [
+      "Iron Man",
+      "Captain America",
+      "Thor",
+      "Avengers",
+      "Guardians of the Galaxy",
+      "Ant-Man",
+      "Doctor Strange",
+      "Black Panther",
+      "Captain Marvel",
+      "WandaVision",
+      "Loki",
+      "Hawkeye",
+      "Moon Knight",
+      "Ms. Marvel",
+      "She-Hulk",
+      "Secret Invasion",
+      "Echo",
+      "Daredevil",
+      "Agent Carter",
+      "Agents of S.H.I.E.L.D.",
+      "Marvel One-Shot",
+      "MARVEL's One Shots",
+      "The Consultant",
+      "A Funny Thing Happened On The Way To Thor's Hammer",
+      "Item 47",
+      "All Hail the King",
+      "Shang-Chi",
+      "Eternals",
+      "Werewolf By Night",
+      "The Marvels",
+      "Agatha All Along",
+      "Ironheart",
+      "Thunderbolts",
+      "Fantastic Four"
+    ],
+    "defaultDisplay": "timeline"
+  },
+  {
+    "id": "arrowverse",
+    "name": "Arrowverse",
+    "description": "DC/CW connected television universe.",
+    "exactTerms": [
+      "Arrow",
+      "The Flash",
+      "Supergirl",
+      "DC's Legends of Tomorrow",
+      "Legends of Tomorrow",
+      "Batwoman",
+      "Black Lightning",
+      "Superman & Lois",
+      "Constantine",
+      "Vixen",
+      "Freedom Fighters: The Ray",
+      "Stargirl"
+    ],
+    "defaultDisplay": "episodes"
+  },
+  {
+    "id": "ncis",
+    "name": "NCIS Universe",
+    "description": "NCIS and connected spin-off shows.",
+    "exactTerms": [
+      "NCIS",
+      "NCIS: Los Angeles",
+      "NCIS: New Orleans",
+      "NCIS: Hawai'i",
+      "NCIS: Hawaii",
+      "NCIS: Hawai",
+      "NCIS: Sydney",
+      "NCIS: Origins"
+    ],
+    "defaultDisplay": "episodes"
+  },
+  {
+    "id": "star-wars",
+    "name": "Star Wars",
+    "description": "Star Wars movies, series, and specials.",
+    "terms": [
+      "Star Wars",
+      "The Mandalorian",
+      "Ahsoka",
+      "Andor",
+      "Obi-Wan Kenobi",
+      "The Book of Boba Fett",
+      "The Clone Wars",
+      "The Bad Batch",
+      "Star Wars Rebels",
+      "Skeleton Crew",
+      "Tales of the Jedi",
+      "Tales of the Empire",
+      "The Acolyte"
+    ]
+  },
+  {
+    "id": "star-trek",
+    "name": "Star Trek",
+    "description": "Star Trek movies and television series.",
+    "terms": [
+      "Star Trek",
+      "Strange New Worlds",
+      "Lower Decks",
+      "Deep Space Nine",
+      "The Next Generation"
+    ],
+    "exactTerms": [
+      "Star Trek: Discovery",
+      "Star Trek: Picard",
+      "Star Trek: Prodigy",
+      "Star Trek: Voyager",
+      "Star Trek: Enterprise",
+      "Star Trek: The Original Series"
+    ]
+  },
+  {
+    "id": "walking-dead",
+    "name": "The Walking Dead Universe",
+    "description": "The Walking Dead and connected spin-offs.",
+    "exactTerms": [
+      "The Walking Dead",
+      "Fear the Walking Dead",
+      "The Walking Dead: Dead City",
+      "The Walking Dead: Daryl Dixon",
+      "The Walking Dead: The Ones Who Live",
+      "The Walking Dead: World Beyond",
+      "Tales of the Walking Dead"
+    ]
+  },
+  {
+    "id": "alien-predator",
+    "name": "Alien / Predator",
+    "description": "Alien, Predator, and AVP titles.",
+    "exactTerms": [
+      "Alien",
+      "Aliens",
+      "Alien 3",
+      "Alien³",
+      "Alien: Covenant",
+      "Alien Resurrection",
+      "Alien: Resurrection",
+      "Alien: Romulus",
+      "Predator",
+      "Predator 2",
+      "Predators",
+      "The Predator",
+      "Prey",
+      "AVP",
+      "Alien vs. Predator",
+      "Aliens vs. Predator: Requiem",
+      "Prometheus"
+    ]
+  },
+  {
+    "id": "conjuring",
+    "name": "The Conjuring Universe",
+    "description": "The Conjuring, Annabelle, The Nun, and related films.",
+    "terms": [
+      "The Conjuring",
+      "Annabelle",
+      "The Nun",
+      "The Curse of La Llorona"
+    ]
+  }
+]

@@ -25,4 +25,5 @@ jobs:
       - run: npm ci
       - run: npm run test:customer
       - run: npm test
+      - run: npm run test:tv-episodes
       - run: npm run build

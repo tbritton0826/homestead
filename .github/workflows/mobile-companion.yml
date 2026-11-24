@@ -1,0 +1,31 @@
+name: Check iOS companion
+on:
+  push:
+    branches: ['codex/mobile-connection-episodes']
+    paths: ['companion/ios/**', '.github/workflows/mobile-companion.yml']
+  pull_request:
+    paths: ['companion/ios/**', '.github/workflows/mobile-companion.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    defaults:
+      run:
+        working-directory: companion/ios
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: xcodebuild -version
+      - run: node --test Tests/*.test.cjs
+      - run: swift test
+      - run: xcodebuild -project Homestead.xcodeproj -scheme Homestead -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
