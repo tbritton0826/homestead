@@ -1,8 +1,27 @@
 const crypto = require('node:crypto');
-const { videoFiles } = require('./request-lifecycle.cjs');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const integer = value => /^\d+$/.test(String(value)) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
 const text = value => String(value || '').slice(0, 500);
+
+function localVideoFiles(show) {
+  const result = new Set(), seen = new Set();
+  function walk(value) {
+    if (!value) return;
+    if (Array.isArray(value)) return value.forEach(walk);
+    if (typeof value === 'object') {
+      if (seen.has(value)) return;
+      seen.add(value);
+      const file = value.sourcePath || value.filePath || value.path;
+      if (typeof file === 'string') walk(file);
+      for (const field of ['files', 'episodes', 'seasons', 'versions', 'localVersions']) {
+        if (value[field] && typeof value[field] === 'object') Object.values(value[field]).forEach(walk);
+      }
+    } else if (typeof value === 'string' && /\.(mp4|mkv|avi|mov|webm|m4v|ts|m2ts|wmv)$/i.test(value) &&
+      !/(?:^|[\\/ _.-])(trailer|sample)(?:[\\/ _.-]|$)/i.test(value)) result.add(value);
+  }
+  walk(show);
+  return [...result];
+}
 
 function episodeNumbers(file) {
   const match = String(file).match(/(?:^|[^a-z0-9])s(\d{1,3})e(\d{1,3})((?:e\d{1,3}|-e?\d{1,3})*)/i);
@@ -60,7 +79,7 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
   async function local(show) {
     const rows = [];
     // Chunk filesystem probes so a large show does not monopolize the disk.
-    const files = videoFiles(show);
+    const files = localVideoFiles(show);
     for (let i = 0; i < files.length; i += 16) {
       const chunk = await Promise.all(files.slice(i, i + 16).map(async file => ({ file, exists: await isFile(file) })));
       rows.push(...chunk.filter(row => row.exists).flatMap(row => episodeNumbers(row.file).map(key => ({ key, path: row.file }))));
@@ -182,7 +201,7 @@ function createTVEpisodeService({ getConfig, fetchImpl = fetch, isFile, lookupTV
   return { list, search, grab };
 }
 
-function registerTVEpisodes(app, { service, access, resolveShow, useSonarr }) {
+function registerTVEpisodes(app, { service, access, resolveShow, useSonarr, requestConfigured = () => false }) {
   function context(req, values) {
     if (!access.canAccessLibrary(req, 'tv')) throw fail('TV library access denied.', 403);
     const actor = access.accessContext(req).user;
@@ -191,6 +210,7 @@ function registerTVEpisodes(app, { service, access, resolveShow, useSonarr }) {
     const { show, match } = resolveShow(req, showId);
     const allowed = useSonarr();
     return { showId, show, match, actor: actor?.id || 'local-owner', useSonarr: allowed,
+      canRequest: allowed && requestConfigured(),
       canSearch: allowed && ['owner', 'admin'].includes(actor?.role) };
   }
   function handler(action) {
@@ -206,7 +226,7 @@ function registerTVEpisodes(app, { service, access, resolveShow, useSonarr }) {
         }
         const result = action === 'list' ? await service.list(c) : action === 'search' ? await service.search(c, values.episodeId) : await service.grab(c, values);
         if (action === 'grab') access.recordAudit?.('tv.episode.requested', req, { showId: c.showId, episodeId: values.episodeId });
-        res.json(result);
+        res.json(action === 'list' ? { ...result, canRequest: c.canRequest } : result);
       } catch (error) { res.status(error.status || 500).json({ ok: false, message: error.status ? error.message : 'Episode action could not complete. Refresh status before retrying.' }); }
     };
   }

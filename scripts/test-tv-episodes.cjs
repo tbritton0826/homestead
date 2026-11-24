@@ -58,6 +58,16 @@ test('metadata reads are shared and cached, but local availability is always rec
   assert.equal(result.episodes.find(e => e.id === '1:1').status, 'missing');
 });
 
+test('supported string and filePath index records retain verified availability and never include trailers', async () => {
+  const f = fixture();
+  f.context.show.files = ['/tv/Show/S01E01.mkv', { filePath: '/tv/Show/S00E01-E02.mkv' }, '/tv/Show/sample-S01E02.mkv'];
+  f.files.add('/tv/Show/sample-S01E02.mkv');
+  const result = await f.service.list(f.context);
+  assert.equal(result.episodes.find(e => e.id === '1:1').status, 'available');
+  assert.equal(result.episodes.find(e => e.id === '0:2').status, 'available');
+  assert.equal(result.episodes.find(e => e.id === '1:2').status, 'missing');
+});
+
 test('provider outage or ineligible plan keeps local files without leaking credentials', async () => {
   const f = fixture({ fail: () => true });
   const result = await f.service.list(f.context);
@@ -168,6 +178,8 @@ test('HTTP routes enforce session, TV permission, paid integration, admin role a
   f.set({ signedIn: false }); assert.equal((await f.post()).status, 401);
   f.set({ signedIn: true, allowed: false }); assert.equal((await f.post()).status, 403);
   f.set({ allowed: true, plan: false }); assert.equal((await f.post()).status, 403);
+  const freeList = await (await fetch(f.base + '/api/tv/episodes?showId=tv:show')).json();
+  assert.equal(freeList.canSearch, false); assert.equal(freeList.canRequest, false);
   f.set({ plan: true, role: 'member' }); assert.equal((await f.post()).status, 403);
   f.set({ role: 'owner' }); assert.equal((await f.post({}, 'https://attacker.invalid')).status, 403);
   const result = await f.post({}, f.base);

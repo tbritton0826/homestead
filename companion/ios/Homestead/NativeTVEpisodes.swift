@@ -70,7 +70,7 @@ struct NativeTVEpisodes: View {
                 }
             }
             if visible.isEmpty && !loading { Text("No downloaded episodes in this season. Refresh to check episode details.").foregroundStyle(.secondary) }
-            if item.detail.providerID != nil && hasMissing {
+            if item.detail.providerID != nil && hasMissing && response?["canRequest"]?.flag != false {
                 Button("Request missing seasons or episodes") { requesting = true }
                     .disabled(client == nil)
             }

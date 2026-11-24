@@ -5629,6 +5629,7 @@ function requestLocalEvidence(req, row) {
 registerTVEpisodes(app, {
   access: homesteadAccess,
   useSonarr: () => subscriptionService.has("externalIntegrations"),
+  requestConfigured: () => { const { baseUrl, apiKey } = getSeerrConfig(); return Boolean(baseUrl && apiKey); },
   resolveShow(req, showId) {
     const index = homesteadAccess.filterMediaIndex(req, readJsonFile(path.join(dataDir, "media-index.json"), {}));
     const candidates = Object.entries(index.libraries?.tv || {}).filter(([key, row]) =>

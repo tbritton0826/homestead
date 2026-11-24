@@ -50,7 +50,7 @@ acceptance remains required, as described in `companion/ios/V3.21-QA.md`.
 
 ## Validation
 
-- `npm run test:tv-episodes`: 13 passing behavior/API tests, using fake Sonarr
+- `npm run test:tv-episodes`: 14 passing behavior/API tests, using fake Sonarr
   responses and temporary loopback HTTP servers. No real indexers/downloads.
 - Full `npm test` passed and `npm run build` passed. The existing large-chunk
   build advisory remains.
