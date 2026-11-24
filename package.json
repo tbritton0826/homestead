@@ -4,6 +4,7 @@
   "version": "0.6.8.64",
   "type": "module",
   "scripts": {
+    "test:tv-episodes": "node --test scripts/test-tv-episodes.cjs",
     "test:inventory-native": "node --test scripts/test-native-inventory.cjs scripts/test-tcg-intake.cjs",
     "test:tcg-browser": "node scripts/verify-tcg-intake-browser.mjs",
     "lint:inventory-native": "eslint --config eslint.mobile-v12.config.mjs src/server/native-inventory.cjs src/server/tcg-pricing.cjs src/server/tcg-organizations.cjs scripts/test-native-inventory.cjs scripts/test-tcg-intake.cjs scripts/verify-tcg-intake-browser.mjs src/server/tcg-price-lookup.cjs scripts/test-v314.cjs scripts/verify-book-reader-browser.mjs src/server/photo-library.cjs src/server/image-preview.cjs scripts/test-v315.cjs",

@@ -15,6 +15,7 @@
 /outputs
 /work
 /community-apps-repository
+/companion
 
 npm-debug.log
 *.tar

@@ -30,6 +30,7 @@ const { createActivityJobStore } = require("./src/server/activity-jobs.cjs");
 const { parseTesseractTsv, tsvToReadableText, parsePersonalScheduleText, parsePositionedSchedule, applyCellTextRecovery, hoursBetween: recognizedScheduleHoursBetween } = require("./src/server/schedule-recognition.cjs");
 const { parseBillOcrText } = require("./src/server/bill-recognition.cjs");
 const requestLifecycle = require("./src/server/request-lifecycle.cjs");
+const { createTVEpisodeService, registerTVEpisodes } = require("./src/server/tv-episodes.cjs");
 const { applyArtwork, registerMediaArtwork } = require("./src/server/media-artwork.cjs");
 const seerrReader = requestLifecycle.createSeerrReader(() => getSeerrConfig());
 const requestImportScanAttempts = new Map();
@@ -5624,6 +5625,29 @@ function requestLocalEvidence(req, row) {
     (item) => { if (!matchCache.has(item)) matchCache.set(item, findStoredMetadataMatch(matches, row.library, item)); return matchCache.get(item); },
     (file) => { if (!fileCache.has(file)) { try { fileCache.set(file, fs.statSync(file).isFile()); } catch { fileCache.set(file, false); } } return fileCache.get(file); });
 }
+
+registerTVEpisodes(app, {
+  access: homesteadAccess,
+  useSonarr: () => subscriptionService.has("externalIntegrations"),
+  resolveShow(req, showId) {
+    const index = homesteadAccess.filterMediaIndex(req, readJsonFile(path.join(dataDir, "media-index.json"), {}));
+    const candidates = Object.entries(index.libraries?.tv || {}).filter(([key, row]) =>
+      [key, row.id, row.localId].filter(Boolean).map(String).includes(showId));
+    if (candidates.length !== 1) throw Object.assign(new Error("This TV show is no longer available in your library."), { status: 404 });
+    const show = candidates[0][1];
+    return { show, match: findStoredMetadataMatch(readMetadataMatches(), "tv", show) || {} };
+  },
+  service: createTVEpisodeService({
+    lookupTVDB: async tmdbId => (await seerrReader.json(`tv/${tmdbId}`, 3600000))?.externalIds?.tvdbId,
+    getConfig: () => {
+      const integration = requestSearchAgainIntegration("tv");
+      const setup = readSetupConfig();
+      const settings = setup?.integrationSettings?.sonarr || setup?.integrations?.sonarr || {};
+      return { ...integration, enabled: settings.enabled !== false };
+    },
+    isFile: async file => { try { return (await fs.promises.stat(file)).isFile(); } catch { return false; } },
+  }),
+});
 
 function reconcileSeerrRequest(req, row, mediaInfo = {}, requestStatus) {
   const owned = requestLocalEvidence(req, row);
