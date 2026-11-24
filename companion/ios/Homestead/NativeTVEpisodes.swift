@@ -16,6 +16,10 @@ struct NativeTVEpisodes: View {
     private var active: Int? { selected.flatMap { numbers.contains($0) ? $0 : nil } ?? numbers.first(where: { $0 > 0 }) ?? numbers.first }
     private var visible: [TVEpisode] { episodes.filter { $0.season == active } }
     private var playback: [ProfileMediaFile] { visible.compactMap(\.file) }
+    private var hasMissing: Bool {
+        seasons.contains { ($0.total ?? $0.available) > $0.available } ||
+            episodes.contains { $0.file == nil && ["missing", "unknown"].contains($0.status) }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -66,7 +70,7 @@ struct NativeTVEpisodes: View {
                 }
             }
             if visible.isEmpty && !loading { Text("No downloaded episodes in this season. Refresh to check episode details.").foregroundStyle(.secondary) }
-            if item.detail.providerID != nil && response?["canSearch"]?.flag != true {
+            if item.detail.providerID != nil && hasMissing {
                 Button("Request missing seasons or episodes") { requesting = true }
                     .disabled(client == nil)
             }

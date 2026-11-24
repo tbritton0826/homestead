@@ -75,13 +75,13 @@ struct MediaFeatureDetails: View {
                     Button("Retry") { Task { await load() } }.disabled(loading)
                 }
             }
+            if loading { ProgressView("Updating cast and related titles…").font(.caption) }
             MediaCastRibbon(people: detail.cast, client: client)
             MediaRelatedRibbon(items: detail.related, client: client)
             if !loading && error == nil && detail.cast.isEmpty && detail.related.isEmpty {
                 Text("Cast and related titles appear when matching metadata is available.").font(.caption).foregroundStyle(.secondary)
             }
-        }.homesteadLoading(loading, message: "Loading cast and related titles…")
-            .task(id: item.id) { await load() }
+        }.task(id: item.id) { await load() }
     }
     @MainActor private func load() async {
         guard !loading, let client, let id = item.detail.providerID else { return }
